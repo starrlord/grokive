@@ -27,7 +27,7 @@
   let lb = $state(null); // { list, index, autoAdvance, title }
   let editing = $state(null); // playlist being edited
   let showFilters = $state(false);
-  let sentinel;
+  let sentinel = $state(null);
   let reqId = 0;
 
   const targetHeight = $derived($mode === 'editorial' ? 360 : 240);
@@ -81,10 +81,20 @@
     loadPlaylists();
     loadSettings();
     await refreshFacets();
+  });
+
+  // Re-attach the infinite-scroll observer whenever the sentinel mounts/remounts.
+  // The sentinel only exists outside the Canvases view, so it's destroyed and
+  // recreated as the user switches views — keying the effect on `sentinel` ($state)
+  // re-observes the fresh node and disconnects the stale observer. `items`/`total`/
+  // `loading` are read inside the callback (not tracked), so this only re-runs when
+  // the sentinel element itself changes.
+  $effect(() => {
+    if (!sentinel) return;
     const io = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && items.length < total && !loading) load(false);
     }, { rootMargin: '900px' });
-    if (sentinel) io.observe(sentinel);
+    io.observe(sentinel);
     return () => io.disconnect();
   });
 

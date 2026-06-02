@@ -2,7 +2,13 @@
 FROM node:22-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+# Drop the lockfile before install so npm fully re-resolves optional deps for THIS
+# build platform (Linux/musl). Tailwind 4's Oxide engine (and Rollup/Lightning CSS)
+# ship per-platform native binaries; npm won't install the linux-musl ones from a
+# lockfile generated on another OS (e.g. Windows) — see npm/cli#4828. The error even
+# instructs: "remove both package-lock.json and node_modules". Versions are still
+# pinned by semver ranges in package.json.
+RUN rm -f package-lock.json && npm install --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 

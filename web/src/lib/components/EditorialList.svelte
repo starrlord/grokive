@@ -29,7 +29,7 @@
                class="h-full w-full object-contain transition-transform duration-500 group-hover:scale-[1.02]" />
         {/if}
         {#if it.media_type === 'video'}
-          <span class="absolute left-3 top-3 grid h-11 w-11 place-items-center rounded-full bg-black/55 text-white backdrop-blur">▶</span>
+          <span class="absolute left-3 top-3 grid h-11 w-11 place-items-center rounded-full bg-black/55 text-white backdrop-blur-sm">▶</span>
         {/if}
       </button>
 

@@ -17,9 +17,12 @@
   ];
 </script>
 
-<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-black/65 p-4 backdrop-blur"
+<svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
+
+<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
+<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-black/65 p-4 backdrop-blur-sm" role="presentation"
      onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-card">
+  <div class="panel flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Filters" tabindex="-1">
     <div class="flex items-center gap-3 border-b border-line p-4">
       <input class="flex-1 rounded-full border border-line bg-[var(--surface-2)] px-4 py-2 text-sm outline-none" placeholder="Filter tags…" bind:value={q} />
       <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white" onclick={onclose}>Done</button>
@@ -30,7 +33,7 @@
         <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Media type</div>
         <div class="inline-grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
           {#each types as t}
-            <button class="rounded-md px-5 py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] shadow' : 'text-muted'}" onclick={() => setMediaType(t.id)}>{t.label}</button>
+            <button class="rounded-md px-5 py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] shadow-sm' : 'text-muted'}" onclick={() => setMediaType(t.id)}>{t.label}</button>
           {/each}
         </div>
       </div>

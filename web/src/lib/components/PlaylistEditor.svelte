@@ -56,8 +56,12 @@
   }
 </script>
 
-<div class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
-  <div class="panel flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-card">
+<!-- `!confirming` so Escape closes the delete-confirm dialog (its own handler) before the editor. -->
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && !confirming) close(); }} />
+
+<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
+<div class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
+  <div class="panel flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Edit playlist" tabindex="-1">
     <div class="flex items-center gap-3 border-b border-line p-4">
       <input class="flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-bold outline-none" bind:value={name} maxlength="80" />
       <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white" onclick={close}>Done</button>
@@ -67,18 +71,19 @@
     <div class="flex flex-col gap-2 overflow-auto p-4">
       {#each ids as id, idx (id)}
         {@const it = media[id]}
-        <div class="flex items-start gap-2.5 rounded-lg border border-line bg-[var(--surface-2)] p-2"
+        <!-- Drag-to-reorder is a pointer enhancement; keyboard users reorder with the ▲/▼ buttons. -->
+        <div class="flex items-start gap-2.5 rounded-lg border border-line bg-[var(--surface-2)] p-2" role="presentation"
              draggable="true"
              ondragstart={() => (dragId = id)}
              ondragover={(e) => e.preventDefault()}
              ondrop={() => onDrop(id)}>
           <span class="cursor-grab px-1 pt-1.5 text-muted">☰</span>
-          {#if it?.thumb}<img src={it.thumb} alt="" class="h-10 w-14 shrink-0 rounded object-cover" />{:else}<span class="h-10 w-14 shrink-0 rounded bg-black/40"></span>{/if}
+          {#if it?.thumb}<img src={it.thumb} alt="" class="h-10 w-14 shrink-0 rounded-sm object-cover" />{:else}<span class="h-10 w-14 shrink-0 rounded-sm bg-black/40"></span>{/if}
           <span class="w-5 shrink-0 pt-0.5 text-right text-xs font-bold text-muted">{idx + 1}</span>
           <span class="min-w-0 flex-1 break-words pt-0.5 text-sm leading-snug">{it?.prompt || it?.local_path?.split('/').pop() || id}</span>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded border border-line" disabled={idx === 0} onclick={() => move(id, -1)}>▲</button>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded border border-line" disabled={idx === ids.length - 1} onclick={() => move(id, 1)}>▼</button>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded border border-line" onclick={() => remove(id)}>×</button>
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" disabled={idx === 0} onclick={() => move(id, -1)}>▲</button>
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" disabled={idx === ids.length - 1} onclick={() => move(id, 1)}>▼</button>
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" onclick={() => remove(id)}>×</button>
         </div>
       {/each}
       {#if !ids.length}<p class="py-6 text-center text-sm text-muted">This playlist is empty.</p>{/if}

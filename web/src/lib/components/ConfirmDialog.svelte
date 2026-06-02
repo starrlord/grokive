@@ -19,9 +19,10 @@
 
 <svelte:window on:keydown={onkey} />
 
-<div use:portal class="fixed inset-0 z-[70] grid place-items-center bg-black/65 p-4 backdrop-blur"
+<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (window handler) and the buttons. -->
+<div use:portal class="fixed inset-0 z-[70] grid place-items-center bg-black/65 p-4 backdrop-blur-sm" role="presentation"
      transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget) oncancel(); }}>
-  <div class="panel w-full max-w-sm rounded-2xl p-6 text-center" transition:fly={{ y: 16, duration: 160 }}>
+  <div class="panel w-full max-w-sm rounded-2xl p-6 text-center" role="dialog" aria-modal="true" aria-label={title} tabindex="-1" transition:fly={{ y: 16, duration: 160 }}>
     <div class="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-full {danger ? 'bg-red-500/15 text-red-400' : 'text-[var(--accent)]'}"
          style={danger ? '' : 'background: color-mix(in srgb, var(--accent) 15%, transparent)'}>
       {#if danger}

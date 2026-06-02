@@ -18,7 +18,7 @@
     <div class="grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
       {#each types as t}
         <button type="button"
-          class="rounded-md py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] text-ink shadow' : 'text-muted'}"
+          class="rounded-md py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted'}"
           onclick={() => setMediaType(t.id)}>{t.label}</button>
       {/each}
     </div>

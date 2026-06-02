@@ -129,9 +129,9 @@
 <svelte:window on:keydown={onkey} />
 
 {#if item}
-  <div class="fixed inset-0 z-50 bg-black/92 backdrop-blur" role="dialog" aria-modal="true">
+  <div class="fixed inset-0 z-50 bg-black/92 backdrop-blur-sm" role="dialog" aria-modal="true">
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
-    <div bind:this={stageEl} class="absolute inset-0 grid place-items-center p-2 sm:p-4"
+    <div bind:this={stageEl} class="absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
          onpointerdown={enableSound}
          onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
       {#if item.media_type === 'video'}
@@ -182,7 +182,7 @@
            transition:fly={{ y: 240, duration: 180 }}>
         <div class="mb-2 flex items-start gap-3">
           <p class="flex-1 leading-relaxed">{item.prompt || 'Untitled prompt'}</p>
-          <button class="shrink-0 rounded border border-line px-2 py-0.5 text-xs" onclick={() => (showInfo = false)}>Hide</button>
+          <button class="shrink-0 rounded-sm border border-line px-2 py-0.5 text-xs" onclick={() => (showInfo = false)}>Hide</button>
         </div>
         <p class="mb-3 text-sm text-muted">
           {[item.media_type, item.model, (item.created_at || '').slice(0, 10), (item.href || '').split('/').pop()].filter(Boolean).join('  ·  ')}

@@ -41,7 +41,8 @@
         {@const it = cell.item}
         {@const fav = $favorites.has(it.id)}
         {@const sel = selection.has(it.id)}
-        <div class="group relative shrink-0 overflow-hidden rounded-card bg-surface-2"
+        <!-- Mouse handlers only position a hover tooltip; the real click target is the Open button below. -->
+        <div class="group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
              class:ring-2={sel} style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)"
              onmousemove={(e) => { if (selectMode) showTip(e, it.prompt); }}
              onmouseleave={() => (tip = null)}>

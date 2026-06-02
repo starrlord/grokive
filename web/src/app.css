@@ -1,6 +1,19 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
+
+/* Tailwind v4 theme: map utility namespaces (bg-surface, text-ink, border-line,
+   rounded-card, …) onto our themeable CSS variables. `inline` makes the
+   generated utilities reference --bg / --surface / … directly, so they track
+   the runtime theme set on :root[data-theme] below. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --radius-card: var(--radius);
+}
 
 /* ---------------------------------------------------------------------------
    Design tokens. Theme (dark/light) drives the palette; mode (cinematic/

@@ -73,7 +73,7 @@
   <div use:portal class="panel fixed bottom-4 right-4 z-[55] w-[min(680px,calc(100vw-2rem))] overflow-hidden rounded-card">
     <div class="flex items-center justify-between border-b border-line px-4 py-2.5 text-sm font-semibold">
       <span>Job log</span>
-      <button class="rounded border border-line px-2 py-0.5 text-xs" onclick={() => (showLog = false)}>Close</button>
+      <button class="rounded-sm border border-line px-2 py-0.5 text-xs" onclick={() => (showLog = false)}>Close</button>
     </div>
     <pre class="m-0 max-h-[46vh] overflow-auto whitespace-pre-wrap break-words p-3.5 font-mono text-xs leading-relaxed text-green-200">{(status.log || []).join('\n') || 'No output yet.'}</pre>
   </div>

@@ -55,8 +55,11 @@
   }
 </script>
 
-<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-black/65 p-4 backdrop-blur" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel w-full max-w-2xl overflow-hidden rounded-card p-5">
+<svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
+
+<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the buttons inside. -->
+<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-black/65 p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
+  <div class="panel w-full max-w-2xl overflow-hidden rounded-card p-5" role="dialog" aria-modal="true" aria-label="Config" tabindex="-1">
     <h2 class="mb-3 text-lg font-bold">Config</h2>
 
     <h3 class="mb-2 font-bold">Appearance</h3>
@@ -73,14 +76,14 @@
     <hr class="my-4 border-line" />
 
     <h3 class="mb-2 font-bold">Grok account</h3>
-    <p class="mb-2 text-sm text-muted">Paste the <code class="rounded bg-white/10 px-1">Copy as cURL (bash)</code> request from <code class="rounded bg-white/10 px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
+    <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-white/10 px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-white/10 px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
     <textarea class="h-40 w-full resize-y rounded-lg border border-line bg-black/30 p-3 font-mono text-xs outline-none"
       placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
     <p class="mt-1 text-xs text-muted">{curlNote}</p>
 
     <hr class="my-4 border-line" />
     <h3 class="mb-1 font-bold">Subtitles (Whisper)</h3>
-    <p class="mb-2 text-sm text-muted">Optional whisper-asr-webservice endpoint, e.g. <code class="rounded bg-white/10 px-1">http://192.168.1.10:9000/asr</code></p>
+    <p class="mb-2 text-sm text-muted">Optional whisper-asr-webservice endpoint, e.g. <code class="rounded-sm bg-white/10 px-1">http://192.168.1.10:9000/asr</code></p>
     <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
       placeholder={envLocked ? 'Set by WHISPER_SERVER_URL env var' : 'http://host:9000/asr'} bind:value={whisper} disabled={envLocked} />
     <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
