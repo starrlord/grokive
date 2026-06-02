@@ -1,0 +1,819 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import re
+import shlex
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+import httpx
+from curl_cffi import requests as cffi_requests
+from curl_cffi.requests.exceptions import RequestException as CffiRequestException
+
+
+DEFAULT_METADATA = Path("metadata.json")
+DEFAULT_FAILURES = Path("failed_downloads.json")
+DEFAULT_DELETED = Path("deleted_ids.json")
+# Root holding media/, thumbnails/ and the built galleries. Files are written under
+# here, but local_path is stored relative to this root so the galleries resolve it
+# the same way regardless of where the repo lives.
+GALLERY_ROOT = Path("gallery")
+# IDs the user deleted via the web UI. Populated in main(); process_item refuses to
+# (re)download anything in here, so a deleted item never comes back on the next sync.
+DELETED_IDS: set[str] = set()
+GROK_FAVORITES_ENDPOINT = "https://grok.com/rest/media/post/list"
+GROK_FAVORITES_FILTER = "MEDIA_POST_SOURCE_LIKED"
+GROK_CANVAS_LIST_ENDPOINT = "https://grok.com/rest/media/canvas/list"
+GROK_CANVAS_GET_ENDPOINT = "https://grok.com/rest/media/canvas/get"
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mpeg", ".mpg"}
+MIME_EXT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/avif": ".avif",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+}
+PROMPT_KEYS = {"prompt", "text", "query", "user_prompt", "input_prompt", "caption"}
+ID_KEYS = {"id", "generation_id", "media_id", "asset_id", "uuid"}
+DATE_KEYS = {"created_at", "createdAt", "createTime", "createdTime", "timestamp", "time", "date"}
+NEXT_KEYS = {"next", "next_cursor", "nextCursor", "cursor", "pagination_token", "continuation"}
+MODEL_KEYS = {"model", "modelName", "modelId"}
+
+
+@dataclass
+class RequestSpec:
+    method: str
+    url: str
+    headers: dict[str, str]
+    cookies: dict[str, str]
+    body: str | None
+
+    def headers_with_cookies(self) -> dict[str, str]:
+        """Headers plus a folded-in Cookie header.
+
+        httpx deprecated per-request ``cookies=``; fold them into the Cookie
+        header instead (unless one is already present from the captured cURL).
+        """
+        headers = dict(self.headers)
+        if self.cookies and not any(k.lower() == "cookie" for k in headers):
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        return headers
+
+
+@dataclass
+class MediaItem:
+    id: str
+    prompt: str
+    created_at: str | None
+    media_type: str
+    model: str | None
+    parent_id: str | None
+    source_url: str
+    local_path: str
+    canvas_id: str | None = None
+    canvas_name: str | None = None
+
+
+def parse_curl_samples(path: Path) -> list[RequestSpec]:
+    text = path.read_text(encoding="utf-8")
+    commands = re.split(r"(?=^curl(?:\.exe)?\s)", text, flags=re.MULTILINE)
+    specs = []
+    for command in commands:
+        command = command.strip()
+        if not re.match(r"^curl(?:\.exe)?\s", command):
+            continue
+        try:
+            specs.append(parse_curl(command))
+        except ValueError as exc:
+            print(f"skipping cURL block: {exc}")
+    if not specs:
+        raise SystemExit(f"No curl commands found in {path}")
+    return specs
+
+
+def parse_curl(command: str) -> RequestSpec:
+    command = command.replace("\\\n", " ")
+    parts = shlex.split(command, posix=True)
+    if not parts or parts[0] not in {"curl", "curl.exe"}:
+        raise ValueError("curl command must start with curl")
+
+    method = "GET"
+    url = ""
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] = {}
+    body: str | None = None
+    i = 1
+
+    while i < len(parts):
+        part = parts[i]
+        if part in {"-X", "--request"}:
+            i += 1
+            method = parts[i].upper()
+        elif part in {"-H", "--header"}:
+            i += 1
+            name, _, value = parts[i].partition(":")
+            if name and _:
+                if name.lower() == "cookie":
+                    cookies.update(parse_cookie_header(value.strip()))
+                else:
+                    headers[name.strip()] = value.strip()
+        elif part in {"-b", "--cookie", "--cookie-jar"}:
+            i += 1
+            cookies.update(parse_cookie_header(parts[i]))
+        elif part in {"--data", "--data-raw", "--data-binary", "-d"}:
+            i += 1
+            body = parts[i]
+            if method == "GET":
+                method = "POST"
+        elif part.startswith("http://") or part.startswith("https://"):
+            url = part
+        i += 1
+
+    if not url:
+        match = re.search(r"""['"]?(https?://[^'"\s\\;]+)""", command)
+        if match:
+            url = match.group(1)
+        else:
+            raise ValueError("Could not find URL in curl command")
+    return RequestSpec(method=method, url=url, headers=headers, cookies=cookies, body=body)
+
+
+def parse_cookie_header(value: str) -> dict[str, str]:
+    cookies = {}
+    for chunk in value.split(";"):
+        name, sep, val = chunk.strip().partition("=")
+        if name and sep:
+            cookies[name] = val
+    return cookies
+
+
+def grok_favorites_spec(auth_spec: RequestSpec, page_size: int) -> RequestSpec:
+    headers = dict(auth_spec.headers)
+    headers["Content-Type"] = "application/json"
+    return RequestSpec(
+        method="POST",
+        url=GROK_FAVORITES_ENDPOINT,
+        headers=headers,
+        cookies=auth_spec.cookies,
+        body=json.dumps(
+            {"limit": page_size, "filter": {"source": GROK_FAVORITES_FILTER}},
+            separators=(",", ":"),
+        ),
+    )
+
+
+def grok_canvas_list_spec(auth_spec: RequestSpec) -> RequestSpec:
+    headers = dict(auth_spec.headers)
+    headers["Content-Type"] = "application/json"
+    return RequestSpec(
+        method="POST",
+        url=GROK_CANVAS_LIST_ENDPOINT,
+        headers=headers,
+        cookies=auth_spec.cookies,
+        body="{}",
+    )
+
+
+def grok_canvas_get_spec(auth_spec: RequestSpec, canvas_id: str) -> RequestSpec:
+    headers = dict(auth_spec.headers)
+    headers["Content-Type"] = "application/json"
+    return RequestSpec(
+        method="POST",
+        url=GROK_CANVAS_GET_ENDPOINT,
+        headers=headers,
+        cookies=auth_spec.cookies,
+        body=json.dumps({"id": canvas_id}, separators=(",", ":")),
+    )
+
+
+def list_grok_canvases(client: httpx.Client, auth_spec: RequestSpec) -> list[tuple[str, str]]:
+    """Return (id, name) for every Agent canvas/document on /imagine/saved."""
+    data = request_json_with_backoff(client, grok_canvas_list_spec(auth_spec))
+    documents = data.get("documents", []) if isinstance(data, dict) else []
+    canvases = []
+    for doc in documents:
+        if isinstance(doc, dict) and doc.get("id"):
+            canvases.append((str(doc["id"]), str(doc.get("name") or doc["id"])))
+    return canvases
+
+
+def extract_canvas_items(canvas_json: Any, canvas_id: str, canvas_name: str) -> list[dict[str, Any]]:
+    """Pull one media record per node in an Agent canvas (canvas/get response).
+
+    Canvas media lives on assets.grok.com as extension-less /content URLs, so the
+    media type and file extension come from the asset's mimeType, not the URL.
+    """
+    nodes = canvas_json.get("nodes", []) if isinstance(canvas_json, dict) else []
+    out: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        asset = node.get("asset") if isinstance(node.get("asset"), dict) else {}
+        meta = node.get("metadata") if isinstance(node.get("metadata"), dict) else {}
+        url = asset.get("mediaUrl") or meta.get("mediaUrl")
+        if not isinstance(url, str) or not url:
+            continue
+        mime = asset.get("mimeType") or ""
+        item_id = str(
+            asset.get("assetId")
+            or meta.get("assetId")
+            or node.get("id")
+            or stable_id(url)
+        )
+        out[item_id] = {
+            "id": item_id,
+            "prompt": asset.get("prompt") or meta.get("prompt") or "",
+            "created_at": asset.get("createTime"),
+            "createdAt": asset.get("createTime"),
+            "mime_type": mime,
+            "model": asset.get("generationType"),
+            "parent_id": canvas_id,
+            "canvas_id": canvas_id,
+            "canvas_name": canvas_name,
+            "source_url": url,
+        }
+    return list(out.values())
+
+
+def choose_grok_auth_spec(specs: list[RequestSpec]) -> RequestSpec:
+    for spec in specs:
+        if urlparse(spec.url).hostname == "grok.com" and spec.cookies:
+            return spec
+    for spec in specs:
+        if urlparse(spec.url).hostname == "grok.com":
+            return spec
+    return specs[0]
+
+
+def load_metadata(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_deleted_ids(path: Path) -> set[str]:
+    """IDs the user deleted via the web UI; these are never (re)downloaded."""
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    return {str(x) for x in data} if isinstance(data, list) else set()
+
+
+def save_metadata(path: Path, items: list[dict[str, Any]]) -> None:
+    path.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def append_failure(path: Path, failure: dict[str, Any]) -> None:
+    failures = []
+    if path.exists():
+        failures = json.loads(path.read_text(encoding="utf-8"))
+    failures.append(failure)
+    path.write_text(json.dumps(failures, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def request_json(client: httpx.Client, spec: RequestSpec) -> Any:
+    response = client.request(
+        spec.method,
+        spec.url,
+        headers=spec.headers_with_cookies(),
+        content=spec.body,
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def iter_pages(client: httpx.Client, list_spec: RequestSpec, max_pages: int | None) -> Any:
+    seen_urls: set[str] = set()
+    page = 0
+    spec = list_spec
+
+    while True:
+        if max_pages is not None and page >= max_pages:
+            return
+        if spec.url in seen_urls:
+            return
+        seen_urls.add(spec.url)
+        page += 1
+
+        data = request_json_with_backoff(client, spec)
+        yield data
+
+        cursor = find_next_cursor(data)
+        if not cursor:
+            return
+        spec = RequestSpec(
+            method=spec.method,
+            url=with_cursor(spec.url, cursor),
+            headers=spec.headers,
+            cookies=spec.cookies,
+            body=with_cursor_in_body(spec.body, cursor),
+        )
+        time.sleep(1)
+
+
+def request_json_with_backoff(client: httpx.Client, spec: RequestSpec) -> Any:
+    delay = 2.0
+    for attempt in range(6):
+        try:
+            return request_json(client, spec)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 429 or attempt == 5:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError("unreachable")
+
+
+def with_cursor(url: str, cursor: str) -> str:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    cursor_keys = [key for key in query if "cursor" in key.lower() or "token" in key.lower()]
+    query[cursor_keys[0] if cursor_keys else "cursor"] = cursor
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def with_cursor_in_body(body: str | None, cursor: str) -> str | None:
+    if not body:
+        return body
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if isinstance(data, dict):
+        key = next((k for k in data if "cursor" in k.lower() or "token" in k.lower()), "cursor")
+        data[key] = cursor
+        return json.dumps(data, separators=(",", ":"))
+    return body
+
+
+def find_next_cursor(data: Any) -> str | None:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in NEXT_KEYS and isinstance(value, str) and value:
+                return value
+        for value in data.values():
+            found = find_next_cursor(value)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = find_next_cursor(value)
+            if found:
+                return found
+    return None
+
+
+def extract_media_items(data: Any) -> list[dict[str, Any]]:
+    concrete = extract_grok_media_items(data)
+    if concrete:
+        return concrete
+
+    candidates: list[dict[str, Any]] = []
+
+    def visit(node: Any, ancestors: list[dict[str, Any]]) -> None:
+        if isinstance(node, dict):
+            urls = media_urls_in(node)
+            if urls:
+                context = merge_ancestors(ancestors + [node])
+                for url in urls:
+                    item = dict(context)
+                    item["source_url"] = url
+                    candidates.append(item)
+            for value in node.values():
+                visit(value, ancestors + [node])
+        elif isinstance(node, list):
+            for value in node:
+                visit(value, ancestors)
+
+    visit(data, [])
+    deduped: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        item_id = str(first_value(candidate, ID_KEYS) or stable_id(candidate.get("source_url", "")))
+        candidate["id"] = item_id
+        deduped[item_id] = candidate
+    return list(deduped.values())
+
+
+def extract_grok_media_items(data: Any) -> list[dict[str, Any]]:
+    raw = []
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        for key in ("mediaPosts", "items", "posts", "results", "data", "media", "list", "generations"):
+            value = data.get(key)
+            if isinstance(value, list):
+                raw = value
+                break
+    if not raw:
+        return []
+
+    out: dict[str, dict[str, Any]] = {}
+    for post in raw:
+        if not isinstance(post, dict):
+            continue
+        for item in grok_post_and_children(post):
+            record = harvest_grok_item(item, post if item is not post else None)
+            if record:
+                out[record["id"]] = record
+    return list(out.values())
+
+
+def grok_post_and_children(post: dict[str, Any]) -> list[dict[str, Any]]:
+    items = [post]
+    for key in ("childPosts", "children", "mediaList", "media"):
+        value = post.get(key)
+        if isinstance(value, list):
+            items.extend(child for child in value if isinstance(child, dict))
+        elif isinstance(value, dict):
+            items.append(value)
+    return items
+
+
+def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> dict[str, Any] | None:
+    url = (
+        item.get("hdMediaUrl")
+        or item.get("mediaUrl")
+        or item.get("imageUrl")
+        or item.get("videoUrl")
+        or item.get("url")
+        or nested_url(item.get("media"))
+        or item.get("fileUrl")
+        or item.get("sourceUrl")
+    )
+    if not isinstance(url, str) or not is_media_url(url):
+        return None
+
+    item_id = str(
+        item.get("id")
+        or item.get("postId")
+        or item.get("mediaId")
+        or item.get("generationId")
+        or stable_id(url)
+    )
+    prompt = item.get("prompt") or item.get("caption") or (parent or {}).get("prompt") or (parent or {}).get("caption") or ""
+    created_at = (
+        item.get("createTime")
+        or item.get("createdAt")
+        or item.get("createdTime")
+        or item.get("timestamp")
+        or (parent or {}).get("createTime")
+        or (parent or {}).get("createdAt")
+    )
+    model = item.get("modelName") or item.get("model") or item.get("modelId") or (parent or {}).get("modelName")
+    parent_id = (parent or {}).get("id") or (parent or {}).get("postId") or normalize_prompt(str(prompt))
+    return {
+        "id": item_id,
+        "prompt": prompt,
+        "created_at": created_at,
+        "createdAt": created_at,
+        "model": model,
+        "parent_id": parent_id,
+        "source_url": url,
+    }
+
+
+def nested_url(value: Any) -> str | None:
+    if isinstance(value, dict):
+        url = value.get("url") or value.get("src")
+        return url if isinstance(url, str) else None
+    return None
+
+
+def media_urls_in(node: dict[str, Any]) -> list[str]:
+    urls = []
+    for key, value in node.items():
+        if isinstance(value, str) and is_media_url(value):
+            urls.append(value)
+        elif isinstance(value, list):
+            urls.extend(v for v in value if isinstance(v, str) and is_media_url(v))
+        elif isinstance(value, dict):
+            url = value.get("url") or value.get("src")
+            if isinstance(url, str) and is_media_url(url):
+                urls.append(url)
+    return urls
+
+
+def is_media_url(value: str) -> bool:
+    parsed = urlparse(value)
+    ext = Path(parsed.path).suffix.lower()
+    return parsed.scheme in {"http", "https"} and ext in IMAGE_EXTS.union(VIDEO_EXTS)
+
+
+def merge_ancestors(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for node in nodes:
+        for key, value in node.items():
+            if isinstance(value, (str, int, float, bool)) and key not in merged:
+                merged[key] = value
+    return merged
+
+
+def first_value(data: dict[str, Any], keys: set[str]) -> Any:
+    for key in keys:
+        if data.get(key):
+            return data[key]
+    for key, value in data.items():
+        if key.lower() in {k.lower() for k in keys} and value:
+            return value
+    return None
+
+
+def stable_id(value: str) -> str:
+    readable = re.sub(r"[^a-zA-Z0-9_-]+", "_", value)[-60:].strip("_")
+    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+    return f"{readable}_{digest}" if readable else digest
+
+
+def media_type_for(url: str) -> str:
+    ext = Path(urlparse(url).path).suffix.lower()
+    if ext in VIDEO_EXTS:
+        return "video"
+    return "image"
+
+
+def resolve_media_type(raw: dict[str, Any]) -> str:
+    """Prefer an explicit mimeType (canvas assets have extension-less URLs)."""
+    mime = raw.get("mime_type")
+    if isinstance(mime, str) and mime:
+        return "video" if mime.startswith("video") else "image"
+    return media_type_for(str(raw.get("source_url", "")))
+
+
+def extension_for(url: str, content_type: str | None) -> str:
+    ext = Path(urlparse(url).path).suffix.lower()
+    if ext:
+        return ext
+    if content_type:
+        mime = content_type.split(";")[0].strip().lower()
+        if mime in MIME_EXT:
+            return MIME_EXT[mime]
+        guessed = mimetypes.guess_extension(mime)
+        if guessed:
+            return guessed
+    return ".bin"
+
+
+def download_media(client: httpx.Client, spec: RequestSpec, url: str, dest_without_ext: Path) -> Path:
+    # Media lives behind Cloudflare bot protection (e.g. imagine-public.x.ai), which
+    # blocks based on TLS/HTTP fingerprint, not just headers — httpx is rejected with 403
+    # even with a browser User-Agent. curl_cffi impersonates a real browser's TLS handshake
+    # so the CDN serves the file. The httpx `client` is unused here but kept for signature
+    # compatibility with the rest of the pipeline.
+    delay = 2.0
+    last_exc: Exception | None = None
+    for attempt in range(5):
+        try:
+            response = cffi_requests.get(
+                url,
+                headers=spec.headers,
+                cookies=spec.cookies,
+                impersonate="firefox",
+                allow_redirects=True,
+                timeout=300,
+            )
+            response.raise_for_status()
+            ext = extension_for(url, response.headers.get("content-type"))
+            dest = dest_without_ext.with_suffix(ext)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(response.content)
+            return dest
+        except CffiRequestException as exc:
+            last_exc = exc
+            if attempt == 4:
+                break
+            time.sleep(delay)
+            delay *= 2
+    raise RuntimeError(f"failed downloading {url}: {last_exc}")
+
+
+def normalize_record(raw: dict[str, Any], local_path: Path) -> MediaItem:
+    prompt = str(first_value(raw, PROMPT_KEYS) or "")
+    created_at = first_value(raw, DATE_KEYS)
+    parent_id = raw.get("parent_id") or raw.get("parentId") or normalize_prompt(prompt)
+    source_url = str(raw["source_url"])
+    return MediaItem(
+        id=str(raw["id"]),
+        prompt=prompt,
+        created_at=str(created_at) if created_at else None,
+        media_type=resolve_media_type(raw),
+        model=str(first_value(raw, MODEL_KEYS)) if first_value(raw, MODEL_KEYS) else None,
+        parent_id=str(parent_id) if parent_id else None,
+        source_url=source_url,
+        # Always store POSIX-style ("media/images/x.jpg") so metadata written on
+        # Windows still resolves when the gallery is served from Linux/Docker.
+        local_path=local_path.as_posix(),
+        canvas_id=str(raw["canvas_id"]) if raw.get("canvas_id") else None,
+        canvas_name=str(raw["canvas_name"]) if raw.get("canvas_name") else None,
+    )
+
+
+def normalize_prompt(prompt: str) -> str:
+    return re.sub(r"\s+", " ", prompt.lower()).strip(" \t\r\n.!?;:")
+
+
+def process_item(
+    client: httpx.Client,
+    media_spec: RequestSpec,
+    raw: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> bool:
+    """Download one media item and record it. Returns True if a new file was saved."""
+    item_id = str(raw["id"])
+    if item_id in DELETED_IDS:
+        return False  # user deleted it; never bring it back
+    if item_id in by_id:
+        return False
+    source_url = str(raw["source_url"])
+    media_type = resolve_media_type(raw)
+    folder = Path("media/videos" if media_type == "video" else "media/images")
+    # If the media file is already on disk (e.g. copied in from another machine)
+    # but missing from metadata, index it instead of re-downloading.
+    existing_file = next(iter((GALLERY_ROOT / folder).glob(f"{item_id}.*")), None)
+    if existing_file is not None and existing_file.is_file():
+        record = normalize_record(raw, existing_file.relative_to(GALLERY_ROOT))
+        by_id[item_id] = record.__dict__
+        save_metadata(args.metadata, list(by_id.values()))
+        if not args.quiet:
+            print(f"indexed existing {item_id} -> {existing_file}")
+        return False
+    try:
+        local = download_media(client, media_spec, source_url, GALLERY_ROOT / folder / item_id)
+    except Exception as exc:
+        append_failure(
+            args.failures,
+            {"id": item_id, "source_url": source_url, "error": str(exc)},
+        )
+        print(f"failed {item_id}: {exc}")
+        return False
+    # Store local_path relative to GALLERY_ROOT (e.g. media/images/<id>.jpg).
+    record = normalize_record(raw, local.relative_to(GALLERY_ROOT))
+    by_id[item_id] = record.__dict__
+    save_metadata(args.metadata, list(by_id.values()))
+    if not args.quiet:
+        print(f"saved {item_id} -> {local}")
+    return True
+
+
+def patch_existing_record(raw: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> bool:
+    """Refresh metadata-only fields on an already-downloaded record. Returns True if changed.
+
+    Used by --refresh-metadata to backfill fields (notably created_at) onto records
+    that were saved before the field was captured, without re-downloading the media.
+    """
+    record = by_id.get(str(raw["id"]))
+    if record is None:
+        return False
+    changed = False
+    created_at = first_value(raw, DATE_KEYS)
+    if created_at and not record.get("created_at"):
+        record["created_at"] = str(created_at)
+        changed = True
+    model = first_value(raw, MODEL_KEYS)
+    if model and not record.get("model"):
+        record["model"] = str(model)
+        changed = True
+    prompt = first_value(raw, PROMPT_KEYS)
+    if prompt and not record.get("prompt"):
+        record["prompt"] = str(prompt)
+        changed = True
+    return changed
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Download media and prompt metadata from browser cURL samples.")
+    parser.add_argument("--curl", type=Path, default=Path("grok_auth.txt"))
+    parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
+    parser.add_argument("--failures", type=Path, default=DEFAULT_FAILURES)
+    parser.add_argument("--deleted", type=Path, default=DEFAULT_DELETED)
+    parser.add_argument("--max-pages", type=int, default=None)
+    parser.add_argument("--page-size", type=int, default=40)
+    parser.add_argument("--quiet", action="store_true", help="Print compact progress instead of one line per file.")
+    parser.add_argument(
+        "--grok-favorites",
+        action="store_true",
+        help="Use Grok's known favorites endpoint and use grok_auth.txt only for auth cookies/headers.",
+    )
+    parser.add_argument(
+        "--grok-agents",
+        nargs="*",
+        metavar="CANVAS_ID",
+        default=None,
+        help=(
+            "Download media from Grok Agent canvases (/imagine/agent/<id>). "
+            "With no IDs, archives every canvas on /imagine/saved; otherwise only the given canvas IDs/URLs."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-existing-page",
+        action="store_true",
+        help="Stop when a fetched page contains only IDs already present in metadata.json.",
+    )
+    parser.add_argument(
+        "--refresh-metadata",
+        action="store_true",
+        help="Re-fetch the list(s) and backfill metadata (e.g. created_at) on existing records without downloading media.",
+    )
+    args = parser.parse_args()
+
+    curl_path = args.curl
+    if not curl_path.exists():
+        legacy = curl_path.with_name("curl_samples.txt")  # pre-rename filename
+        if legacy.exists():
+            curl_path = legacy
+    specs = parse_curl_samples(curl_path)
+    auth_spec = choose_grok_auth_spec(specs)
+    media_spec = specs[-1]
+    existing = load_metadata(args.metadata)
+    by_id = {str(item["id"]): item for item in existing if "id" in item}
+    global DELETED_IDS
+    DELETED_IDS = load_deleted_ids(args.deleted)
+
+    with httpx.Client(follow_redirects=True) as client:
+        saved_count = 0
+
+        def report() -> None:
+            if args.quiet and saved_count and saved_count % 100 == 0:
+                print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
+
+        if args.grok_agents is not None:
+            saved_count = archive_agent_canvases(client, auth_spec, media_spec, by_id, args)
+        else:
+            list_spec = grok_favorites_spec(auth_spec, args.page_size) if args.grok_favorites else specs[0]
+            for page_data in iter_pages(client, list_spec, args.max_pages):
+                page_items = extract_media_items(page_data)
+                if args.refresh_metadata:
+                    for raw in page_items:
+                        saved_count += patch_existing_record(raw, by_id)
+                    continue
+                if args.early_stop_existing_page and page_items and all(str(raw["id"]) in by_id for raw in page_items):
+                    print("page contained only existing IDs; stopping early")
+                    break
+                for raw in page_items:
+                    if process_item(client, media_spec, raw, by_id, args):
+                        saved_count += 1
+                        report()
+
+    save_metadata(args.metadata, list(by_id.values()))
+    if args.refresh_metadata:
+        print(f"refreshed {saved_count} record(s); metadata records: {len(by_id)}")
+    else:
+        print(f"metadata records: {len(by_id)}")
+
+
+def normalize_canvas_id(value: str) -> str:
+    """Accept either a bare canvas id or a full /imagine/agent/<id> URL."""
+    value = value.strip()
+    if "/" in value:
+        return value.rstrip("/").rsplit("/", 1)[-1]
+    return value
+
+
+def archive_agent_canvases(
+    client: httpx.Client,
+    auth_spec: RequestSpec,
+    media_spec: RequestSpec,
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> int:
+    if args.grok_agents:
+        requested = [normalize_canvas_id(v) for v in args.grok_agents]
+        names = {cid: name for cid, name in list_grok_canvases(client, auth_spec)}
+        canvases = [(cid, names.get(cid, cid)) for cid in requested]
+    else:
+        canvases = list_grok_canvases(client, auth_spec)
+
+    print(f"found {len(canvases)} agent canvas(es)")
+    saved_count = 0
+    for canvas_id, canvas_name in canvases:
+        canvas_json = request_json_with_backoff(client, grok_canvas_get_spec(auth_spec, canvas_id))
+        items = extract_canvas_items(canvas_json, canvas_id, canvas_name)
+        print(f"canvas {canvas_id} '{canvas_name}': {len(items)} media items")
+        for raw in items:
+            if args.refresh_metadata:
+                saved_count += patch_existing_record(raw, by_id)
+                continue
+            if process_item(client, media_spec, raw, by_id, args):
+                saved_count += 1
+                if args.quiet and saved_count % 100 == 0:
+                    print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
+    return saved_count
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>grokive</Name>
+  <Repository>ghcr.io/starrlord/grokive:latest</Repository>
+  <Registry>https://github.com/starrlord/grokive/pkgs/container/grokive</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/starrlord/grokive/issues</Support>
+  <Project>https://github.com/starrlord/grokive</Project>
+  <Overview>Download your Grok Imagine favourites and Agent canvases, then browse them in a fast, modern web app (full-text prompt search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, installable PWA). Click Sync in the web UI to fetch new media and rebuild the index; click Config to paste your browser cURL (login cookies) and set appearance/subtitle options. All data is stored in the mapped /data appdata folder.</Overview>
+  <Category>MediaApp:Other Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Grokive — a self-hosted Grok Imagine archiver with a modern SvelteKit web UI (search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, PWA). Use the Sync button to run the downloader and rebuild the index; use Config to store the captured cURL request and settings. Optionally protect the UI with BASIC_AUTH_USER / BASIC_AUTH_PASS, or place it behind a reverse proxy.</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish>
+      <Port>
+        <HostPort>8080</HostPort>
+        <ContainerPort>8080</ContainerPort>
+        <Protocol>tcp</Protocol>
+      </Port>
+    </Publish>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/grokive</HostDir>
+      <ContainerDir>/data</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value>99</Value>
+      <Name>PUID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>100</Value>
+      <Name>PGID</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>8080</Value>
+      <Name>PORT</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>ADMIN_USER</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>ADMIN_PASSWORD</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>AUTH_DISABLED</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>TRUST_PROXY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>WHISPER_SERVER_URL</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Config Name="WebUI Port" Target="8080" Default="8080" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Data (appdata)" Target="/data" Default="/mnt/user/appdata/grokive" Mode="rw" Description="Stores cURL config, metadata, the SQLite index, media, thumbnails and settings" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/grokive</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID for file ownership" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID for file ownership" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="Admin User" Target="ADMIN_USER" Default="admin" Mode="" Description="Login username for the web UI (auth is on by default)" Type="Variable" Display="always" Required="false" Mask="false">admin</Config>
+  <Config Name="Admin Password" Target="ADMIN_PASSWORD" Default="" Mode="" Description="Login password. Leave blank and a strong one is generated on first run and printed to the log (and saved to /data/admin_password.txt)." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Disable Auth" Target="AUTH_DISABLED" Default="" Mode="" Description="Set to true to turn OFF the login (open UI). Only on a fully trusted, isolated LAN." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Trust Proxy" Target="TRUST_PROXY" Default="" Mode="" Description="Set to true when behind an HTTPS reverse proxy (real client IPs + Secure session cookie)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Whisper Server URL" Target="WHISPER_SERVER_URL" Default="" Mode="" Description="Optional: whisper-asr-webservice endpoint (e.g. http://host:9000/asr) to enable subtitle generation" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>

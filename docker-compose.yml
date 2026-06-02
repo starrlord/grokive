@@ -1,0 +1,30 @@
+services:
+  grokive:
+    # Deploy/pull compose (for Unraid, Dockge, Portainer, etc.) — pulls the
+    # prebuilt image. Do NOT add `build:` here, or the stack manager will try to
+    # build (and fail) instead of pulling. To build locally, use:
+    #   docker compose -f docker-compose.build.yml up -d --build
+    image: ghcr.io/starrlord/grokive:latest
+    container_name: grokive
+    pull_policy: always
+    ports:
+      - "8080:8080"
+    volumes:
+      # Holds grok_auth.txt, metadata.json, index.db, media, thumbnails, settings.
+      # On Unraid point this at e.g. /mnt/user/appdata/grokive
+      - ./data:/data
+    environment:
+      - PUID=99
+      - PGID=100
+      - PORT=8080
+      # Auth is ON by default — first run logs a generated admin password (and saves
+      # it to /data/admin_password.txt). Set your own credentials instead:
+      # - ADMIN_USER=admin
+      # - ADMIN_PASSWORD=change-me
+      # Turn auth OFF only on a fully trusted, isolated LAN:
+      # - AUTH_DISABLED=true
+      # Behind an HTTPS reverse proxy (real client IPs + Secure session cookie):
+      # - TRUST_PROXY=true
+      # Optional: whisper-asr-webservice endpoint to enable subtitle generation:
+      # - WHISPER_SERVER_URL=http://192.168.1.10:9000/asr
+    restart: unless-stopped

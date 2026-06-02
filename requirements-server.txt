@@ -1,0 +1,4 @@
+# Web front-end (server.py). Core CLI deps are in requirements.txt.
+-r requirements.txt
+Flask>=3.0.0
+waitress>=3.0.0

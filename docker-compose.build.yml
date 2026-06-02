@@ -1,0 +1,19 @@
+# Local build + run (developer machine, source checked out here).
+# Usage: docker compose -f docker-compose.build.yml up -d --build
+# For deploying on a server from the registry, use docker-compose.yml instead.
+services:
+  grokive:
+    build: .
+    image: docker.lessthanpi.com/grokive:latest
+    container_name: grokive
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - PUID=99
+      - PGID=100
+      - PORT=8080
+      # - BASIC_AUTH_USER=admin
+      # - BASIC_AUTH_PASS=change-me
+    restart: unless-stopped
