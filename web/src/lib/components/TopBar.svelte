@@ -6,6 +6,9 @@
 
   const periods = [
     { id: 'all', label: 'All time' },
+    { id: 'hour1', label: 'Last hour' },
+    { id: 'hour4', label: 'Last 4 hours' },
+    { id: 'hour8', label: 'Last 8 hours' },
     { id: 'today', label: 'Today' },
     { id: 'yesterday', label: 'Yesterday' },
     { id: 'last7', label: 'Last 7 days' },

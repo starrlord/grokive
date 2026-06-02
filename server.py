@@ -1002,6 +1002,12 @@ def _period_range(period: str) -> tuple[str | None, str | None]:
     today = datetime.date.today()
     td = datetime.timedelta
     tomorrow = (today + td(days=1)).isoformat()
+    # Sub-day windows: created_at is stored as UTC ISO (Grok's createTime), so
+    # compute the lower bound in UTC for accurate hour math; upper bound is open.
+    hours = {"hour1": 1, "hour4": 4, "hour8": 8}.get(period)
+    if hours is not None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        return (now_utc - td(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S"), None
     if period == "today":
         return today.isoformat(), tomorrow
     if period == "yesterday":

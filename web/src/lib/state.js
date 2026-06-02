@@ -50,7 +50,7 @@ export const filters = writable({
   models: [],
   canvas: null,
   mediaType: 'all',
-  period: 'all', // all | today | yesterday | last7 | last14 | last30 | month | year
+  period: 'all', // all | hour1 | hour4 | hour8 | today | yesterday | last7 | last14 | last30 | month | year
   sort: 'new'
 });
 

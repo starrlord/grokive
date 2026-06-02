@@ -12,7 +12,7 @@
   ];
 </script>
 
-<aside class="hidden w-64 shrink-0 overflow-y-auto border-r border-line p-4 lg:block" style="height: calc(100vh - 56px)">
+<aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line p-4 lg:block" style="height: calc(100vh - 56px)">
   <div class="mb-5">
     <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Media type</div>
     <div class="grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
