@@ -42,7 +42,9 @@
   }
 </script>
 
-<div class="glass fixed inset-x-0 bottom-0 z-40 flex flex-wrap items-center justify-center gap-2 px-3 py-2.5"
+<!-- Solid (not glass) surface: this is the primary action bar and sits over a dense
+     thumbnail grid, so legibility wins over translucency. -->
+<div class="fixed inset-x-0 bottom-0 z-40 flex flex-wrap items-center justify-center gap-2 border-t border-line bg-[var(--surface-solid)] px-3 py-2.5 shadow-[0_-10px_30px_rgba(0,0,0,0.35)] backdrop-blur-sm"
      style="padding-bottom: max(0.625rem, env(safe-area-inset-bottom))">
   <span class="px-1 text-sm font-bold whitespace-nowrap">{n} selected</span>
   <button class="flex items-center gap-1.5 rounded-lg border border-transparent bg-[var(--accent)] px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
