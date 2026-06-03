@@ -60,7 +60,17 @@ export const filters = writable({
 });
 
 export function setView(view) {
-  filters.update((f) => ({ ...f, view, canvas: view === 'canvases' ? null : f.canvas }));
+  filters.update((f) => {
+    const changed = f.view !== view;
+    return {
+      ...f,
+      view,
+      tags: changed ? [] : f.tags,
+      models: changed ? [] : f.models,
+      resolutions: changed ? [] : f.resolutions,
+      canvas: null
+    };
+  });
 }
 export function setQuery(query) {
   filters.update((f) => ({ ...f, query }));

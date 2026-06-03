@@ -44,7 +44,7 @@
 
 <div use:portal class="fixed inset-0 z-[65] grid place-items-center bg-black/65 p-4 backdrop-blur-sm" role="presentation"
      transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel flex max-h-[86vh] w-full max-w-lg flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Add to collection" tabindex="-1" transition:fly={{ y: 18, duration: 160 }}>
+  <div class="panel flex max-h-[88dvh] w-full max-w-lg flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Add to collection" tabindex="-1" transition:fly={{ y: 18, duration: 160 }}>
     <div class="border-b border-line p-4">
       <div class="mb-1 flex items-center justify-between gap-3">
         <h2 class="text-lg font-extrabold">Add to Collection</h2>

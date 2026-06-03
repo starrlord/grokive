@@ -61,10 +61,13 @@
 </script>
 
 <div class="system-controls flex flex-wrap items-center gap-1.5">
-  <button class="max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold {pillClass}" onclick={() => (showLog = !showLog)} title="Log">{pillText}</button>
-  <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
+  <!-- Status pill + Subtitles are hidden on phones to keep the top bar tidy (sync
+       progress still surfaces via the disabled Sync button + a toast on finish). -->
+  <button class="hidden max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold md:inline-block {pillClass}" onclick={() => (showLog = !showLog)} title="Log">{pillText}</button>
+  <span class="mx-0.5 hidden h-6 w-px self-center bg-line md:block" aria-hidden="true"></span>
+  <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-white transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
   {#if $settings.whisper_configured}
-    <button class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold disabled:opacity-50" onclick={doSubs} disabled={status.running}>Subtitles</button>
+    <button class="hidden rounded-lg border border-line px-3 py-1.5 text-sm font-semibold md:inline-block disabled:opacity-50" onclick={doSubs} disabled={status.running}>Subtitles</button>
   {/if}
   <button class="grid h-9 w-9 place-items-center rounded-lg border border-line" title="Config" onclick={() => (showConfig = true)}>⚙</button>
 </div>

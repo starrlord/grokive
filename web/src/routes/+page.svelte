@@ -295,7 +295,7 @@
       <div class="mb-3 flex flex-wrap items-center gap-2">
         <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={closeCanvas}>Back</button>
         <div class="min-w-0 flex-1">
-          <h1 class="truncate text-base font-extrabold text-ink sm:text-lg">{activeCanvasTitle}</h1>
+          <h1 class="line-clamp-2 text-base font-extrabold text-ink sm:text-lg" title={activeCanvasTitle}>{activeCanvasTitle}</h1>
           <p class="text-sm text-muted">{total.toLocaleString()} items</p>
         </div>
         {#if hasCanvasRefinements}
@@ -327,14 +327,14 @@
             <button type="button" class="relative block aspect-square w-full overflow-hidden bg-black text-left" onclick={() => openCanvas(c)}>
               {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-105" />{/if}
               <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2.5 pt-8 text-white">
-                <span class="block truncate text-sm font-bold">{c.name}</span>
+                <span class="block truncate text-sm font-bold" title={c.name}>{c.name}</span>
                 <span class="block text-xs opacity-80">{c.count} items · {c.videos} video</span>
               </span>
             </button>
             <div class="flex items-center gap-2 p-2">
               <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-white disabled:opacity-45"
                 title="Play videos" aria-label={`Play ${c.name} videos`} disabled={!c.videos} onclick={() => playCanvas(c)}>▶</button>
-              <button type="button" class="min-w-0 flex-1 truncate text-left text-sm font-semibold hover:underline" onclick={() => openCanvas(c)}>{c.name}</button>
+              <button type="button" class="min-w-0 flex-1 truncate text-left text-sm font-semibold hover:underline" title={c.name} onclick={() => openCanvas(c)}>{c.name}</button>
               <span class="text-xs text-muted">{c.videos || 0}</span>
             </div>
           </article>

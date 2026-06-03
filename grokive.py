@@ -11,9 +11,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 # All generated state (grok_auth.txt, metadata.json, gallery/, ...) is written
-# relative to DATA_DIR. Defaults to the code directory for plain CLI use; set
-# GROK_DATA_DIR (e.g. /data in Docker) to keep state on a persistent volume.
-DATA_DIR = Path(os.environ.get("GROK_DATA_DIR", ROOT)).resolve()
+# relative to DATA_DIR. Defaults to ./data so a from-source run matches the
+# server (server.py uses the same default); set GROK_DATA_DIR (e.g. /data in
+# Docker) to keep state on a persistent volume.
+DATA_DIR = Path(os.environ.get("GROK_DATA_DIR", ROOT / "data")).resolve()
 
 
 def script(name: str) -> str:

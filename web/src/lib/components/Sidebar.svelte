@@ -33,7 +33,7 @@
         {#each facets.resolutions as r (r.height)}
           <button type="button"
             class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {$filters.resolutions.includes(r.height) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line hover:border-[var(--accent)]'}"
-            onclick={() => toggleResolution(r.height)}>{r.height}p <span class="opacity-55">{r.count}</span></button>
+            onclick={() => toggleResolution(r.height)}>{r.height}p <span class="opacity-70">{r.count}</span></button>
         {/each}
       </div>
     </div>
@@ -56,7 +56,7 @@
     <div class="flex flex-wrap gap-1.5">
       {#each topTags as t (t.name)}
         {#if !$filters.tags.includes(t.name)}
-          <button class="rounded-full border border-line px-2.5 py-1 text-xs hover:border-[var(--accent)]" onclick={() => toggleTag(t.name)}>{t.name} <span class="opacity-55">{t.count}</span></button>
+          <button class="rounded-full border border-line px-2.5 py-1 text-xs hover:border-[var(--accent)]" onclick={() => toggleTag(t.name)}>{t.name} <span class="opacity-70">{t.count}</span></button>
         {/if}
       {/each}
     </div>

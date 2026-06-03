@@ -1,5 +1,6 @@
 <script>
-  import { fly } from 'svelte/transition';
+  import { onMount, onDestroy } from 'svelte';
+  import { fade, fly } from 'svelte/transition';
   import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -43,6 +44,12 @@
   // the player. So we start muted (which iOS *will* autoplay, controls auto-hide),
   // and the first tap anywhere unmutes — and the preference sticks across clips.
   let wantSound = $state(false);
+  // The mute hint is a one-time discoverability nudge: it auto-dismisses so it never
+  // lingers over the video. Once gone, a tap anywhere on the stage still unmutes.
+  let soundHintDismissed = $state(false);
+  let soundHintTimer;
+  onMount(() => { soundHintTimer = setTimeout(() => (soundHintDismissed = true), 3500); });
+  onDestroy(() => clearTimeout(soundHintTimer));
   function enableSound() {
     showControls = true;
     if (wantSound) return;
@@ -76,6 +83,12 @@
   $effect(() => {
     const it = item;
     if (it && it.media_type === 'video' && videoEl && videoEl.getAttribute('src') !== it.href) {
+      // On touch, start every clip with native controls OFF. iOS flashes its
+      // control bar over the first ~3s of any `controls` video that starts playing,
+      // which is disruptive on each seamless playlist advance. A tap re-reveals the
+      // controls (and unmutes the first time); the sound preference itself persists.
+      // Set the property imperatively too so the attribute is gone *before* play().
+      if (coarsePointer) { showControls = false; videoEl.controls = false; }
       // iOS only grants muted-autoplay when the `muted` *attribute* is present —
       // the JS property alone isn't honored by Safari's autoplay gate. defaultMuted
       // reflects that content attribute, so set it (and muted) before the src loads.
@@ -108,9 +121,15 @@
   function onended() {
     if (autoAdvance && i < liveList.length - 1) step(1);
   }
+  // iPhone Safari doesn't implement the Fullscreen API on elements (only iPad /
+  // desktop / Android do), so element fullscreen silently fails there. Detect it
+  // up front to hide the dead button for images, and fall back to the native video
+  // player's webkitEnterFullscreen() — the one thing iPhone *can* fullscreen.
+  const elementFsSupported = typeof document !== 'undefined' && !!document.documentElement.requestFullscreen;
   function toggleFs() {
-    if (document.fullscreenElement) document.exitFullscreen?.();
-    else stageEl?.requestFullscreen?.();
+    if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+    if (stageEl?.requestFullscreen) { stageEl.requestFullscreen().catch(() => {}); return; }
+    if (videoEl?.webkitEnterFullscreen) videoEl.webkitEnterFullscreen();
   }
   function close() {
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
@@ -143,8 +162,12 @@
       {/if}
     </div>
 
-    <!-- Top chrome -->
-    <div class="absolute right-3 top-3 z-10 flex gap-2">
+    <!-- Top scrim: grounds the floating chrome so it stays legible over bright
+         frames, and visually separates controls from the media on full-bleed clips. -->
+    <div class="pointer-events-none absolute inset-x-0 top-0 z-[5] h-28 bg-gradient-to-b from-black/60 via-black/25 to-transparent"></div>
+
+    <!-- Top chrome (safe-area inset so it clears notches / Dynamic Island) -->
+    <div class="absolute z-10 flex gap-2" style="top: max(0.75rem, env(safe-area-inset-top)); right: max(0.75rem, env(safe-area-inset-right));">
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[#ff5a7a]' : ''}"
         title="Favorite" onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
@@ -155,7 +178,9 @@
       </button>
       <button class="glass rounded-lg px-3 py-2 font-bold" onclick={close}>Close</button>
     </div>
-    <button class="glass absolute left-3 top-3 z-10 grid h-10 w-10 place-items-center rounded-lg" title="Fullscreen (f)" onclick={toggleFs}>⛶</button>
+    {#if elementFsSupported || item.media_type === 'video'}
+      <button class="glass absolute z-10 grid h-10 w-10 place-items-center rounded-lg" style="top: max(0.75rem, env(safe-area-inset-top)); left: max(0.75rem, env(safe-area-inset-left));" title="Fullscreen (f)" onclick={toggleFs}>⛶</button>
+    {/if}
 
     <!-- Side nav -->
     {#if i > 0}
@@ -165,15 +190,17 @@
       <button class="glass absolute right-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" onclick={() => step(1)}>›</button>
     {/if}
 
-    <!-- Counter (small, unobtrusive) -->
-    <div class="glass absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted">
+    <!-- Counter (small, unobtrusive; safe-area inset so it clears the home indicator) -->
+    <div class="glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
       {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
 
-    <!-- Tap-for-sound hint while muted -->
-    {#if item.media_type === 'video' && !wantSound}
-      <button class="glass absolute left-1/2 top-16 z-10 -translate-x-1/2 rounded-full px-3 py-1.5 text-xs font-semibold"
-        onclick={enableSound}>🔇 Tap for sound</button>
+    <!-- Tap-for-sound hint while muted: sits just above the counter, out of the way
+         of the video, and auto-dismisses (see soundHintDismissed) so it never lingers. -->
+    {#if item.media_type === 'video' && !wantSound && !soundHintDismissed}
+      <button class="glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3.5 py-2 text-sm font-semibold shadow-lg"
+        style="bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 2.75rem);"
+        onclick={enableSound} transition:fade={{ duration: 200 }}>🔇 Tap for sound</button>
     {/if}
 
     <!-- Info panel: hidden by default, slides up over the bottom when opened -->

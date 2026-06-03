@@ -12,6 +12,35 @@
   let dragId = $state(null);
   let busy = $state(false);
   let confirming = $state(false);
+  let expanded = $state({}); // id -> bool: prompt rolled out to full text
+  function toggleExpand(id) { expanded = { ...expanded, [id]: !expanded[id] }; }
+
+  // Smoothly roll the prompt between its 2-line clamp and full height. CSS can't
+  // transition `height: auto`, so we animate max-height between the collapsed
+  // floor and the measured scrollHeight, then release to `none` when open.
+  const PROMPT_COLLAPSED = 40; // px ≈ 2 lines at text-sm / leading-snug
+  function reveal(node, open) {
+    node.style.overflow = 'hidden';
+    node.style.maxHeight = open ? 'none' : PROMPT_COLLAPSED + 'px';
+    let cur = !!open;
+    return {
+      update(next) {
+        next = !!next;
+        if (next === cur) return;
+        cur = next;
+        node.style.maxHeight = node.offsetHeight + 'px'; // pin current height
+        void node.offsetHeight;                          // force reflow
+        requestAnimationFrame(() => {
+          node.style.maxHeight = (next ? node.scrollHeight : PROMPT_COLLAPSED) + 'px';
+        });
+        const done = () => {
+          if (cur) node.style.maxHeight = 'none';        // let open rows reflow freely
+          node.removeEventListener('transitionend', done);
+        };
+        node.addEventListener('transitionend', done);
+      }
+    };
+  }
 
   onMount(async () => {
     const list = await mediaByIds(ids);
@@ -61,38 +90,56 @@
 
 <!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
 <div class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
-  <div class="panel flex max-h-[86vh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Edit playlist" tabindex="-1">
+  <div class="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Edit playlist" tabindex="-1">
     <div class="flex items-center gap-3 border-b border-line p-4">
-      <input class="flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-bold outline-none" bind:value={name} maxlength="80" />
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white" onclick={close}>Done</button>
+      <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-bold outline-none transition focus:border-[var(--accent)]" bind:value={name} maxlength="80" aria-label="Playlist name" />
+      <button class="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white transition hover:brightness-110 active:brightness-95" onclick={close}>Done</button>
     </div>
-    <p class="px-4 pt-3 text-xs text-muted">Drag the handle (or ▲/▼) to reorder. Videos play top to bottom.</p>
+    <div class="flex items-center justify-between gap-3 px-4 pt-3 text-xs text-muted">
+      <span>Drag the handle (or ▲/▼) to reorder · plays top to bottom</span>
+      <span class="shrink-0 tabular-nums">{ids.length} {ids.length === 1 ? 'item' : 'items'} · {videos.length} video{videos.length === 1 ? '' : 's'}</span>
+    </div>
 
     <div class="flex flex-col gap-2 overflow-auto p-4">
       {#each ids as id, idx (id)}
         {@const it = media[id]}
         <!-- Drag-to-reorder is a pointer enhancement; keyboard users reorder with the ▲/▼ buttons. -->
-        <div class="flex items-start gap-2.5 rounded-lg border border-line bg-[var(--surface-2)] p-2" role="presentation"
+        <div class="group flex items-center gap-3 rounded-lg border border-line bg-[var(--surface-2)] p-2 transition hover:border-[color-mix(in_srgb,var(--accent)_45%,var(--line))]" role="presentation"
              draggable="true"
              ondragstart={() => (dragId = id)}
              ondragover={(e) => e.preventDefault()}
              ondrop={() => onDrop(id)}>
-          <span class="cursor-grab px-1 pt-1.5 text-muted">☰</span>
-          {#if it?.thumb}<img src={it.thumb} alt="" class="h-10 w-14 shrink-0 rounded-sm object-cover" />{:else}<span class="h-10 w-14 shrink-0 rounded-sm bg-black/40"></span>{/if}
-          <span class="w-5 shrink-0 pt-0.5 text-right text-xs font-bold text-muted">{idx + 1}</span>
-          <span class="min-w-0 flex-1 break-words pt-0.5 text-sm leading-snug">{it?.prompt || it?.local_path?.split('/').pop() || id}</span>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" disabled={idx === 0} onclick={() => move(id, -1)}>▲</button>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" disabled={idx === ids.length - 1} onclick={() => move(id, 1)}>▼</button>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line" onclick={() => remove(id)}>×</button>
+          <span class="cursor-grab select-none px-0.5 text-base text-muted transition hover:text-ink" title="Drag to reorder" aria-hidden="true">☰</span>
+          <div class="relative h-16 w-28 shrink-0 overflow-hidden rounded-md bg-black/40">
+            {#if it?.thumb}<img src={it.thumb} alt="" class="h-full w-full object-cover" style="object-position: {it.media_h > it.media_w ? '50% 22%' : '50% 50%'}" />{/if}
+            <span class="absolute left-1 top-1 grid h-4 min-w-4 place-items-center rounded-sm bg-black/70 px-1 text-[0.625rem] font-bold leading-none text-white tabular-nums">{idx + 1}</span>
+          </div>
+          <button type="button"
+            class="-mx-1 min-w-0 flex-1 cursor-pointer rounded-md px-1 py-0.5 text-left text-sm leading-snug transition-colors hover:bg-[color-mix(in_srgb,var(--ink)_7%,transparent)]"
+            aria-expanded={expanded[id] || false}
+            title={expanded[id] ? 'Collapse' : 'Expand full prompt'}
+            onclick={() => toggleExpand(id)}><span class="prompt-roll block break-words" use:reveal={expanded[id] || false}>{it?.prompt || it?.local_path?.split('/').pop() || id}</span></button>
+          <div class="flex shrink-0 items-center gap-1.5">
+            <div class="flex overflow-hidden rounded-md border border-line">
+              <button class="grid h-7 w-7 place-items-center text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === 0} onclick={() => move(id, -1)} aria-label="Move up">▲</button>
+              <span class="w-px self-stretch bg-line" aria-hidden="true"></span>
+              <button class="grid h-7 w-7 place-items-center text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === ids.length - 1} onclick={() => move(id, 1)} aria-label="Move down">▼</button>
+            </div>
+            <button class="grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition hover:border-[#ef4444] hover:bg-[color-mix(in_srgb,#ef4444_14%,transparent)] hover:text-[#f87171]" onclick={() => remove(id)} aria-label="Remove from playlist">×</button>
+          </div>
         </div>
       {/each}
-      {#if !ids.length}<p class="py-6 text-center text-sm text-muted">This playlist is empty.</p>{/if}
+      {#if !ids.length}
+        <div class="grid place-items-center rounded-lg border border-dashed border-line py-12 text-center text-muted">
+          <p class="text-sm">This playlist is empty.</p>
+        </div>
+      {/if}
     </div>
 
-    <div class="flex gap-2 border-t border-line p-4">
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white disabled:opacity-50" disabled={!videos.length} onclick={play}>Play</button>
-      <button class="rounded-lg border border-line px-4 py-2 font-semibold disabled:opacity-50" disabled={!videos.length || busy} onclick={doExport}>{busy ? 'Exporting…' : 'Export'}</button>
-      <button class="ml-auto rounded-lg border border-line px-4 py-2 font-semibold" onclick={() => (confirming = true)}>Delete playlist</button>
+    <div class="flex items-center gap-2 border-t border-line p-4">
+      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" disabled={!videos.length} onclick={play}>Play</button>
+      <button class="rounded-lg border border-line px-4 py-2 font-semibold transition enabled:hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--line))] enabled:hover:bg-[var(--surface-2)] disabled:opacity-50" disabled={!videos.length || busy} onclick={doExport}>{busy ? 'Exporting…' : 'Export'}</button>
+      <button class="ml-auto rounded-lg border border-[color-mix(in_srgb,#ef4444_50%,transparent)] px-4 py-2 font-semibold text-[#f87171] transition hover:border-[#ef4444] hover:bg-[color-mix(in_srgb,#ef4444_12%,transparent)]" onclick={() => (confirming = true)}>Delete playlist</button>
     </div>
   </div>
 </div>
@@ -101,3 +148,9 @@
   <ConfirmDialog title="Delete playlist?" message={`“${playlist.name}” will be permanently removed. This can't be undone.`}
     confirmLabel="Delete" onconfirm={del} oncancel={() => (confirming = false)} />
 {/if}
+
+<style>
+  /* The reveal() action animates max-height between the 2-line floor and the
+     measured full height; this is the easing it transitions along. */
+  .prompt-roll { transition: max-height 220ms ease; }
+</style>

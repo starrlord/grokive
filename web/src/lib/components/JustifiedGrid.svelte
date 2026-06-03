@@ -80,8 +80,9 @@
         {@const fav = $favorites.has(it.id)}
         {@const sel = selection.has(it.id)}
         <!-- Mouse handlers only position a hover tooltip; the real click target is the Open button below. -->
-        <div class="group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
+        <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
              class:ring-2={sel} class:select-none={selectMode}
+             class:selecting-card={selectMode}
              style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)"
              onmousemove={(e) => { if (selectMode) showTip(e, it.prompt); }}
              onmouseleave={() => (tip = null)}>
@@ -100,13 +101,14 @@
             onpointerenter={() => paintEnter(it)}
             onclick={() => cellClick(it)}></button>
 
-          <!-- Resolution / video / CC badges, top-right. Fade out on hover so the
-               action cluster (also top-right) has room. Resolution uses the shorter
-               side so portrait and landscape both read sensibly (e.g. 720p, 1080p). -->
-          <span class="pointer-events-none absolute right-2 top-2 z-[2] flex gap-1 transition group-hover:opacity-0">
-            {#if it.media_w && it.media_h}<span class="rounded-full bg-black/65 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">{Math.min(it.media_w, it.media_h)}p</span>{/if}
-            {#if it.media_type === 'video'}<span class="rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">video</span>{/if}
-            {#if it.has_subtitles}<span class="rounded-full bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">CC</span>{/if}
+          <!-- Resolution / video / CC badges, bottom-right — clear of the top-right
+               action cluster and the top-left selection circle, so they never collide
+               (notably on touch, where there's no hover to swap them out). Resolution
+               uses the shorter side so portrait and landscape both read sensibly. -->
+          <span class="card-meta pointer-events-none absolute bottom-2 right-2 z-[2]">
+            {#if it.media_w && it.media_h}<span class="meta-badge">{Math.min(it.media_w, it.media_h)}p</span>{/if}
+            {#if it.media_type === 'video'}<span class="meta-badge meta-badge-video">video</span>{/if}
+            {#if it.has_subtitles}<span class="meta-badge">CC</span>{/if}
           </span>
 
           <!-- Selection circle, top-left: always shown in select mode, on hover
@@ -124,17 +126,17 @@
           <!-- top-right hover actions: archive + favorite -->
           {#if !selectMode}
             {@const isStashed = $stashed.has(it.id)}
-            <div class="absolute right-2 top-2 z-[3] flex gap-1.5">
+            <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1.5">
+              <button type="button" aria-label="Favorite" title="Favorite"
+                class="card-action-btn {fav ? 'text-[#ff5a7a]' : ''}"
+                onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
               <button type="button" aria-label={isStashed ? 'Restore' : 'Archive'} title={isStashed ? 'Restore' : 'Archive'}
-                class="grid h-8 w-8 place-items-center rounded-full bg-black/45 text-white opacity-0 transition group-hover:opacity-100 {isStashed ? 'opacity-100 bg-[var(--accent)]' : ''}"
+                class="card-action-btn {isStashed ? 'card-action-active' : ''}"
                 onclick={(e) => { e.stopPropagation(); setStashed([it.id], !isStashed); }}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>
               </button>
-              <button type="button" aria-label="Favorite" title="Favorite"
-                class="grid h-8 w-8 place-items-center rounded-full bg-black/45 text-white opacity-0 transition group-hover:opacity-100 {fav ? 'opacity-100 text-[#ff5a7a]' : ''}"
-                onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
               <button type="button" aria-label="Delete" title="Delete"
-                class="grid h-8 w-8 place-items-center rounded-full bg-black/45 text-white opacity-0 transition hover:bg-red-500 group-hover:opacity-100"
+                class="card-action-btn hover:bg-red-500"
                 onclick={(e) => { e.stopPropagation(); confirming = it; }}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
               </button>
@@ -162,3 +164,108 @@
     {tip.text}
   </div>
 {/if}
+
+<style>
+  .card-frame {
+    container-type: inline-size;
+  }
+
+  .card-meta {
+    align-items: center;
+    display: flex;
+    gap: 0.25rem;
+    justify-content: flex-end;
+    max-width: calc(100% - 1rem);
+    transform: scale(var(--meta-scale, 1));
+    transform-origin: bottom right;
+    white-space: nowrap;
+  }
+
+  .meta-badge {
+    align-items: center;
+    background: rgb(0 0 0 / 0.68);
+    border-radius: 999px;
+    color: white;
+    display: inline-flex;
+    font-size: 0.625rem;
+    font-weight: 800;
+    justify-content: center;
+    letter-spacing: 0;
+    line-height: 1;
+    min-height: 1.25rem;
+    padding: 0.25rem 0.45rem;
+    text-transform: uppercase;
+  }
+
+  .meta-badge-video {
+    padding-inline: 0.5rem;
+  }
+
+  .card-actions {
+    flex-direction: column;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-0.125rem);
+    transition: opacity 140ms ease, transform 140ms ease;
+  }
+
+  .card-frame:hover .card-actions,
+  .card-frame:focus-within .card-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .card-action-btn {
+    align-items: center;
+    background: rgb(0 0 0 / 0.52);
+    border: 1px solid rgb(255 255 255 / 0.16);
+    border-radius: 999px;
+    color: white;
+    display: grid;
+    height: 2rem;
+    place-items: center;
+    transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+    width: 2rem;
+  }
+
+  .card-action-btn:hover,
+  .card-action-btn:focus-visible {
+    background: rgb(0 0 0 / 0.72);
+    border-color: rgb(255 255 255 / 0.36);
+  }
+
+  .card-action-active {
+    background: var(--accent);
+    border-color: color-mix(in srgb, white 28%, transparent);
+  }
+
+  @container (min-width: 190px) {
+    .card-actions {
+      flex-direction: row;
+    }
+  }
+
+  @container (max-width: 174px) {
+    .card-meta {
+      --meta-scale: 0.92;
+      gap: 0.2rem;
+    }
+
+    .meta-badge {
+      font-size: 0.5625rem;
+      min-height: 1.125rem;
+      padding: 0.2rem 0.35rem;
+    }
+
+    .meta-badge-video {
+      padding-inline: 0.4rem;
+    }
+  }
+
+  @container (max-width: 150px) {
+    .card-meta {
+      --meta-scale: 0.82;
+    }
+  }
+</style>
