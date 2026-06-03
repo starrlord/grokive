@@ -2,7 +2,7 @@
   import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
 
-  let { onrefresh = () => {}, onfilters = () => {} } = $props();
+  let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {} } = $props();
 
   const periods = [
     { id: 'all', label: 'All time' },
@@ -64,7 +64,9 @@
   </nav>
 
   <div class="flex flex-wrap items-center gap-1.5">
-    <button type="button" class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold lg:hidden" onclick={onfilters}>Filters</button>
+    <!-- Mobile: opens the sidebar (filters + playlists + models) as a drawer.
+         The desktop sidebar is always visible, so this is lg:hidden. -->
+    <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line text-base lg:hidden" aria-label="Open menu" title="Menu" onclick={onmenu}>☰</button>
     <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
       title="Time period" value={$filters.period} onchange={(e) => setPeriod(e.target.value)}>
       {#each periods as p}<option value={p.id}>{p.label}</option>{/each}

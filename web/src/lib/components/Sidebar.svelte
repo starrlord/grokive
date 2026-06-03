@@ -12,7 +12,9 @@
   ];
 </script>
 
-<aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line p-4 lg:block" style="height: calc(100vh - 56px)">
+<!-- Just the content: the wrapper (desktop <aside> or mobile drawer) owns
+     width, scrolling and visibility so this can be reused in both. -->
+<div class="p-4">
   <div class="mb-5">
     <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Media type</div>
     <div class="grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
@@ -65,4 +67,4 @@
   {/if}
 
   <button type="button" class="w-full rounded-lg border border-line py-2 text-sm font-semibold" onclick={clearFilters}>Clear filters</button>
-</aside>
+</div>

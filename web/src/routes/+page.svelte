@@ -1,5 +1,7 @@
 <script>
   import { onMount } from 'svelte';
+  import { fly, fade } from 'svelte/transition';
+  import { portal } from '$lib/portal.js';
   import { fetchMedia, fetchFacets, fetchLibrary, mediaByIds } from '$lib/api.js';
   import {
     filters, mode, favorites, stashed, deleted, applyLibrary,
@@ -27,6 +29,7 @@
   let lb = $state(null); // { list, index, autoAdvance, title }
   let editing = $state(null); // playlist being edited
   let showFilters = $state(false);
+  let menuOpen = $state(false); // mobile sidebar drawer
   let sentinel = $state(null);
   let reqId = 0;
 
@@ -123,10 +126,12 @@
 
 <svelte:head><title>Grokive</title></svelte:head>
 
-<TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} />
+<TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} />
 
 <div class="flex">
-  <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
+  <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100vh - 56px)">
+    <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
+  </aside>
 
   <main class="min-w-0 flex-1 p-3 sm:p-4" style="padding-bottom: {$selectMode ? '5rem' : 'max(1rem, env(safe-area-inset-bottom))'}">
     {#if $filters.view === 'canvases'}
@@ -188,6 +193,31 @@
 
 {#if showFilters}
   <FiltersModal {facets} onclose={() => (showFilters = false)} />
+{/if}
+
+<!-- Mobile navigation drawer: the desktop sidebar (filters + playlists + models)
+     slides in from the left. lg:hidden — desktop shows the static <aside> instead. -->
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && menuOpen) menuOpen = false; }} />
+{#if menuOpen}
+  <div use:portal class="fixed inset-0 z-50 lg:hidden">
+    <div class="absolute inset-0 bg-black/65 backdrop-blur-sm" role="presentation"
+         transition:fade={{ duration: 150 }} onclick={() => (menuOpen = false)}></div>
+    <div class="absolute inset-y-0 left-0 flex w-[86vw] max-w-sm flex-col bg-[var(--surface-solid)] shadow-[8px_0_40px_rgba(0,0,0,0.5)]"
+         role="dialog" aria-modal="true" aria-label="Menu" tabindex="-1"
+         style="padding-top: max(0.5rem, env(safe-area-inset-top)); padding-bottom: env(safe-area-inset-bottom); padding-left: env(safe-area-inset-left)"
+         transition:fly={{ x: -360, duration: 220 }}>
+      <div class="flex items-center justify-between border-b border-line px-4 py-3">
+        <span class="text-lg font-extrabold tracking-tight">Grokive</span>
+        <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line" aria-label="Close menu" onclick={() => (menuOpen = false)}>✕</button>
+      </div>
+      <div class="min-h-0 flex-1 overflow-y-auto">
+        <Sidebar {facets}
+          onplay={(pl) => { menuOpen = false; playPlaylist(pl); }}
+          onedit={(pl) => { menuOpen = false; editing = pl; }}
+          onbrowse={() => { menuOpen = false; showFilters = true; }} />
+      </div>
+    </div>
+  </div>
 {/if}
 
 <Toaster />
