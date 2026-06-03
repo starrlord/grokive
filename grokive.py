@@ -96,6 +96,11 @@ def main() -> int:
     agents.add_argument("canvas_ids", nargs="*", help="Specific canvas IDs/URLs; omit to archive all canvases.")
     agents.add_argument("--verbose", action="store_true")
 
+    post = sub.add_parser("post", help="Download specific Grok Imagine posts by id or /imagine/post/<id> URL.")
+    post.add_argument("--curl", default=default_curl())
+    post.add_argument("post_ids", nargs="+", help="Post IDs or /imagine/post/<id> URLs (root media + child posts).")
+    post.add_argument("--verbose", action="store_true")
+
     sub.add_parser("index", help="Generate missing thumbnails and (re)build the SQLite index (index.db) the web UI queries.")
 
     all_cmd = sub.add_parser("all", help="Download, then build the index.")
@@ -124,6 +129,15 @@ def main() -> int:
             sys.executable, script("gdownloader.py"),
             "--curl", args.curl,
             "--grok-agents", *args.canvas_ids,
+        ]
+        if not args.verbose:
+            cmd.append("--quiet")
+        return run(cmd)
+    if args.command == "post":
+        cmd = [
+            sys.executable, script("gdownloader.py"),
+            "--curl", args.curl,
+            "--grok-posts", *args.post_ids,
         ]
         if not args.verbose:
             cmd.append("--quiet")

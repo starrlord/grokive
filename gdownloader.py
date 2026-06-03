@@ -31,6 +31,7 @@ GROK_FAVORITES_ENDPOINT = "https://grok.com/rest/media/post/list"
 GROK_FAVORITES_FILTER = "MEDIA_POST_SOURCE_LIKED"
 GROK_CANVAS_LIST_ENDPOINT = "https://grok.com/rest/media/canvas/list"
 GROK_CANVAS_GET_ENDPOINT = "https://grok.com/rest/media/canvas/get"
+GROK_POST_GET_ENDPOINT = "https://grok.com/rest/media/post/get"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mpeg", ".mpg"}
 MIME_EXT = {
@@ -194,6 +195,20 @@ def grok_canvas_get_spec(auth_spec: RequestSpec, canvas_id: str) -> RequestSpec:
         headers=headers,
         cookies=auth_spec.cookies,
         body=json.dumps({"id": canvas_id}, separators=(",", ":")),
+    )
+
+
+def grok_post_get_spec(auth_spec: RequestSpec, post_id: str) -> RequestSpec:
+    """Fetch a single post (/imagine/post/<id>) — root media plus its child posts.
+    Mirrors canvas/get: POST {"id": <post_id>} to /rest/media/post/get."""
+    headers = dict(auth_spec.headers)
+    headers["Content-Type"] = "application/json"
+    return RequestSpec(
+        method="POST",
+        url=GROK_POST_GET_ENDPOINT,
+        headers=headers,
+        cookies=auth_spec.cookies,
+        body=json.dumps({"id": post_id}, separators=(",", ":")),
     )
 
 
@@ -720,6 +735,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--grok-posts",
+        nargs="+",
+        metavar="POST_ID",
+        default=None,
+        help=(
+            "Download specific Grok Imagine posts by id or /imagine/post/<id> URL "
+            "(the root media plus its child posts)."
+        ),
+    )
+    parser.add_argument(
         "--early-stop-existing-page",
         action="store_true",
         help="Stop when a fetched page contains only IDs already present in metadata.json.",
@@ -751,7 +776,9 @@ def main() -> None:
             if args.quiet and saved_count and saved_count % 100 == 0:
                 print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
 
-        if args.grok_agents is not None:
+        if args.grok_posts is not None:
+            saved_count = archive_posts(client, auth_spec, media_spec, by_id, args)
+        elif args.grok_agents is not None:
             saved_count = archive_agent_canvases(client, auth_spec, media_spec, by_id, args)
         else:
             list_spec = grok_favorites_spec(auth_spec, args.page_size) if args.grok_favorites else specs[0]
@@ -782,6 +809,46 @@ def normalize_canvas_id(value: str) -> str:
     if "/" in value:
         return value.rstrip("/").rsplit("/", 1)[-1]
     return value
+
+
+def normalize_post_id(value: str) -> str:
+    """Accept a bare post id or a full /imagine/post/<id> URL (with optional query/fragment)."""
+    value = value.strip()
+    if "/" in value:
+        path = urlparse(value).path or value  # drops ?query and #fragment
+        value = path.rstrip("/").rsplit("/", 1)[-1]
+    return value
+
+
+def archive_posts(
+    client: httpx.Client,
+    auth_spec: RequestSpec,
+    media_spec: RequestSpec,
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> int:
+    """Download specific posts by id/URL: the root media plus every child post,
+    reusing the same per-post extraction the favorites list uses."""
+    requested = [normalize_post_id(v) for v in args.grok_posts]
+    print(f"fetching {len(requested)} post(s)")
+    saved_count = 0
+    for post_id in requested:
+        post_json = request_json_with_backoff(client, grok_post_get_spec(auth_spec, post_id))
+        post = post_json.get("post") if isinstance(post_json, dict) else None
+        if not isinstance(post, dict):
+            print(f"post {post_id}: not found or unexpected response")
+            continue
+        items = extract_grok_media_items({"posts": [post]})
+        print(f"post {post_id}: {len(items)} media item(s)")
+        for raw in items:
+            if args.refresh_metadata:
+                saved_count += patch_existing_record(raw, by_id)
+                continue
+            if process_item(client, media_spec, raw, by_id, args):
+                saved_count += 1
+                if args.quiet and saved_count % 100 == 0:
+                    print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
+    return saved_count
 
 
 def archive_agent_canvases(

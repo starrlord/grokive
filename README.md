@@ -20,6 +20,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 
 - Bulk-download Grok Imagine saved/favorited images and videos.
 - Bulk-download Agent canvases (`/imagine/agent/<id>`) — all canvases or specific ones.
+- Download individual posts by link (`/imagine/post/<id>`) — grabs the root media plus all its child posts.
 - Resume-safe: rerun anytime; existing IDs are skipped.
 - Saves prompt metadata (including canvas name) with every media file.
 - Builds a SQLite read-model (`index.db`) with FTS5 full-text search that the web UI queries.
@@ -258,6 +259,11 @@ or `AUTH_DISABLED=true`, before starting if you prefer.
 canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs). Both write to
 `media/images/`, `media/videos/`, and `metadata.json`, and skip anything already
 downloaded. Shortcut: `python grokive.py all` runs download → index in one go.
+
+To grab a single post rather than your whole library, `python grokive.py post <id-or-url> [...]`
+downloads one or more posts by id or `/imagine/post/<id>` link (the root media plus its
+child posts) — same resume-safe, skip-existing behavior. Run `python grokive.py index`
+afterwards if you want it in the web UI.
 
 ### CLI-only mode (no web UI)
 
