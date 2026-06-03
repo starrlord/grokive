@@ -6,9 +6,9 @@ async function getJSON(url) {
   return res.json();
 }
 
-export function fetchMedia(f, page = 1, pageSize = 120) {
+export function fetchMedia(f, page = 1, pageSize = 120, collectionId = null) {
   const p = new URLSearchParams();
-  p.set('view', f.view || 'files');
+  p.set('view', f.view || 'recent');
   if (f.query) p.set('q', f.query);
   if (f.tags?.length) p.set('tags', f.tags.join(','));
   if (f.models?.length) p.set('models', f.models.join(','));
@@ -16,13 +16,23 @@ export function fetchMedia(f, page = 1, pageSize = 120) {
   if (f.canvas) p.set('canvas', f.canvas);
   if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
   if (f.period && f.period !== 'all') p.set('period', f.period);
+  if (collectionId) p.set('collection', collectionId);
   p.set('sort', f.sort || 'new');
   p.set('page', String(page));
   p.set('page_size', String(pageSize));
   return getJSON(`/api/media?${p.toString()}`);
 }
 
-export const fetchFacets = () => getJSON('/api/facets');
+export function fetchFacets(f = {}, collectionId = null) {
+  const p = new URLSearchParams();
+  p.set('view', f.view || 'recent');
+  if (f.query) p.set('q', f.query);
+  if (f.canvas) p.set('canvas', f.canvas);
+  if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
+  if (f.period && f.period !== 'all') p.set('period', f.period);
+  if (collectionId) p.set('collection', collectionId);
+  return getJSON(`/api/facets?${p.toString()}`);
+}
 
 export async function mediaByIds(ids) {
   if (!ids?.length) return [];
@@ -45,6 +55,13 @@ export async function fetchPlaylists() {
 }
 export const savePlaylists = (playlists) =>
   fetch('/api/playlists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ playlists }) }).catch(() => {});
+
+// --- Collections -----------------------------------------------------------
+export async function fetchCollections() {
+  try { return (await getJSON('/api/collections')).collections || []; } catch { return []; }
+}
+export const saveCollections = (collections) =>
+  fetch('/api/collections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collections }) }).catch(() => {});
 
 // --- Export (streamed MP4 download) ----------------------------------------
 async function downloadBlob(response, name) {

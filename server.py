@@ -58,6 +58,7 @@ LEGACY_CURL_FILE = DATA_DIR / "curl_samples.txt"
 METADATA_FILE = DATA_DIR / "metadata.json"
 DELETED_FILE = DATA_DIR / "deleted_ids.json"  # blocklist: ids the downloader must never re-pull
 PLAYLISTS_FILE = DATA_DIR / "playlists.json"
+COLLECTIONS_FILE = DATA_DIR / "collections.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
@@ -673,6 +674,104 @@ def api_playlists_post() -> Response:
     return jsonify(ok=True, count=len(clean))
 
 
+def _collection_id_list(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    seen, out = set(), []
+    for item in value[:100000]:
+        key = str(item)[:128]
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _clean_collection(entry: dict) -> dict | None:
+    name = str(entry.get("name", "")).strip()[:120]
+    ids = _collection_id_list(entry.get("ids"))
+    if not name:
+        return None
+    now = time.strftime("%Y-%m-%d")
+    return {
+        "id": str(entry.get("id") or "")[:64] or name,
+        "name": name,
+        "ids": ids,
+        "cover_id": str(entry.get("cover_id") or "")[:128],
+        "created_at": str(entry.get("created_at") or now)[:32],
+        "updated_at": str(entry.get("updated_at") or now)[:32],
+    }
+
+
+def _load_collections() -> list[dict]:
+    data: list = []
+    if COLLECTIONS_FILE.exists():
+        try:
+            loaded = json.loads(COLLECTIONS_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    clean: list[dict] = []
+    for entry in data[:1000]:
+        if isinstance(entry, dict):
+            c = _clean_collection(entry)
+            if c:
+                clean.append(c)
+    return clean
+
+
+def _collection_summaries(collections: list[dict]) -> list[dict]:
+    if not DB_FILE.exists():
+        rebuild_db()
+    summaries = []
+    for coll in collections:
+        media = db.media_by_ids(DB_FILE, coll.get("ids", []))
+        ids = [it["id"] for it in media]
+        cover_id = coll.get("cover_id") if coll.get("cover_id") in ids else (ids[0] if ids else "")
+        cover_item = next((it for it in media if it["id"] == cover_id), None)
+        covers = [it.get("thumb") for it in media if it.get("thumb")][:4]
+        videos = sum(1 for it in media if it.get("media_type") == "video")
+        images = sum(1 for it in media if it.get("media_type") == "image")
+        summaries.append({
+            **coll,
+            "ids": ids,
+            "cover_id": cover_id,
+            "cover": cover_item.get("thumb") if cover_item else (covers[0] if covers else None),
+            "covers": covers,
+            "item_count": len(media),
+            "video_count": videos,
+            "image_count": images,
+        })
+    return summaries
+
+
+@app.get("/api/collections")
+def api_collections_get() -> Response:
+    """Return saved mixed-media collections with lightweight display summaries."""
+    return jsonify(collections=_collection_summaries(_load_collections()))
+
+
+@app.post("/api/collections")
+def api_collections_post() -> Response:
+    """Replace the whole collection list, mirroring the playlist persistence model."""
+    payload = request.get_json(silent=True) or {}
+    incoming = payload.get("collections")
+    if not isinstance(incoming, list):
+        return jsonify(ok=False, error="Expected a 'collections' array."), 400
+    clean = []
+    for entry in incoming[:1000]:
+        if not isinstance(entry, dict):
+            continue
+        coll = _clean_collection(entry)
+        if coll:
+            clean.append(coll)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = COLLECTIONS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(COLLECTIONS_FILE)
+    return jsonify(ok=True, count=len(clean))
+
+
 # --------------------------------------------------------------------------- #
 # Playlist export (ffmpeg merge -> streamed MP4, nothing persisted on disk)
 # --------------------------------------------------------------------------- #
@@ -1082,10 +1181,18 @@ def api_media() -> Response:
     if not DB_FILE.exists():
         rebuild_db()
     favorites, stashed = _library_sets()
+    collection_id = request.args.get("collection") or ""
+    collection_ids: list[str] = []
+    if collection_id:
+        collection = next((c for c in _load_collections() if c.get("id") == collection_id), None)
+        if collection:
+            collection_ids = collection.get("ids", []) or ["__grokive_empty_collection__"]
+        else:
+            collection_ids = ["__grokive_missing_collection__"]
     start, end = _period_range(request.args.get("period", "all"))
     result = db.query_media(
         DB_FILE,
-        view=request.args.get("view", "files"),
+        view=request.args.get("view", "recent"),
         q=request.args.get("q", ""),
         tags=_multi_arg("tags"),
         models=_multi_arg("models"),
@@ -1097,6 +1204,7 @@ def api_media() -> Response:
         page_size=_int_arg("page_size", 120),
         favorites=favorites,
         stashed=stashed,
+        collection_ids=collection_ids,
         start=start,
         end=end,
     )
@@ -1107,8 +1215,28 @@ def api_media() -> Response:
 def api_facets() -> Response:
     if not DB_FILE.exists():
         rebuild_db()
-    _, stashed = _library_sets()
-    return jsonify(db.facets(DB_FILE, stashed=stashed))
+    favorites, stashed = _library_sets()
+    collection_id = request.args.get("collection") or ""
+    collection_ids: list[str] = []
+    if collection_id:
+        collection = next((c for c in _load_collections() if c.get("id") == collection_id), None)
+        if collection:
+            collection_ids = collection.get("ids", []) or ["__grokive_empty_collection__"]
+        else:
+            collection_ids = ["__grokive_missing_collection__"]
+    start, end = _period_range(request.args.get("period", "all"))
+    return jsonify(db.facets(
+        DB_FILE,
+        view=request.args.get("view", "recent"),
+        q=request.args.get("q", ""),
+        canvas=request.args.get("canvas") or None,
+        media_type=request.args.get("type", "all"),
+        favorites=favorites,
+        stashed=stashed,
+        collection_ids=collection_ids,
+        start=start,
+        end=end,
+    ))
 
 
 @app.post("/api/media/by-ids")
@@ -1124,8 +1252,8 @@ def api_media_by_ids() -> Response:
 
 @app.get("/api/library")
 def api_library_get() -> Response:
-    """User library state: favorited and stashed item ids. Kept separate from
-    metadata.json (the download ledger) so a sync never clobbers it."""
+    """User library state: favorited and archived item ids. The archive key stays
+    named ``stashed`` on disk so existing data volumes keep working."""
     favorites: list = []
     stashed: list = []
     if LIBRARY_FILE.exists():
@@ -1234,6 +1362,23 @@ def _purge_ids_from_playlists(ids: set) -> None:
         _atomic_write_json(PLAYLISTS_FILE, data)
 
 
+def _purge_ids_from_collections(ids: set) -> None:
+    if not COLLECTIONS_FILE.exists():
+        return
+    data = _load_collections()
+    changed = False
+    for coll in data:
+        kept = [i for i in coll.get("ids", []) if str(i) not in ids]
+        if len(kept) != len(coll.get("ids", [])):
+            coll["ids"] = kept
+            if coll.get("cover_id") and str(coll["cover_id"]) in ids:
+                coll["cover_id"] = kept[0] if kept else ""
+            coll["updated_at"] = time.strftime("%Y-%m-%d")
+            changed = True
+    if changed:
+        _atomic_write_json(COLLECTIONS_FILE, data)
+
+
 @app.post("/api/media/delete")
 def api_media_delete() -> Response:
     """Hard-delete media: remove files from disk, drop from metadata + index, purge
@@ -1270,6 +1415,7 @@ def api_media_delete() -> Response:
 
     _purge_ids_from_library(ids)
     _purge_ids_from_playlists(ids)
+    _purge_ids_from_collections(ids)
     try:
         db.delete_media(DB_FILE, list(ids))
     except Exception as exc:  # pragma: no cover - defensive

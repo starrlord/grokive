@@ -19,9 +19,11 @@
   ];
 
   const views = [
-    { id: 'files', label: 'Files' },
+    { id: 'recent', label: 'Recent' },
+    { id: 'all', label: 'All Media' },
+    { id: 'collections', label: 'Collections' },
     { id: 'favorites', label: 'Favorites' },
-    { id: 'stashed', label: 'Stashed' },
+    { id: 'archive', label: 'Archive' },
     { id: 'canvases', label: 'Canvases' }
   ];
 
@@ -41,21 +43,21 @@
 
   function label(v) {
     if (v.id === 'favorites' && $counts.favorites) return `Favorites (${$counts.favorites})`;
-    if (v.id === 'stashed' && $counts.stashed) return `Stashed (${$counts.stashed})`;
+    if (v.id === 'archive' && $counts.archived) return `Archive (${$counts.archived})`;
     return v.label;
   }
 </script>
 
-<header class="glass sticky top-0 z-30 flex flex-wrap items-center gap-3 px-4 py-2.5" style="padding-top: max(0.625rem, env(safe-area-inset-top))">
-  <button type="button" class="text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show all files" onclick={resetAll}>Grokive</button>
+<header class="topbar glass sticky top-0 z-30 flex flex-wrap items-center gap-3 px-4 py-2.5" style="padding-top: max(0.625rem, env(safe-area-inset-top))">
+  <button type="button" class="topbar-brand text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show recent media" onclick={resetAll}>Grokive</button>
 
-  <div class="order-3 w-full sm:order-none sm:w-auto sm:flex-1">
+  <div class="topbar-search order-3 w-full min-w-0 sm:order-none sm:w-auto sm:flex-1">
     <input
       class="w-full rounded-full border border-line bg-[var(--surface-2)] px-4 py-2 text-sm outline-none placeholder:text-muted"
       type="search" placeholder="Search prompts, tags, models…" value={q} oninput={onInput} />
   </div>
 
-  <nav class="flex max-w-full gap-1 overflow-x-auto rounded-full border border-line bg-[var(--surface-2)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+  <nav class="topbar-views flex max-w-full gap-1 overflow-x-auto rounded-full border border-line bg-[var(--surface-2)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
     {#each views as v}
       <button type="button"
         class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-semibold transition {$filters.view === v.id ? 'bg-[var(--accent)] text-white' : 'text-muted hover:text-ink'}"
@@ -63,7 +65,7 @@
     {/each}
   </nav>
 
-  <div class="flex flex-wrap items-center gap-1.5">
+  <div class="topbar-tools flex flex-wrap items-center gap-1.5">
     <!-- Mobile: opens the sidebar (filters + playlists + models) as a drawer.
          The desktop sidebar is always visible, so this is lg:hidden. -->
     <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line text-base lg:hidden" aria-label="Open menu" title="Menu" onclick={onmenu}>☰</button>
@@ -89,5 +91,91 @@
       onclick={() => setSelectMode(!$selectMode)}>{$selectMode ? 'Done' : 'Select'}</button>
   </div>
 
-  <div class="w-full sm:w-auto"><SystemControls {onrefresh} /></div>
+  <div class="topbar-system w-full sm:w-auto"><SystemControls {onrefresh} /></div>
 </header>
+
+<style>
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .topbar {
+      display: grid;
+      grid-template-columns: auto minmax(12rem, 1fr) auto;
+      grid-template-areas:
+        "brand search system"
+        "views views views"
+        "tools tools tools";
+      column-gap: 0.75rem;
+      row-gap: 0.5rem;
+      align-items: center;
+    }
+
+    .topbar-brand { grid-area: brand; }
+    .topbar-search {
+      grid-area: search;
+      min-width: 0;
+      width: auto;
+    }
+    .topbar-views {
+      grid-area: views;
+      justify-self: stretch;
+      width: 100%;
+      min-width: 0;
+    }
+    .topbar-views :global(button) {
+      padding-left: 0.625rem;
+      padding-right: 0.625rem;
+      font-size: 0.8125rem;
+    }
+    .topbar-tools {
+      grid-area: tools;
+      flex-wrap: nowrap;
+      min-width: 0;
+      overflow-x: auto;
+      padding-bottom: 0.0625rem;
+      scrollbar-width: none;
+    }
+    .topbar-tools::-webkit-scrollbar { display: none; }
+    .topbar-tools :global(select) { max-width: 8.5rem; }
+    .topbar-system {
+      grid-area: system;
+      justify-self: end;
+      width: auto;
+      min-width: 0;
+    }
+  }
+
+  @media (min-width: 1280px) and (max-width: 1535px) {
+    .topbar {
+      display: grid;
+      grid-template-columns: auto minmax(16rem, 1fr) auto;
+      grid-template-areas:
+        "brand search system"
+        "views views tools";
+      column-gap: 0.75rem;
+      row-gap: 0.5rem;
+      align-items: center;
+    }
+
+    .topbar-brand { grid-area: brand; }
+    .topbar-search {
+      grid-area: search;
+      min-width: 0;
+      width: auto;
+    }
+    .topbar-views {
+      grid-area: views;
+      min-width: 0;
+      width: 100%;
+    }
+    .topbar-tools {
+      grid-area: tools;
+      justify-self: end;
+      flex-wrap: nowrap;
+    }
+    .topbar-system {
+      grid-area: system;
+      justify-self: end;
+      width: auto;
+      min-width: 0;
+    }
+  }
+</style>

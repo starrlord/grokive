@@ -121,11 +121,11 @@
             onpointerdown={(e) => e.stopPropagation()}
             onclick={(e) => { e.stopPropagation(); selectCircle(it); }}>{sel ? '✓' : ''}</button>
 
-          <!-- top-right hover actions: stash + favorite -->
+          <!-- top-right hover actions: archive + favorite -->
           {#if !selectMode}
             {@const isStashed = $stashed.has(it.id)}
             <div class="absolute right-2 top-2 z-[3] flex gap-1.5">
-              <button type="button" aria-label={isStashed ? 'Unstash' : 'Stash'} title={isStashed ? 'Unstash' : 'Stash'}
+              <button type="button" aria-label={isStashed ? 'Restore' : 'Archive'} title={isStashed ? 'Restore' : 'Archive'}
                 class="grid h-8 w-8 place-items-center rounded-full bg-black/45 text-white opacity-0 transition group-hover:opacity-100 {isStashed ? 'opacity-100 bg-[var(--accent)]' : ''}"
                 onclick={(e) => { e.stopPropagation(); setStashed([it.id], !isStashed); }}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>

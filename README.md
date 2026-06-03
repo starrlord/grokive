@@ -4,7 +4,7 @@
 
 Download your Grok Imagine favorites and Agent canvases, then browse them in a modern, responsive web app — chain clips into a playlist and export them as one seamless video, auto-generate subtitles for every clip, and burn them straight into the merged file.
 
-Grokive is a free, self-hosted archiver that keeps your Grok Imagine library entirely on hardware you control. You sign in once by pasting a cURL request copied from your browser session; from there the tool pulls your saved media down to local disk. Browsing happens in a **SvelteKit single-page web app** (run via Docker or `python server.py`) backed by a SQLite read-model, with full-text prompt search, favorites, stash, playlists, subtitle generation, themes, and an installable PWA. A small **CLI** handles the downloading and index builds.
+Grokive is a free, self-hosted archiver that keeps your Grok Imagine library entirely on hardware you control. You sign in once by pasting a cURL request copied from your browser session; from there the tool pulls your saved media down to local disk. Browsing happens in a **SvelteKit single-page web app** (run via Docker or `python server.py`) backed by a SQLite read-model, with full-text prompt search, favorites, archive, collections, playlists, subtitle generation, themes, and an installable PWA. A small **CLI** handles the downloading and index builds.
 
 ## Screenshots
 
@@ -26,7 +26,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Builds a SQLite read-model (`index.db`) with FTS5 full-text search that the web UI queries.
 - Incremental: only new thumbnails and records are generated on each sync.
 - Groups media created from the same normalized prompt.
-- Browse by canvas: a Files/Canvases view with one album per canvas.
+- Browse by canvas: a Canvases view with one album per canvas and drill-in that keeps the Canvases context active.
 - Search across prompts, tags, models, and local filenames.
 - Filter by media type: all, images, or videos.
 - Filter by generated prompt tags, model names, and canvas.
@@ -34,11 +34,11 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Open a same-prompt view to see every image/video created from that prompt.
 - Click/copy prompts for reuse.
 - Show parent media when parent metadata is available.
-- Build video **playlists** and play them back-to-back, with fullscreen auto-advance and drag-to-reorder.
+- Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
-- **Favorites** and **Stash:** ♥ items into a Favorites view; stash items to hide them from the main views (their own Stashed view, reversible).
+- **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
 - **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
 - **Themes** (Violet default, Classic, Light) and **layouts** (Grid, Editorial) — switchable in Config.
 - Self-hosted and local-first: everything stays on your own hardware — no analytics, no external services, no account required.
@@ -53,8 +53,8 @@ server is configured (see *Subtitles*), a **Generate Subtitles** button also app
 Long jobs stream their progress into an on-page **Log** overlay.
 
 All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
-read-model), `library.json` (favorites/stash), `deleted_ids.json` (delete blocklist),
-`playlists.json`, `settings.json`,
+read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
+`playlists.json`, `collections.json`, `settings.json`,
 media, thumbnails, subtitle `.srt`/`.vtt` sidecars, and the built gallery) is written
 under one volume: the container's `/data` (set via the `GROK_DATA_DIR` env var), so it
 survives container updates. `index.db` is purely derived from `metadata.json` and
@@ -195,7 +195,9 @@ When run in Docker, the archiver serves a **SvelteKit** single-page app at `/`, 
 by a SQLite read-model (`db.py` → `index.db`, with FTS5 full-text search) and a small
 Flask API (`/api/media`, `/api/facets`, …). Highlights:
 
-- **Views:** Files, Favorites, Stashed, and Canvases tabs.
+- **Views:** Recent, All Media, Collections, Favorites, Archive, and Canvases tabs. All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
+- **Collections:** group mixed images and videos into named cards with covers, then drill into each collection with the normal gallery controls and scoped tag/resolution filters.
+- **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
 - **Themes:** Violet (default), Classic, and Light (Config → Appearance). The ☾/☀ button
@@ -203,9 +205,9 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 - **Search & filters:** full-text prompt/tag/model search in the top bar; a searchable
   **tag-cloud** modal (*Browse all tags*); media-type and model filters; one-click reset
   (the "Grokive" wordmark or the *Reset filters* chip).
-- **Favorites & Stash:** hover a card for ♥ (favorite) and the stash icon (hide into the
-  Stashed view; reversible).
-- **Select mode:** multi-select for bulk favorite/stash, **Save as playlist**, or a
+- **Favorites & Archive:** hover a card for ♥ (favorite) and the archive icon (hide from
+  Recent; reversible from the Archive view).
+- **Select mode:** multi-select plus compact Select Visible / Next 25 helpers for bulk favorite/archive, **Add to Collection**, **Save as playlist**, or a
   one-off **Export**.
 - **Lightbox:** the media fills the window; press `i` / tap ⓘ for prompt + actions, `f`
   for fullscreen, arrows to navigate; subtitle track shown when available.

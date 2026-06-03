@@ -6,7 +6,7 @@ rebuild at any time; the downloader never writes here. The web API queries this 
 instead of shipping the whole library to the browser, which gives fast paginated
 results and real full-text prompt search (FTS5).
 
-Favorites / stashed / playlists still live in their JSON files for now and are
+Favorites / archive / playlists still live in their JSON files for now and are
 applied as filters by the API layer; a later phase can fold them into tables here.
 """
 
@@ -261,20 +261,26 @@ def query_media(
     page_size: int = 120,
     favorites: Iterable[str] = (),
     stashed: Iterable[str] = (),
+    collection_ids: Iterable[str] = (),
     start: str | None = None,
     end: str | None = None,
 ) -> dict[str, Any]:
     """Paginated, filtered media query. ``favorites``/``stashed`` are id sets the
-    caller supplies (from library.json); they drive the Favorites/Stashed views and
-    the global 'hide stashed everywhere else' rule."""
+    caller supplies (from library.json); they drive Favorites/Archive and the
+    global "hide archived from Recent" rule. ``all`` intentionally bypasses that
+    hiding so users can find anything that still exists on disk."""
     conn = _connect(db_path)
     try:
         has_stash = _temp_id_table(conn, "_stash", stashed)
         has_fav = _temp_id_table(conn, "_fav", favorites)
+        has_collection = _temp_id_table(conn, "_collection", collection_ids)
 
         where: list[str] = []
         params: list[Any] = []
         joins = ""
+
+        if has_collection:
+            where.append("m.id IN (SELECT id FROM _collection)")
 
         if q.strip():
             match = _fts_query(q)
@@ -283,10 +289,11 @@ def query_media(
                 where.append("media_fts MATCH ?")
                 params.append(match)
 
-        if view == "stashed":
+        view = "recent" if view == "files" else ("archive" if view == "stashed" else view)
+        if view == "archive":
             where.append("m.id IN (SELECT id FROM _stash)" if has_stash else "0")
         else:
-            if has_stash:
+            if has_stash and view not in ("all", "favorites", "canvases", "collections"):
                 where.append("m.id NOT IN (SELECT id FROM _stash)")
             if view == "favorites":
                 where.append("m.id IN (SELECT id FROM _fav)" if has_fav else "0")
@@ -404,49 +411,101 @@ def delete_media(db_path: str | Path, ids: list[str]) -> int:
         conn.close()
 
 
-def facets(db_path: str | Path, stashed: Iterable[str] = ()) -> dict[str, Any]:
-    """Tag / model / canvas counts for the sidebar (excluding stashed items)."""
+def facets(
+    db_path: str | Path,
+    *,
+    view: str = "recent",
+    q: str = "",
+    canvas: str | None = None,
+    media_type: str = "all",
+    favorites: Iterable[str] = (),
+    stashed: Iterable[str] = (),
+    collection_ids: Iterable[str] = (),
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """Tag / model / canvas / resolution counts for the current browsing scope."""
     conn = _connect(db_path)
     try:
         has_stash = _temp_id_table(conn, "_stash", stashed)
-        not_stashed = " WHERE m.id NOT IN (SELECT id FROM _stash)" if has_stash else ""
-        tag_join = (
-            " WHERE media_id NOT IN (SELECT id FROM _stash)" if has_stash else ""
-        )
+        has_fav = _temp_id_table(conn, "_fav", favorites)
+        has_collection = _temp_id_table(conn, "_collection", collection_ids)
+
+        where: list[str] = []
+        params: list[Any] = []
+        joins = ""
+
+        if q.strip():
+            match = _fts_query(q)
+            if match:
+                joins += " JOIN media_fts f ON f.id = m.id"
+                where.append("media_fts MATCH ?")
+                params.append(match)
+
+        view = "recent" if view == "files" else ("archive" if view == "stashed" else view)
+        if has_collection:
+            where.append("m.id IN (SELECT id FROM _collection)")
+        elif view == "archive":
+            where.append("m.id IN (SELECT id FROM _stash)" if has_stash else "0")
+        else:
+            if has_stash and view not in ("all", "favorites", "canvases", "collections"):
+                where.append("m.id NOT IN (SELECT id FROM _stash)")
+            if view == "favorites":
+                where.append("m.id IN (SELECT id FROM _fav)" if has_fav else "0")
+
+        if canvas:
+            where.append("m.canvas_id = ?")
+            params.append(canvas)
+        if media_type in ("image", "video"):
+            where.append("m.media_type = ?")
+            params.append(media_type)
+        if start:
+            where.append("m.created_at >= ?")
+            params.append(start)
+        if end:
+            where.append("m.created_at < ?")
+            params.append(end)
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         tags = [
             {"name": r["tag"], "count": r["n"]}
             for r in conn.execute(
-                f"SELECT tag, COUNT(*) n FROM media_tags{tag_join} GROUP BY tag ORDER BY n DESC, tag"
+                f"SELECT mt.tag, COUNT(*) n FROM media_tags mt JOIN media m ON m.id = mt.media_id{joins}{where_sql} "
+                f"GROUP BY mt.tag ORDER BY n DESC, mt.tag",
+                params,
             )
         ]
         models = [
             {"name": r["model"] or "Unknown model", "count": r["n"]}
             for r in conn.execute(
-                f"SELECT COALESCE(NULLIF(model,''), NULL) model, COUNT(*) n FROM media m{not_stashed} "
-                f"GROUP BY model ORDER BY n DESC"
+                f"SELECT COALESCE(NULLIF(m.model,''), NULL) model, COUNT(*) n FROM media m{joins}{where_sql} "
+                f"GROUP BY model ORDER BY n DESC",
+                params,
             )
         ]
         canvases = [
             {"id": r["canvas_id"], "name": r["canvas_name"] or r["canvas_id"],
              "count": r["n"], "videos": r["v"], "images": r["i"], "cover": r["cover"]}
             for r in conn.execute(
-                f"SELECT canvas_id, canvas_name, COUNT(*) n, "
-                f"SUM(media_type='video') v, SUM(media_type='image') i, "
-                f"MAX(thumb) cover FROM media m{not_stashed}"
-                f"{' AND' if not_stashed else ' WHERE'} canvas_id IS NOT NULL "
-                f"GROUP BY canvas_id ORDER BY n DESC"
+                f"SELECT m.canvas_id, m.canvas_name, COUNT(*) n, "
+                f"SUM(m.media_type='video') v, SUM(m.media_type='image') i, "
+                f"MAX(m.thumb) cover FROM media m{joins}{where_sql}"
+                f"{' AND' if where_sql else ' WHERE'} m.canvas_id IS NOT NULL "
+                f"GROUP BY m.canvas_id ORDER BY n DESC",
+                params,
             )
         ]
-        res_where = (not_stashed + " AND" if not_stashed else " WHERE") + \
-            " media_w IS NOT NULL AND media_h IS NOT NULL"
+        res_where = (where_sql + " AND" if where_sql else " WHERE") + \
+            " m.media_w IS NOT NULL AND m.media_h IS NOT NULL"
         resolutions = [
             {"height": r["h"], "count": r["n"]}
             for r in conn.execute(
-                f"SELECT MIN(media_w, media_h) AS h, COUNT(*) n FROM media m{res_where} "
-                f"GROUP BY h ORDER BY h DESC"
+                f"SELECT MIN(m.media_w, m.media_h) AS h, COUNT(*) n FROM media m{joins}{res_where} "
+                f"GROUP BY h ORDER BY h DESC",
+                params,
             )
         ]
-        total = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM media m{joins}{where_sql}", params).fetchone()[0]
         return {"tags": tags, "models": models, "canvases": canvases,
                 "resolutions": resolutions, "total": total}
     finally:

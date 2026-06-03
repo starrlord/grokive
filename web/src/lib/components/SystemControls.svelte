@@ -60,14 +60,27 @@
   );
 </script>
 
-<div class="flex flex-wrap items-center gap-1.5">
-  <button class="rounded-full px-3 py-1.5 text-xs font-semibold {pillClass}" onclick={() => (showLog = !showLog)} title="Log">{pillText}</button>
+<div class="system-controls flex flex-wrap items-center gap-1.5">
+  <button class="max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold {pillClass}" onclick={() => (showLog = !showLog)} title="Log">{pillText}</button>
   <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
   {#if $settings.whisper_configured}
     <button class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold disabled:opacity-50" onclick={doSubs} disabled={status.running}>Subtitles</button>
   {/if}
   <button class="grid h-9 w-9 place-items-center rounded-lg border border-line" title="Config" onclick={() => (showConfig = true)}>⚙</button>
 </div>
+
+<style>
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .system-controls {
+      flex-wrap: nowrap;
+      justify-content: flex-end;
+    }
+
+    .system-controls :global(button:first-child) {
+      max-width: 9.5rem;
+    }
+  }
+</style>
 
 {#if showLog}
   <div use:portal class="panel fixed bottom-4 right-4 z-[55] w-[min(680px,calc(100vw-2rem))] overflow-hidden rounded-card">

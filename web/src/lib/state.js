@@ -1,5 +1,9 @@
 import { writable, derived, get } from 'svelte/store';
-import { saveLibrary, fetchPlaylists, savePlaylists, getSettings, deleteMedia } from './api.js';
+import {
+  saveLibrary, fetchPlaylists, savePlaylists,
+  fetchCollections, saveCollections,
+  getSettings, deleteMedia
+} from './api.js';
 import { toast } from './toast.js';
 
 const LS = (key, fallback) => {
@@ -44,7 +48,7 @@ mode.subscribe((v) => {
 
 // --- Filter / view state ----------------------------------------------------
 export const filters = writable({
-  view: 'files', // files | favorites | stashed | canvases
+  view: 'recent', // recent | all | collections | favorites | archive | canvases
   query: '',
   tags: [],
   models: [],
@@ -93,15 +97,15 @@ export function setPeriod(period) {
 export function clearFilters() {
   filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
 }
-// Full reset, including the active view -> back to "all files".
+// Full reset, including the active view -> back to Recent.
 export function resetAll() {
-  filters.update((f) => ({ ...f, view: 'files', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
+  filters.update((f) => ({ ...f, view: 'recent', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
 }
 export function hasActiveFilters(f) {
-  return !!(f.query || f.tags.length || f.models.length || f.resolutions.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.view !== 'files');
+  return !!(f.query || f.tags.length || f.models.length || f.resolutions.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.view !== 'recent');
 }
 
-// --- Library: favorites + stashed (server-backed, local fallback) ----------
+// --- Library: favorites + archive (stored as stashed for backward compatibility)
 export const favorites = writable(new Set());
 export const stashed = writable(new Set());
 
@@ -140,6 +144,7 @@ export function setFavorites(ids, on) {
 
 export const counts = derived([favorites, stashed], ([$f, $s]) => ({
   favorites: $f.size,
+  archived: $s.size,
   stashed: $s.size
 }));
 
@@ -156,11 +161,16 @@ export async function removeMedia(ids) {
   deleted.update((s) => new Set([...s, ...list]));
   try {
     await deleteMedia(list);
-    // The server already purged these from library/playlists; mirror it in memory
+    // The server already purged these from library/playlists/collections; mirror it in memory
     // so counts/UI stay correct without a refetch.
     favorites.update((s) => new Set([...s].filter((id) => !idSet.has(id))));
     stashed.update((s) => new Set([...s].filter((id) => !idSet.has(id))));
     playlists.update((p) => p.map((pl) => ({ ...pl, ids: pl.ids.filter((id) => !idSet.has(String(id))) })));
+    collections.update((c) => c.map((coll) => ({
+      ...coll,
+      ids: coll.ids.filter((id) => !idSet.has(String(id))),
+      cover_id: idSet.has(String(coll.cover_id)) ? '' : coll.cover_id
+    })));
     selection.update((sel) => sel.filter((id) => !idSet.has(String(id))));
     toast(list.length === 1 ? 'Deleted' : `Deleted ${list.length} items`, { type: 'success' });
   } catch (e) {
@@ -179,6 +189,19 @@ export function setSelectMode(on) {
 }
 export function toggleSelection(id) {
   selection.update((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+}
+export function addSelection(ids) {
+  selection.update((s) => {
+    const next = [...s];
+    const seen = new Set(next);
+    for (const raw of ids || []) {
+      const id = String(raw);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      next.push(id);
+    }
+    return next;
+  });
 }
 // Idempotent set/clear of one id, preserving selection order (new ids append).
 // Used by drag-to-select so painting over a card repeatedly doesn't toggle it.
@@ -217,6 +240,76 @@ export function updatePlaylist(id, patch) {
 export function removePlaylist(id) {
   playlists.update((p) => p.filter((pl) => pl.id !== id));
   persistPlaylists();
+}
+
+// --- Collections -----------------------------------------------------------
+export const collections = writable([]);
+const cid = () => 'co-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+const today = () => new Date().toISOString().slice(0, 10);
+
+export async function loadCollections() {
+  collections.set(await fetchCollections());
+}
+function persistCollections() {
+  saveCollections(get(collections));
+}
+function uniqueIds(ids) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of ids || []) {
+    const id = String(raw);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+export function addCollection(name, ids = []) {
+  const cleanIds = uniqueIds(ids);
+  const created = today();
+  const coll = {
+    id: cid(),
+    name,
+    ids: cleanIds,
+    cover_id: cleanIds[0] || '',
+    created_at: created,
+    updated_at: created
+  };
+  collections.update((c) => [coll, ...c]);
+  persistCollections();
+  return coll.id;
+}
+export function updateCollection(id, patch) {
+  collections.update((c) => c.map((coll) => (
+    coll.id === id ? { ...coll, ...patch, updated_at: today() } : coll
+  )));
+  persistCollections();
+}
+export function removeCollection(id) {
+  collections.update((c) => c.filter((coll) => coll.id !== id));
+  persistCollections();
+}
+export function addToCollection(id, ids) {
+  const incoming = uniqueIds(ids);
+  if (!incoming.length) return;
+  collections.update((c) => c.map((coll) => {
+    if (coll.id !== id) return coll;
+    const next = uniqueIds([...(coll.ids || []), ...incoming]);
+    return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: today() };
+  }));
+  persistCollections();
+}
+export function removeFromCollection(id, ids) {
+  const remove = new Set((ids || []).map(String));
+  collections.update((c) => c.map((coll) => {
+    if (coll.id !== id) return coll;
+    const next = (coll.ids || []).filter((mid) => !remove.has(String(mid)));
+    return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: today() };
+  }));
+  persistCollections();
+}
+export function setCollectionCover(id, mediaId) {
+  updateCollection(id, { cover_id: String(mediaId || '') });
 }
 
 // --- Settings (Whisper / burn) ---------------------------------------------
