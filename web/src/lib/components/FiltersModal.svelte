@@ -1,5 +1,5 @@
 <script>
-  import { filters, toggleTag, toggleModel, setMediaType, clearFilters } from '$lib/state.js';
+  import { filters, toggleTag, toggleModel, toggleResolution, setMediaType, clearFilters } from '$lib/state.js';
   import { portal } from '$lib/portal.js';
 
   let { facets = { tags: [], models: [] }, onclose = () => {} } = $props();
@@ -37,6 +37,19 @@
           {/each}
         </div>
       </div>
+
+      {#if facets.resolutions?.length}
+        <div class="mb-5">
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Resolution</div>
+          <div class="flex flex-wrap gap-2">
+            {#each facets.resolutions as r (r.height)}
+              <button type="button"
+                class="rounded-full border px-3 py-1 text-sm font-semibold transition {$filters.resolutions.includes(r.height) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line hover:border-[var(--accent)]'}"
+                onclick={() => toggleResolution(r.height)}>{r.height}p <span class="opacity-60">{r.count}</span></button>
+            {/each}
+          </div>
+        </div>
+      {/if}
 
       <div class="mb-5">
         <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Tags · {shown.length}</div>

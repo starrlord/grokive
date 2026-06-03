@@ -12,6 +12,7 @@ export function fetchMedia(f, page = 1, pageSize = 120) {
   if (f.query) p.set('q', f.query);
   if (f.tags?.length) p.set('tags', f.tags.join(','));
   if (f.models?.length) p.set('models', f.models.join(','));
+  if (f.resolutions?.length) p.set('res', f.resolutions.join(','));
   if (f.canvas) p.set('canvas', f.canvas);
   if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
   if (f.period && f.period !== 'all') p.set('period', f.period);

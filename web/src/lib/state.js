@@ -48,6 +48,7 @@ export const filters = writable({
   query: '',
   tags: [],
   models: [],
+  resolutions: [], // selected shorter-side heights, e.g. [720, 1080]
   canvas: null,
   mediaType: 'all',
   period: 'all', // all | hour1 | hour4 | hour8 | today | yesterday | last7 | last14 | last30 | month | year
@@ -72,6 +73,14 @@ export function toggleModel(model) {
     models: f.models.includes(model) ? f.models.filter((m) => m !== model) : [...f.models, model]
   }));
 }
+export function toggleResolution(height) {
+  filters.update((f) => ({
+    ...f,
+    resolutions: f.resolutions.includes(height)
+      ? f.resolutions.filter((h) => h !== height)
+      : [...f.resolutions, height]
+  }));
+}
 export function setMediaType(mediaType) {
   filters.update((f) => ({ ...f, mediaType }));
 }
@@ -82,14 +91,14 @@ export function setPeriod(period) {
   filters.update((f) => ({ ...f, period }));
 }
 export function clearFilters() {
-  filters.update((f) => ({ ...f, query: '', tags: [], models: [], canvas: null, mediaType: 'all', period: 'all' }));
+  filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
 }
 // Full reset, including the active view -> back to "all files".
 export function resetAll() {
-  filters.update((f) => ({ ...f, view: 'files', query: '', tags: [], models: [], canvas: null, mediaType: 'all', period: 'all' }));
+  filters.update((f) => ({ ...f, view: 'files', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
 }
 export function hasActiveFilters(f) {
-  return !!(f.query || f.tags.length || f.models.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.view !== 'files');
+  return !!(f.query || f.tags.length || f.models.length || f.resolutions.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.view !== 'files');
 }
 
 // --- Library: favorites + stashed (server-backed, local fallback) ----------
@@ -170,6 +179,15 @@ export function setSelectMode(on) {
 }
 export function toggleSelection(id) {
   selection.update((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+}
+// Idempotent set/clear of one id, preserving selection order (new ids append).
+// Used by drag-to-select so painting over a card repeatedly doesn't toggle it.
+export function setSelection(id, on) {
+  selection.update((s) => {
+    const has = s.includes(id);
+    if (on === has) return s;
+    return on ? [...s, id] : s.filter((x) => x !== id);
+  });
 }
 export function clearSelection() {
   selection.set([]);

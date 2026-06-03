@@ -84,6 +84,8 @@ class MediaItem:
     local_path: str
     canvas_id: str | None = None
     canvas_name: str | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 def parse_curl_samples(path: Path) -> list[RequestSpec]:
@@ -491,6 +493,9 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
     )
     model = item.get("modelName") or item.get("model") or item.get("modelId") or (parent or {}).get("modelName")
     parent_id = (parent or {}).get("id") or (parent or {}).get("postId") or normalize_prompt(str(prompt))
+    res = item.get("resolution") or (parent or {}).get("resolution") or {}
+    width = res.get("width") if isinstance(res, dict) else None
+    height = res.get("height") if isinstance(res, dict) else None
     return {
         "id": item_id,
         "prompt": prompt,
@@ -499,6 +504,8 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         "model": model,
         "parent_id": parent_id,
         "source_url": url,
+        "width": width,
+        "height": height,
     }
 
 
@@ -634,6 +641,8 @@ def normalize_record(raw: dict[str, Any], local_path: Path) -> MediaItem:
         local_path=local_path.as_posix(),
         canvas_id=str(raw["canvas_id"]) if raw.get("canvas_id") else None,
         canvas_name=str(raw["canvas_name"]) if raw.get("canvas_name") else None,
+        width=int(raw["width"]) if raw.get("width") else None,
+        height=int(raw["height"]) if raw.get("height") else None,
     )
 
 

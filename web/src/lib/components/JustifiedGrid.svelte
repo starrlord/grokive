@@ -1,7 +1,7 @@
 <script>
   import { fade } from 'svelte/transition';
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, setSelectMode } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -18,11 +18,47 @@
   const rows = $derived(width ? justify(items, width, targetHeight, gap) : []);
   let confirming = $state(null); // item pending delete confirmation
 
+  // Drag-to-paint selection (mouse only). Press the left button on a card and drag
+  // across others to select (or deselect) the whole run. The first card sets the
+  // direction: pressing an unselected card paints "select", a selected one "deselect".
+  // Touch/pen fall through to the click handler (tap = toggle) so scrolling still works.
+  let painting = false;
+  let paintOn = false;            // true = selecting, false = deselecting
+  let clickSuppressedFor = null;  // id whose synthetic click must be ignored (already painted)
+  function paintDown(e, it) {
+    if (!selectMode || e.pointerType !== 'mouse' || e.button !== 0) return;
+    paintOn = !selection.has(it.id);
+    setSelection(it.id, paintOn);
+    painting = true;
+    clickSuppressedFor = it.id;
+    e.preventDefault();           // suppress native image-drag and text selection
+  }
+  function paintEnter(it) {
+    if (selectMode && painting) setSelection(it.id, paintOn);
+  }
+  function cellClick(it) {
+    if (!selectMode) { onopen(it, items); return; }
+    const suppressed = clickSuppressedFor === it.id;
+    clickSuppressedFor = null;
+    if (suppressed) return;       // mouse already handled this card on pointerdown
+    ontoggleselect(it);           // touch/pen tap or keyboard activation
+  }
+  // The hover selection circle. Outside select mode it flips into select mode and
+  // selects this card; inside it just toggles.
+  function selectCircle(it) {
+    if (selectMode) {
+      setSelection(it.id, !selection.has(it.id));
+    } else {
+      setSelectMode(true);
+      setSelection(it.id, true);
+    }
+  }
+
   // Floating prompt tooltip — used in select mode, where the on-card prompt panel
   // is hidden so it doesn't intercept selection taps. Flips toward screen centre.
   let tip = $state(null);
   function showTip(e, text) {
-    if (!text) return;
+    if (!text || painting) return;
     tip = {
       text,
       x: e.clientX,
@@ -34,6 +70,8 @@
 
 </script>
 
+<svelte:window onpointerup={() => (painting = false)} onpointercancel={() => (painting = false)} />
+
 <div class="w-full" bind:clientWidth={width} style="--g:{gap}px">
   {#each rows as row}
     <div class="flex" style="gap:var(--g); margin-bottom:var(--g)">
@@ -43,25 +81,45 @@
         {@const sel = selection.has(it.id)}
         <!-- Mouse handlers only position a hover tooltip; the real click target is the Open button below. -->
         <div class="group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
-             class:ring-2={sel} style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)"
+             class:ring-2={sel} class:select-none={selectMode}
+             style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)"
              onmousemove={(e) => { if (selectMode) showTip(e, it.prompt); }}
              onmouseleave={() => (tip = null)}>
           {#if it.thumb}
-            <img src={it.thumb} alt="" loading="lazy" decoding="async"
+            <img src={it.thumb} alt="" loading="lazy" decoding="async" draggable="false"
                  class="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
           {:else}
             <div class="grid h-full w-full place-items-center text-xs text-muted">no thumbnail</div>
           {/if}
 
-          <!-- click/select hit area -->
-          <button type="button" class="absolute inset-0 z-[1]" aria-label="Open"
-            onclick={() => (selectMode ? ontoggleselect(it) : onopen(it, items))}></button>
+          <!-- click/select hit area. In select mode, mouse paints via pointer events
+               (press + drag across cards); touch/pen taps toggle through onclick. -->
+          <button type="button" class="absolute inset-0 z-[1]"
+            aria-label={selectMode ? (sel ? 'Deselect' : 'Select') : 'Open'}
+            onpointerdown={(e) => paintDown(e, it)}
+            onpointerenter={() => paintEnter(it)}
+            onclick={() => cellClick(it)}></button>
 
-          <!-- badges (fade out on hover so the action cluster has room) -->
-          <span class="pointer-events-none absolute left-2 top-2 z-[2] flex gap-1 transition group-hover:opacity-0">
+          <!-- Resolution / video / CC badges, top-right. Fade out on hover so the
+               action cluster (also top-right) has room. Resolution uses the shorter
+               side so portrait and landscape both read sensibly (e.g. 720p, 1080p). -->
+          <span class="pointer-events-none absolute right-2 top-2 z-[2] flex gap-1 transition group-hover:opacity-0">
+            {#if it.media_w && it.media_h}<span class="rounded-full bg-black/65 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">{Math.min(it.media_w, it.media_h)}p</span>{/if}
             {#if it.media_type === 'video'}<span class="rounded-full bg-black/65 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">video</span>{/if}
             {#if it.has_subtitles}<span class="rounded-full bg-black/65 px-1.5 py-0.5 text-[10px] font-bold text-white">CC</span>{/if}
           </span>
+
+          <!-- Selection circle, top-left: always shown in select mode, on hover
+               otherwise. Clicking it outside select mode flips into select mode and
+               selects this card. pointer-events gated to hover so touch taps on the
+               corner don't accidentally enter select mode. -->
+          <button type="button"
+            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-white text-sm transition
+                   {sel ? 'bg-[var(--accent)] text-white' : 'bg-black/50 text-white/90'}
+                   {selectMode ? '' : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'}"
+            aria-label={sel ? 'Deselect' : 'Select'} aria-pressed={sel}
+            onpointerdown={(e) => e.stopPropagation()}
+            onclick={(e) => { e.stopPropagation(); selectCircle(it); }}>{sel ? '✓' : ''}</button>
 
           <!-- top-right hover actions: stash + favorite -->
           {#if !selectMode}
@@ -81,8 +139,6 @@
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
               </button>
             </div>
-          {:else}
-            <span class="pointer-events-none absolute left-2 top-2 z-[3] grid h-7 w-7 place-items-center rounded-full border-2 border-white text-sm {sel ? 'bg-[var(--accent)] text-white' : 'bg-black/50 text-transparent'}">✓</span>
           {/if}
 
         </div>

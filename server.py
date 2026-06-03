@@ -773,8 +773,59 @@ AUDIO_BPS = "320k"
 AUDIO_AR = "48000"
 FALLBACK_W = 1920
 FALLBACK_H = 1080
+# Video re-encoder selection. "auto" uses NVIDIA NVENC (GPU) when it can actually
+# initialise on this host, else falls back to CPU libx264. "nvenc"/"cpu" force it.
+VIDEO_ENCODER = os.environ.get("VIDEO_ENCODER", "auto").strip().lower()
+NVENC_PRESET = "p5"   # NVENC quality/speed balance (p1 fastest … p7 slowest)
+NVENC_CQ = "19"       # constant-quality target; ~matches libx264 CRF 10 for the merge
 # Burned-in subtitle font size; half of libass's default of 16 for SRT.
 SUBTITLE_FONTSIZE = 8
+
+
+_nvenc_cache: bool | None = None
+
+
+def _probe_nvenc() -> bool:
+    """True if h264_nvenc can actually initialise here (NVIDIA driver + GPU present
+    in the container). A tiny one-frame encode to a null sink is the only reliable
+    test — the encoder is always *compiled in*, but only works with a visible GPU."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1", "-frames:v", "1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _use_nvenc() -> bool:
+    """Whether to encode on the GPU. VIDEO_ENCODER forces it (nvenc/cpu); the
+    default (auto) probes once and caches the result."""
+    global _nvenc_cache
+    if VIDEO_ENCODER == "cpu":
+        return False
+    if VIDEO_ENCODER == "nvenc":
+        return True
+    if _nvenc_cache is None:
+        _nvenc_cache = _probe_nvenc()
+        app.logger.info(
+            "video encoder: %s", "NVENC (GPU)" if _nvenc_cache else "libx264 (CPU)"
+        )
+    return _nvenc_cache
+
+
+def _video_encode_args(crf: str, cpu_preset: str = PRESET, nvenc_cq: str = NVENC_CQ) -> list[str]:
+    """Video-codec args for a re-encode: NVENC on the GPU when available, else CPU
+    libx264. Quality knobs differ — libx264 uses -crf, NVENC uses -cq (both: lower
+    = better). Decoding and the scale/pad filters stay on the CPU; only the encode
+    moves to the GPU, which is where the time goes."""
+    if _use_nvenc():
+        return ["-c:v", "h264_nvenc", "-preset", NVENC_PRESET,
+                "-rc", "vbr", "-cq", nvenc_cq, "-b:v", "0", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", cpu_preset, "-crf", crf, "-pix_fmt", "yuv420p"]
 
 
 def _merge_videos(paths: list[Path], out_path: Path) -> bool:
@@ -824,7 +875,7 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
         temp = out_path.parent / f"norm_{index}.mp4"
         common_v = [
             "-vf", vf,
-            "-c:v", "libx264", "-preset", PRESET, "-crf", CRF, "-pix_fmt", "yuv420p",
+            *_video_encode_args(CRF),
             "-c:a", "aac", "-b:a", AUDIO_BPS, "-ar", AUDIO_AR, "-ac", "2",
             "-movflags", "+faststart", str(temp),
         ]
@@ -877,7 +928,7 @@ def _burn_subtitles_into(video_path: Path) -> Path:
         _run_ffmpeg(
             ["ffmpeg", "-y", "-i", video_path.name,
              "-vf", f"subtitles=subs.srt:force_style='Fontsize={SUBTITLE_FONTSIZE}'",
-             "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p",
+             *_video_encode_args("18", cpu_preset="medium", nvenc_cq="23"),
              "-c:a", "copy", "-movflags", "+faststart", burned.name],
             "burn subtitles",
             cwd=str(workdir),
@@ -1040,6 +1091,7 @@ def api_media() -> Response:
         models=_multi_arg("models"),
         canvas=request.args.get("canvas") or None,
         media_type=request.args.get("type", "all"),
+        resolutions=_multi_arg("res"),
         sort=request.args.get("sort", "new"),
         page=_int_arg("page", 1),
         page_size=_int_arg("page_size", 120),

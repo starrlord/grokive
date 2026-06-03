@@ -107,11 +107,62 @@ building on the server needed.
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | _(unset)_ | Legacy HTTP Basic auth (used instead of the login screen when set). |
 | `SESSION_SECRET` | _(derived)_ | Optional override for the session-cookie signing key (otherwise derived from the admin credentials). |
 | `WHISPER_SERVER_URL` | _(unset)_ | Whisper ASR endpoint (e.g. `http://host:9000/asr`). Enables the **Generate Subtitles** button. Overrides the value saved in **Config**. |
+| `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
 Log out from **Config → Account**. Your Grok cURL cookies expire periodically — when a
 sync fails with an auth error the status pill says *"Auth failed — update Config"*;
 re-capture the cURL and paste it into **Config** again.
+
+### GPU video encoding (NVIDIA NVENC)
+
+Exporting a playlist (or selection) re-encodes only when the clips differ in
+codec/resolution/frame-rate — clips that already match are concatenated **losslessly**
+with no encode (so the GPU doesn't change that fast path). When a re-encode *is* needed
+(mixed-resolution merges, or burning in subtitles), Grokive can offload it to an NVIDIA
+GPU via **NVENC**, which is far faster than CPU `libx264` and frees up your cores.
+
+By default (`VIDEO_ENCODER=auto`) the app probes once whether NVENC can initialise and
+uses the GPU if so, otherwise it transparently falls back to `libx264` — so the same
+image runs everywhere. Force it with `VIDEO_ENCODER=nvenc` or `VIDEO_ENCODER=cpu`. The
+bundled ffmpeg already includes `h264_nvenc`; no rebuild is needed. Encoding uses H.264
+(widest compatibility), so any NVENC-capable card works (GTX 10-series and newer, incl.
+the RTX 30-series). Only the encode runs on the GPU; decoding and scaling stay on the CPU.
+
+**What you need:**
+
+1. **A visible GPU + driver on the host.** On Unraid, install the **Nvidia Driver**
+   plugin (Community Apps) and reboot; note your card's UUID with `nvidia-smi -L`.
+2. **Pass the GPU into the container.** On Unraid, edit the grokive container (advanced
+   view) and add:
+   - **Extra Parameters:** `--runtime=nvidia`
+   - **Variable** `NVIDIA_VISIBLE_DEVICES` = `GPU-<your-uuid>` (or `all`)
+   - **Variable** `NVIDIA_DRIVER_CAPABILITIES` = `all` (must include `video` for NVENC)
+
+   With `docker run`, that's simply `--gpus all`:
+   ```bash
+   docker run -d --gpus all -p 8080:8080 -v ./data:/data ghcr.io/starrlord/grokive:latest
+   ```
+   With `docker compose`, add a GPU reservation to the service:
+   ```yaml
+   services:
+     grokive:
+       # …existing config…
+       deploy:
+         resources:
+           reservations:
+             devices:
+               - driver: nvidia
+                 count: all
+                 capabilities: [gpu, video]
+   ```
+3. Nothing else — `VIDEO_ENCODER` stays `auto`.
+
+**Verify it's working:** the container log prints `video encoder: NVENC (GPU)` on the
+first export (or `libx264 (CPU)` if no GPU was found). You can also run `nvidia-smi`
+inside the container and watch the encoder engage during a merge. (This requires the
+NVIDIA Container Toolkit, which the Unraid plugin provides; without a GPU the app simply
+uses the CPU.)
 
 ## Security
 
