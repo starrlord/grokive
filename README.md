@@ -182,7 +182,9 @@ returned to the browser, only stored under `/data`.
   plain HTTP and has no built-in TLS. Then set **`TRUST_PROXY=true`** (so it sees real
   client IPs and marks the session cookie `Secure`), use a **strong `ADMIN_PASSWORD`**,
   and consider IP allow-listing or the proxy's own auth as a second layer. Never expose
-  it directly without TLS — the session cookie would travel in clear text.
+  it directly without TLS — the session cookie would travel in clear text. Also raise the
+  proxy's read/send timeouts so large playlist exports aren't cut off mid-merge — see
+  [Reverse proxy timeouts for large exports](#reverse-proxy-timeouts-for-large-exports).
 
 > The same `GROK_DATA_DIR` mechanism works for the CLI too: set the env var and
 > `grokive.py` reads/writes that directory instead of the repo folder.
@@ -220,6 +222,28 @@ Playlists let you collect a set of videos and watch or export them as one sequen
 - **Export:** click **Export** to merge the playlist into a single MP4 download. Clips that already share codec/resolution/frame-rate are concatenated **losslessly** (no re-encode); if they differ, each is re-encoded onto the largest frame size at high quality. Audio is always preserved (silent clips get a silent track so nothing desyncs).
 
 Export and merging use the server's `ffmpeg`. The merged file is created in a temporary directory, streamed to your browser, and deleted — nothing extra is left on the volume.
+
+### Reverse proxy timeouts for large exports
+
+The whole merge runs **before** the download starts streaming, so a big export (many
+clips, or any that need re-encoding) can leave the connection idle for **minutes** while
+`ffmpeg` works. Most reverse proxies cut idle upstream connections after ~60s by default,
+so the symptom is: **small exports download fine, but large ones spin and then nothing is
+delivered** (the proxy 504s the silent connection before the file is ready).
+
+If you run behind a reverse proxy, raise its read/send timeouts. In **Nginx Proxy
+Manager**: open the proxy host → **Advanced** → *Custom Nginx Configuration*:
+
+```nginx
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+proxy_request_buffering off;
+```
+
+(Adjust to taste; `3600s` allows hour-long merges.) Other proxies have equivalents
+(Caddy `timeouts`, Traefik `responseForwarding`/`forwardingTimeouts`). Enabling
+[GPU encoding](#gpu-video-encoding-nvidia-nvenc) also shrinks the merge time, making
+timeouts far less likely. Exports on a trusted LAN with no proxy in front aren't affected.
 
 ## Subtitles (Whisper)
 
