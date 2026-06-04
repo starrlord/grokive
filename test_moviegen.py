@@ -39,6 +39,11 @@ def _curve_multi(cid: str, dur: float, peaks: list[float], fps: float = 8.0) -> 
                          fps_analyzed=fps, samples=samples)
 
 
+def _curve_samples(cid: str, dur: float, samples: list[float], fps: float = 8.0) -> m.MotionCurve:
+    return m.MotionCurve(clip_id=cid, src_path=f"/tmp/{cid}.mp4", duration=dur,
+                         fps_analyzed=fps, samples=samples)
+
+
 def _ramp_grid(n_beats: int, spacing: float) -> m.BeatGrid:
     """Beat grid whose energy ramps 0.1 -> 1.0 (a slow build)."""
     dur = n_beats * spacing
@@ -72,6 +77,26 @@ def test_peak_alignment():
     for e in spike_entries:
         assert abs(e.in_point - 2.0) < 0.2, e.in_point
     print(f"  alignment: spike in_point={spike_entries[0].in_point:.2f}s (~2.0) OK")
+
+
+def test_scored_window_is_rendered_with_internal_beat_peak():
+    # The strongest 4s source window is 0..4s, with the peak at 2s. Rendering
+    # from the peak itself would land the peak on the opening beat, but it would
+    # throw away half of the scored motion. The planner should keep the strong
+    # window and land the peak on the beat 2s into the shot instead.
+    fps = 8.0
+    samples = [0.1] * int(8 * fps)
+    for i in range(0, int(4 * fps)):
+        samples[i] = 0.8
+    samples[int(2 * fps)] = 1.0
+    grid = _grid(8, 1.0)
+    curves = [_curve_samples("strong", 8.0, samples, fps), _curve("flat", 8.0, 0.0, fps)]
+    edl = m.plan_cuts(grid, curves, tightness=0.0, target_duration=None)
+    first = edl.entries[0]
+    assert first.clip_id == "strong"
+    assert abs(first.in_point - 0.0) < 0.2, first.in_point
+    assert abs((first.place_at + (2.0 - first.in_point)) - 2.0) < 0.2
+    print(f"  window-fit: strong window starts at {first.in_point:.2f}s; peak lands on internal beat OK")
 
 
 def test_density_scales_with_tightness():
@@ -130,6 +155,7 @@ if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
     test_peak_alignment()
+    test_scored_window_is_rendered_with_internal_beat_peak()
     test_density_scales_with_tightness()
     test_oversized_interval_subdivided()
     test_seed_variation()

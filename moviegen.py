@@ -56,6 +56,8 @@ W_MOTION = 1.0
 W_INTENSITY = 0.5        # match clip motion to the song's local energy
 W_RECENT = 0.8
 W_OVERUSE = 0.5
+W_BEAT_ALIGN = 0.35     # keep source motion peaks close to a musical beat
+W_WINDOW_FIT = 0.12     # keep the rendered segment near the scored motion window
 RECENT_K = 2              # don't reuse a clip within this many cuts
 ENERGY_SMOOTH = 5         # beats; smooths per-beat energy so a build reads as a ramp
 TOP_WINDOWS_K = 3         # candidate motion windows per clip to choose among
@@ -135,6 +137,16 @@ class MotionCurve:
         peak = self._peak_time(best_i, best_i + n)
         return best_mean, peak, best_i / fps
 
+    def mean_window(self, start: float, length: float) -> float:
+        """Mean motion for the exact rendered source window."""
+        if not self.samples:
+            return 0.0
+        fps = self.fps_analyzed
+        lo = max(0, min(len(self.samples), round(start * fps)))
+        n = max(1, round(length * fps))
+        hi = max(lo + 1, min(len(self.samples), lo + n))
+        return (self._prefix[hi] - self._prefix[lo]) / (hi - lo)
+
     def top_windows(self, length: float, k: int = 3) -> list[tuple[float, float, float]]:
         """Up to ``k`` strong, well-separated motion windows of ``length`` seconds,
         each (mean_motion, peak_time, window_start). Lets the planner pick a
@@ -144,10 +156,10 @@ class MotionCurve:
         if not self.samples or n >= len(self.samples):
             return [self.best_window(length)]
         means = sorted(
-            ((self._prefix[i + n] - self._prefix[i]) / n, i)
-            for i in range(0, len(self.samples) - n + 1)
+            (((self._prefix[i + n] - self._prefix[i]) / n, i)
+             for i in range(0, len(self.samples) - n + 1)),
+            key=lambda item: (-item[0], item[1]),
         )
-        means.reverse()
         chosen: list[tuple[float, int]] = []
         min_sep = max(1, n // 2)
         for mean, i in means:
@@ -369,11 +381,11 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
 
     Cut density tracks the song's *local* energy (smoothed per-beat), so a slow
     builder cuts sparsely in the intro and accelerates into the climax. Each
-    interval is filled by a clip whose motion window scores highest — motion,
+    interval is filled by a clip whose actual rendered window scores highest — motion,
     plus a match between the clip's energy and the song's local energy (calm
     shots in quiet passages, hot shots at the peak), minus recency/overuse
-    penalties — and the clip is aligned so its motion peak lands on the opening
-    beat.
+    penalties — and the clip is aligned so its motion peak lands on a musical
+    beat inside the shot whenever possible.
 
     ``seed`` enables exploration: instead of always taking the single best clip
     and window, it samples among the top few (weighted by score), so successive
@@ -399,6 +411,20 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     def energy_at(t: float) -> float:
         idx = min(max(bisect.bisect_left(times, t), 0), len(times) - 1)
         return energies[idx]
+
+    def beat_anchors(start: float, end: float) -> list[tuple[float, float]]:
+        """Candidate offsets, in seconds from the cut, where a motion peak can land."""
+        anchors: list[tuple[float, float]] = [(0.0, 0.0)]
+        for beat in beats:
+            if beat.time < start - 1e-3 or beat.time >= end - 1e-3:
+                continue
+            offset = max(0.0, beat.time - start)
+            bonus = 0.08 * beat.energy + (0.08 if beat.is_downbeat else 0.0)
+            if offset < 1e-3:
+                anchors[0] = (0.0, max(anchors[0][1], bonus))
+            elif all(abs(offset - a[0]) > 1e-3 for a in anchors):
+                anchors.append((offset, bonus))
+        return anchors
 
     # --- boundaries: density driven by local energy (continuous build) ----- #
     boundaries: list[float] = [0.0]
@@ -439,23 +465,28 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
         if d <= 0:
             continue
         e_local = energy_at(b0)
+        anchors = beat_anchors(b0, b1)
 
         scored: list[tuple[float, MotionCurve, float]] = []
         for c in curves:
             if c.duration < d - 1e-3:
                 continue  # too short to fill this interval
-            windows = c.top_windows(d, TOP_WINDOWS_K)
-            if explore and len(windows) > 1:
-                mean, peak, _ = _weighted_choice(rng, windows, [max(w[0], 1e-3) for w in windows])
-            else:
-                mean, peak, _ = windows[0]
-            score = (W_MOTION * mean
-                     + W_INTENSITY * (1 - abs(mean - e_local))
-                     - (W_RECENT if c.clip_id in recent[-RECENT_K:] else 0.0)
-                     - W_OVERUSE * (use_count[c.clip_id] / max_uses))
-            # Align so the motion peak sits on the opening beat.
-            in_point = _clamp(peak, 0.0, max(0.0, c.duration - d))
-            scored.append((score, c, in_point))
+            for _, peak, window_start in c.top_windows(d, TOP_WINDOWS_K):
+                for anchor_offset, anchor_bonus in anchors:
+                    desired = peak - anchor_offset
+                    in_point = _clamp(desired, 0.0, max(0.0, c.duration - d))
+                    actual_mean = c.mean_window(in_point, d)
+                    align_error = abs((peak - in_point) - anchor_offset)
+                    align_score = 1.0 - _clamp(align_error / max(0.25, d), 0.0, 1.0)
+                    window_fit = abs(in_point - window_start) / max(d, 1e-3)
+                    score = (W_MOTION * actual_mean
+                             + W_INTENSITY * (1 - abs(actual_mean - e_local))
+                             + W_BEAT_ALIGN * align_score
+                             + anchor_bonus
+                             - W_WINDOW_FIT * window_fit
+                             - (W_RECENT if c.clip_id in recent[-RECENT_K:] else 0.0)
+                             - W_OVERUSE * (use_count[c.clip_id] / max_uses))
+                    scored.append((score, c, in_point))
 
         if not scored:  # no clip long enough; use the longest, full length
             c = max(curves, key=lambda x: x.duration)
