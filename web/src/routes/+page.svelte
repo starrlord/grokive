@@ -18,6 +18,7 @@
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
   import CollectionsGrid from '$lib/components/CollectionsGrid.svelte';
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
+  import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
 
@@ -37,6 +38,7 @@
   let collectionName = $state('');
   let activeCanvasName = $state('');
   let showCollectionPicker = $state(false);
+  let showMovie = $state(false);
   let showFilters = $state(false);
   let menuOpen = $state(false); // mobile sidebar drawer
   let sentinel = $state(null);
@@ -377,6 +379,7 @@
   <SelectBar videoIds={videoSelection} {selectableIds} collection={activeCollection}
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
+    onmovie={() => (showMovie = true)}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
 
@@ -390,6 +393,10 @@
 
 {#if showCollectionPicker}
   <CollectionPickerModal ids={$selection} onclose={() => (showCollectionPicker = false)} />
+{/if}
+
+{#if showMovie}
+  <GenerateMovie videoIds={videoSelection} onclose={() => (showMovie = false)} />
 {/if}
 
 {#if showFilters}

@@ -4,7 +4,7 @@
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
-  let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {} } = $props();
+  let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
@@ -72,11 +72,13 @@
     </div>
 
     <div class="select-cluster">
-      <details class="group relative">
+      <details class="select-menu relative">
         <summary class="select-btn cursor-pointer list-none [&::-webkit-details-marker]:hidden">
           Select…
         </summary>
-        <div class="absolute bottom-[calc(100%+0.65rem)] left-0 z-50 min-w-44 overflow-hidden rounded-lg border border-line bg-[var(--surface-solid)] p-1 shadow-[0_16px_40px_rgba(0,0,0,0.45)]">
+        <!-- Fixed (not absolute) so it escapes the dock's overflow-x clipping,
+             mirroring the Playlist popover below. -->
+        <div class="select-popover">
           <button type="button" class="block w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--surface-2)] disabled:opacity-45"
             disabled={!unselectedVisibleIds.length} onclick={(e) => { selectVisible(); e.currentTarget.closest('details').open = false; }}>Visible ({unselectedVisibleIds.length})</button>
           <button type="button" class="block w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--surface-2)] disabled:opacity-45"
@@ -117,6 +119,11 @@
           <span class="text-xs">⇩</span>
           <span>Export</span>
         {/if}
+      </button>
+      <button class="select-btn" disabled={videoIds.length < 2} onclick={() => onmovie()}
+              title="Generate a beat-synced montage from the selected videos">
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        Montage
       </button>
     </div>
 
@@ -290,6 +297,29 @@
   }
 
   .playlist-menu:not([open]) .playlist-popover {
+    display: none;
+  }
+
+  /* Same fixed-popover trick as the playlist menu so the dropdown isn't clipped
+     by the dock's overflow-x-auto (clicking Select… would otherwise do nothing). */
+  .select-popover {
+    background: var(--surface-solid);
+    border: 1px solid var(--line);
+    border-radius: var(--r-xl);
+    bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 4.5rem);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    left: 50%;
+    min-width: 12rem;
+    padding: 0.4rem;
+    position: fixed;
+    transform: translateX(-50%);
+    z-index: 55;
+  }
+
+  .select-menu:not([open]) .select-popover {
     display: none;
   }
 

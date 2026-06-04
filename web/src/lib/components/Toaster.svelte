@@ -14,7 +14,7 @@
 <!-- Portalled to <body> so it sits above all chrome regardless of stacking context.
      Container ignores pointer events; each toast re-enables them so it's tap-to-dismiss. -->
 <div use:portal
-     class="pointer-events-none fixed inset-x-0 bottom-0 z-[70] flex flex-col items-center gap-2 px-3 transition-[padding] duration-200"
+     class="pointer-events-none fixed inset-x-0 bottom-0 z-[90] flex flex-col items-center gap-2 px-3 transition-[padding] duration-200"
      style="padding-bottom: {pad}">
   {#each $toasts as t (t.id)}
     <button type="button" onclick={() => dismiss(t.id)} title="Dismiss"

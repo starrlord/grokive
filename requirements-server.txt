@@ -2,3 +2,7 @@
 -r requirements.txt
 Flask>=3.0.0
 waitress>=3.0.0
+# Generate Movie: audio beat/energy analysis. Pulls numpy/scipy/soundfile, which
+# also cover the motion frame-diff. madmom/essentia/opencv are deferred (v1 uses
+# librosa beat tracking + a CPU frame-diff off an ffmpeg raw pipe).
+librosa>=0.10.0

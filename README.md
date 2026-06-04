@@ -36,6 +36,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Show parent media when parent metadata is available.
 - Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
+- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — visual motion peaks landed on the beat, cut density that follows the song's energy, GPU-accelerated rendering, and one-click **Add to Collection**.
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
@@ -246,6 +247,72 @@ proxy_request_buffering off;
 (Caddy `timeouts`, Traefik `responseForwarding`/`forwardingTimeouts`). Enabling
 [GPU encoding](#gpu-video-encoding-nvidia-nvenc) also shrinks the merge time, making
 timeouts far less likely. Exports on a trusted LAN with no proxy in front aren't affected.
+
+## Song Beat Montage
+
+Turn a handful of clips and a song into a tight, **beat-synced montage** — not a
+slideshow with cuts, but an edit where the cuts land on the music and each clip's
+biggest movement hits *on the beat*. The server analyses the song's beats and energy,
+analyses motion in each clip, plans a cut list, and renders the result on the GPU.
+
+**Open it:** click **Select** in the top bar, pick **2 or more videos** (5+ gives the
+planner more to work with), then click **🎬 Movie** in the selection bar. The clips you
+selected become the candidate pool — the montage's order is *computed*, not your pick order.
+
+### Controls
+
+- **Song** — drag-and-drop or click to choose an audio file (`mp3`, `wav`, `flac`, `m4a`,
+  `aac`, `ogg`, `opus`). The montage's length defaults to the song's length and the song
+  becomes the only audio track.
+- **Cut tightness** — the baseline cut pace, from **Relaxed** (longer takes, ~a clip every
+  4 beats — calmer, more cinematic) through **Balanced** to **Tight** (rapid cuts, close to
+  one clip per beat — high-energy). On top of this baseline, **cut density automatically
+  follows the song's energy**: quiet intros cut sparsely; as the track builds toward a
+  drop or chorus the montage accelerates on its own. Great for slow-building songs.
+- **Aspect / resolution** — `1080p 16:9`, `720p 16:9`, `Vertical 9:16`, or `Square 1:1`.
+  Every clip is normalised (scaled + padded) to this exact frame, so mixed-orientation
+  sources combine cleanly.
+- **Frame rate** — 24, 30, or 60 fps.
+- **Length** — optional override in seconds; leave blank to match the song.
+- **File name** — used for the download and as the montage's title in the gallery.
+
+### How it picks and cuts
+
+For each beat-aligned interval, every selected clip competes: the planner finds that
+clip's highest-motion window of the needed length, then scores candidates on **motion**,
+how well the clip's energy **matches the song's local energy** (calm shots in quiet
+passages, hot shots at the peak), minus **recency** and **overuse** penalties so the same
+clip doesn't repeat back-to-back and every clip gets screen time. The winner is positioned
+so its **motion peak sits exactly on the beat**.
+
+**Every run is different.** Each render explores among the top-scoring clips and moments,
+so generating again from the same videos and song yields a fresh — but still good — cut.
+Hit **Make another** (or just **Generate** again) to roll a new one.
+
+### Watch, save, and add to your gallery
+
+Generation runs as a **background job** with staged progress (Analysing audio → Analysing
+motion, per-clip → Planning cuts → Rendering). It keeps running even if you close the
+panel, and reopening reconnects to the live job. When it finishes you get an inline
+preview plus:
+
+- **Download MP4** — save the file directly.
+- **Add to Collection** — commit the montage into your library under a **“Beat Montage”**
+  collection (created automatically the first time). It's stored with a unique filename and
+  full provenance (song, cut count, duration, fps, the random seed, and the source clip
+  IDs), gets a thumbnail, and is indexed — so it's searchable, filterable (model **“Beat
+  Montage”**), and reusable like any other clip. Until you add or download it, the render
+  lives only in a temporary area and is replaced by your next one.
+
+### Requirements & performance
+
+Needs `ffmpeg` on the server (already required) plus **`librosa`** for audio analysis
+(included in `requirements-server.txt` and the Docker image). With an NVIDIA GPU and
+[NVENC](#gpu-video-encoding-nvidia-nvenc) available, the entire render — decode, scale,
+pad, and encode — stays on the GPU, so a multi-minute montage renders in seconds; without
+a GPU it falls back to CPU encoding. Like exports, the job runs server-side before the
+result is ready, so the [reverse-proxy timeout guidance above](#reverse-proxy-timeouts-for-large-exports)
+applies. One montage renders at a time.
 
 ## Subtitles (Whisper)
 

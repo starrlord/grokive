@@ -98,6 +98,39 @@ export const deleteMedia = (ids) =>
     return r.json();
   });
 
+// --- Generate Movie (beat-synced montage; own background job slot) ----------
+export async function generateMovie({ ids, song, options }) {
+  const fd = new FormData();
+  fd.append('video_ids', JSON.stringify(ids || []));
+  fd.append('song', song);
+  for (const [k, v] of Object.entries(options || {})) {
+    if (v !== undefined && v !== null && v !== '') fd.append(k, String(v));
+  }
+  const res = await fetch('/api/movie/generate', { method: 'POST', body: fd });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.error || `Could not start movie generation (HTTP ${res.status}).`);
+  // A success without a job_id means we didn't reach the movie API (e.g. an older
+  // server build serving the SPA shell). Make that legible instead of "starting" forever.
+  if (!data || !data.job_id) throw new Error('Unexpected server response — is this server running the latest build?');
+  return data; // { ok, job_id }
+}
+export const movieStatus = () => getJSON('/api/movie/status');
+export async function commitMovie() {
+  const res = await fetch('/api/movie/commit', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Could not add the movie to your gallery.');
+  return data; // { ok, id, collection_id, already? }
+}
+// `v` (the job id) busts the browser cache — the result path is otherwise the
+// same URL for every render, so a new movie would re-serve the cached old one.
+export function movieResultUrl(download = false, v = '') {
+  const p = new URLSearchParams();
+  if (download) p.set('download', '1');
+  if (v) p.set('v', v);
+  const qs = p.toString();
+  return `/api/movie/result${qs ? `?${qs}` : ''}`;
+}
+
 // --- Jobs (sync + subtitles share one slot) --------------------------------
 export const startSync = () => fetch('/api/sync', { method: 'POST' });
 export const startSubtitles = () => fetch('/api/subtitles', { method: 'POST' });

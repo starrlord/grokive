@@ -44,6 +44,10 @@ from flask import (
 )
 
 import db
+import moviegen
+# Aliased: the `/thumbnails/...` route function below is also named `thumbnails`
+# and would otherwise shadow this module at module scope.
+import thumbnails as thumbgen
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("GROK_DATA_DIR", ROOT / "data")).resolve()
@@ -62,6 +66,7 @@ COLLECTIONS_FILE = DATA_DIR / "collections.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
+MOVIE_DIR = DATA_DIR / "movie_tmp"  # working dir + last "Generate Movie" output
 # Built SvelteKit SPA (produced by `web/` -> adapter-static), served at "/".
 SPA_DIR = Path(os.environ.get("SPA_DIR", ROOT / "web" / "build")).resolve()
 
@@ -887,11 +892,16 @@ _nvenc_cache: bool | None = None
 def _probe_nvenc() -> bool:
     """True if h264_nvenc can actually initialise here (NVIDIA driver + GPU present
     in the container). A tiny one-frame encode to a null sink is the only reliable
-    test — the encoder is always *compiled in*, but only works with a visible GPU."""
+    test — the encoder is always *compiled in*, but only works with a visible GPU.
+
+    The probe frame must clear NVENC's minimum dimensions — newer drivers/SDKs
+    reject very small frames ("Frame Dimension less than the minimum supported
+    value"), so a 64x64 probe yields a false negative and silently drops every
+    encode onto the CPU. 256x256 is comfortably above the floor for all codecs."""
     try:
         proc = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1", "-frames:v", "1",
+             "-f", "lavfi", "-i", "color=c=black:s=256x256:r=1", "-frames:v", "1",
              "-c:v", "h264_nvenc", "-f", "null", "-"],
             capture_output=True, text=True, timeout=30,
         )
@@ -1106,6 +1116,264 @@ def api_export() -> Response:
     if not isinstance(ids, list) or not ids:
         return jsonify(ok=False, error="No items selected to export."), 400
     return _export_response(_video_paths_for_ids(ids), payload.get("name") or "export")
+
+
+# --------------------------------------------------------------------------- #
+# Generate Movie (beat-synced montage from selected videos + an uploaded song).
+# Runs as a single background job — same threading+poll model as Sync, with its
+# own slot so a render and a sync don't block each other. See moviegen.py.
+# --------------------------------------------------------------------------- #
+
+_movie_lock = threading.Lock()
+_movie = {
+    "running": False,
+    "job_id": None,
+    "status": "idle",      # idle|queued|analyzing_audio|analyzing_motion|planning|rendering|done|error
+    "progress": 0.0,       # overall 0..1
+    "stage_progress": 0.0,
+    "detail": "",
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,        # {path, filename, width, height, fps, duration, size_bytes, cuts}
+    "commit_meta": None,   # provenance captured at submit (song, seed, source ids…)
+    "committed": False,    # already added to the gallery?
+    "committed_id": None,  # the gallery media id once committed
+}
+
+_SONG_EXTS = {"mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"}
+BEAT_MONTAGE_COLLECTION = "beat-montage"
+
+
+def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, detail: str = "") -> None:
+    _movie["status"] = status
+    _movie["progress"] = round(float(overall), 4)
+    _movie["stage_progress"] = round(float(stage_progress), 4)
+    _movie["detail"] = detail
+
+
+def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict) -> None:
+    try:
+        out_path = MOVIE_DIR / f"movie_{job_id}.mp4"
+        result = moviegen.generate(
+            video_paths=paths,
+            song_path=song_path,
+            options=options,
+            work_dir=MOVIE_DIR,
+            out_path=out_path,
+            video_encode_args=_video_encode_args(CRF),
+            hwaccel_decode=_use_nvenc(),
+            progress=_movie_progress,
+        )
+        _movie["result"] = {
+            "path": str(out_path),
+            "filename": f"{options.get('name') or 'movie'}.mp4",
+            **result,
+        }
+        _movie_progress("done", 1.0, 1.0, "Done")
+    except Exception as exc:  # pragma: no cover - defensive
+        _movie["status"] = "error"
+        _movie["error"] = str(exc)[:400]
+        _movie["detail"] = "Generation failed"
+    finally:
+        _movie["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _movie["running"] = False
+
+
+@app.post("/api/movie/generate")
+def api_movie_generate() -> Response:
+    """Start a beat-synced montage render. Multipart: ``video_ids`` (JSON array),
+    ``song`` (uploaded audio file), plus option fields. Returns a ``job_id`` to
+    poll; the heavy work runs in a background thread."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return jsonify(ok=False, error="ffmpeg is not available on the server."), 500
+    try:
+        ids = json.loads(request.form.get("video_ids", "[]"))
+    except Exception:
+        ids = []
+    if not isinstance(ids, list):
+        ids = []
+    paths = _video_paths_for_ids(ids)
+    if len(paths) < 2:
+        return jsonify(ok=False, error="Select at least 2 videos that exist on the server."), 400
+
+    song = request.files.get("song")
+    if not song or not song.filename:
+        return jsonify(ok=False, error="Choose a song to set the beat."), 400
+    ext = (song.filename.rsplit(".", 1)[-1] if "." in song.filename else "").lower()
+    if ext not in _SONG_EXTS:
+        return jsonify(ok=False, error=f"Unsupported audio format '.{ext}'."), 400
+
+    def _num(name, default, lo, hi, cast=float):
+        try:
+            return max(lo, min(hi, cast(request.form.get(name, default))))
+        except (TypeError, ValueError):
+            return default
+
+    target = request.form.get("target_duration", "").strip()
+    seed_raw = request.form.get("seed", "").strip()
+    options = {
+        "name": (request.form.get("name") or "movie")[:80],
+        "tightness": _num("tightness", 0.5, 0.0, 1.0),
+        "width": int(_num("width", 1920, 160, 3840, int)),
+        "height": int(_num("height", 1080, 160, 2160, int)),
+        "fps": int(_num("fps", 30, 12, 60, int)),
+        "target_duration": (max(1.0, float(target)) if target else None),
+        # Each run sends a fresh seed so successive renders differ; absent/invalid
+        # -> deterministic (strict best).
+        "seed": (int(seed_raw) if seed_raw.lstrip("-").isdigit() else None),
+    }
+
+    with _movie_lock:
+        if _movie["running"]:
+            return jsonify(ok=False, error="A movie is already being generated."), 409
+        job_id = secrets.token_hex(8)
+        # Fresh working dir so a previous render's segments/output can't leak in.
+        shutil.rmtree(MOVIE_DIR, ignore_errors=True)
+        MOVIE_DIR.mkdir(parents=True, exist_ok=True)
+        song_path = MOVIE_DIR / f"song.{ext}"
+        song.save(str(song_path))
+        _movie.update(running=True, job_id=job_id, status="queued", progress=0.0,
+                      stage_progress=0.0, detail="Queued…", error=None, result=None,
+                      started_at=time.strftime("%Y-%m-%d %H:%M:%S"), finished_at=None,
+                      committed=False, committed_id=None,
+                      commit_meta={
+                          "name": options["name"], "song": song.filename,
+                          "seed": options["seed"], "tightness": options["tightness"],
+                          "fps": options["fps"], "source_ids": [str(i) for i in ids],
+                      })
+    threading.Thread(target=_movie_worker, args=(job_id, paths, song_path, options), daemon=True).start()
+    return jsonify(ok=True, job_id=job_id), 202
+
+
+@app.get("/api/movie/status")
+def api_movie_status() -> Response:
+    r = _movie["result"]
+    return jsonify(
+        running=_movie["running"],
+        job_id=_movie["job_id"],
+        status=_movie["status"],
+        progress=_movie["progress"],
+        stage_progress=_movie["stage_progress"],
+        detail=_movie["detail"],
+        error=_movie["error"],
+        started_at=_movie["started_at"],
+        finished_at=_movie["finished_at"],
+        # Don't leak the absolute server path to the client.
+        result=({k: v for k, v in r.items() if k != "path"} if r else None),
+    )
+
+
+@app.get("/api/movie/result")
+def api_movie_result() -> Response:
+    """Serve the finished movie — inline (range-enabled) so the SPA can preview it
+    in a <video>, or as a download with ``?download=1``."""
+    r = _movie["result"]
+    if not r or not Path(r["path"]).exists():
+        return jsonify(ok=False, error="No finished movie available."), 409
+    download = request.args.get("download") in ("1", "true", "yes")
+    resp = send_file(r["path"], mimetype="video/mp4", conditional=True,
+                     as_attachment=download, download_name=r.get("filename", "movie.mp4"))
+    # Single result slot reusing one URL — don't let the browser cache a stale render.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _commit_montage() -> dict:
+    """Persist the finished montage into the gallery: copy the file under a unique
+    id, make a thumbnail, append a metadata record with provenance, drop it into
+    the 'Beat Montage' collection, and rebuild the index. Returns {id, collection_id}."""
+    r = _movie.get("result")
+    if not r or not Path(r["path"]).exists():
+        raise RuntimeError("No finished movie to add.")
+    meta = _movie.get("commit_meta") or {}
+
+    mid = "montage_" + secrets.token_hex(8)  # unique; never collides with Grok UUIDs
+    rel = f"media/montages/{mid}.mp4"
+    dest = GALLERY_DIR / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(r["path"], dest)
+    try:
+        thumbgen.make_video_thumb(dest, THUMBS_DIR / f"{mid}.jpg")
+    except Exception as exc:  # pragma: no cover - thumbnail is best-effort
+        print(f"montage thumbnail failed: {exc}")
+
+    song = str(meta.get("song") or "").replace("\\", "/").rsplit("/", 1)[-1]
+    title = ["Beat Montage"]
+    if meta.get("name") and meta["name"] != "movie":
+        title.append(str(meta["name"]))
+    if song:
+        title.append(song)
+    record = {
+        "id": mid,
+        "media_type": "video",
+        "local_path": rel,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "prompt": " · ".join(title) + f" · {r.get('cuts', '?')} cuts",
+        "model": "Beat Montage",
+        "width": r.get("width"),
+        "height": r.get("height"),
+        # Provenance — ignored by the index, kept in metadata.json for reference.
+        "montage": True,
+        "fps": r.get("fps"),
+        "duration": r.get("duration"),
+        "seed": meta.get("seed"),
+        "tightness": meta.get("tightness"),
+        "source_ids": meta.get("source_ids") or [],
+        "song": song,
+    }
+    items: list = []
+    if METADATA_FILE.exists():
+        try:
+            loaded = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                items = loaded
+        except Exception:
+            items = []
+    items.append(record)
+    _atomic_write_json(METADATA_FILE, items)
+
+    # Add to the 'Beat Montage' collection (create on first use).
+    collections = _load_collections()
+    coll = next((c for c in collections
+                 if c.get("id") == BEAT_MONTAGE_COLLECTION or str(c.get("name", "")).lower() == "beat montage"), None)
+    today = time.strftime("%Y-%m-%d")
+    if coll is None:
+        collections.insert(0, {
+            "id": BEAT_MONTAGE_COLLECTION, "name": "Beat Montage", "ids": [mid],
+            "cover_id": mid, "created_at": today, "updated_at": today,
+        })
+        coll_id = BEAT_MONTAGE_COLLECTION
+    else:
+        if mid not in coll["ids"]:
+            coll["ids"].append(mid)
+        coll["cover_id"] = coll.get("cover_id") or mid
+        coll["updated_at"] = today
+        coll_id = coll["id"]
+    _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+
+    rebuild_db()
+    return {"id": mid, "collection_id": coll_id}
+
+
+@app.post("/api/movie/commit")
+def api_movie_commit() -> Response:
+    """Add the finished montage to the gallery + the 'Beat Montage' collection."""
+    if _movie.get("running"):
+        return jsonify(ok=False, error="Still rendering."), 409
+    r = _movie.get("result")
+    if not r or not Path(r["path"]).exists():
+        return jsonify(ok=False, error="No finished movie to add."), 409
+    if _movie.get("committed"):
+        return jsonify(ok=True, id=_movie.get("committed_id"),
+                       collection_id=BEAT_MONTAGE_COLLECTION, already=True)
+    try:
+        res = _commit_montage()
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc)[:300]), 500
+    _movie["committed"] = True
+    _movie["committed_id"] = res["id"]
+    return jsonify(ok=True, **res)
 
 
 def rebuild_db() -> None:

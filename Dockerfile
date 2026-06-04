@@ -36,7 +36,10 @@ ENV GROK_DATA_DIR=/data \
     PORT=8080 \
     PUID=99 \
     PGID=100 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    # numba (via librosa, for Song Beat Montage) caches JITed code here instead of
+    # in read-only site-packages — the app runs as a non-root PUID/PGID user.
+    NUMBA_CACHE_DIR=/tmp/grokive-numba
 
 VOLUME ["/data"]
 EXPOSE 8080
