@@ -1,4 +1,21 @@
+<script module>
+  // One AudioContext shared across all lightbox opens — browsers cap how many you
+  // can create. Routing the <video> through a context that's resumed inside a user
+  // gesture makes the *context* the authorized audio output, so every subsequent
+  // clip plays with sound without its own gesture — bypassing the per-clip
+  // autoplay-audio gate (and Svelte's reactive `muted` churn). The per-element
+  // source node is created per instance (see routeAudio).
+  let sharedAudioCtx = null;
+  function audioContext() {
+    if (sharedAudioCtx) return sharedAudioCtx;
+    const AC = typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext);
+    sharedAudioCtx = AC ? new AC() : null;
+    return sharedAudioCtx;
+  }
+</script>
+
 <script>
+  import { onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
   import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
@@ -53,18 +70,38 @@
   // the player. So we start muted (which iOS *will* autoplay, controls auto-hide),
   // and the first tap anywhere unmutes — and the preference sticks across clips.
   let wantSound = $state(false);
+  // This element's one-time tap into the shared audio graph. createMediaElementSource
+  // is once-per-element, so we guard and create it on the first unmute.
+  let mediaSourceNode = null;
+  function routeAudio() {
+    const ctx = audioContext();
+    if (!ctx || !videoEl || mediaSourceNode) return;
+    try {
+      mediaSourceNode = ctx.createMediaElementSource(videoEl);
+      mediaSourceNode.connect(ctx.destination);
+    } catch {
+      mediaSourceNode = null;  // fall back to the element's own output
+    }
+  }
   function enableSound() {
     showControls = true;
     if (wantSound) return;
     wantSound = true;
     if (videoEl) {
-      // Clear the `muted` *attribute* too (via defaultMuted) so the next clip
-      // doesn't re-mute itself on load.
+      // Unlock + route audio through the shared AudioContext while we're inside
+      // this tap (the gesture), then unmute. From here every clip is audible via
+      // the graph — no per-clip gesture, immune to the autoplay re-gating.
+      routeAudio();
+      audioContext()?.resume?.().catch(() => {});
       videoEl.defaultMuted = false;
       videoEl.muted = false;
       videoEl.play?.().catch(() => {});
     }
   }
+  onDestroy(() => {
+    try { mediaSourceNode?.disconnect(); } catch {}
+    mediaSourceNode = null;  // the shared AudioContext stays alive for reuse
+  });
 
   // Largest box that fits within 94vw x the lightbox media height while preserving the media's aspect
   // (upscaling allowed, so portrait 9:16 clips fill the height instead of showing
@@ -159,7 +196,11 @@
          onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
       {#if item.media_type === 'video'}
         <!-- caption track is (re)built imperatively in the $effect so playlist clips keep subtitles -->
-        <video bind:this={videoEl} controls={showControls} autoplay playsinline muted={!wantSound} onended={onended}
+        <!-- No `muted={...}` attribute on purpose: Svelte now compiles it to a
+             reactive effect that re-asserts `video.muted` on its own schedule,
+             fighting the imperative muted/autoplay handshake below. We own `muted`
+             entirely via the $effect (muted autoplay pre-unlock) + enableSound. -->
+        <video bind:this={videoEl} controls={showControls} autoplay playsinline onended={onended}
                style={fitStyle(item)} class="lightbox-media rounded-lg bg-[var(--media-bg)]"></video>
       {:else}
         <img src={item.href} alt="" style={fitStyle(item)} class="lightbox-media rounded-lg" />

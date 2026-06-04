@@ -2,7 +2,7 @@ import { writable, derived, get } from 'svelte/store';
 import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
-  getSettings, deleteMedia
+  getSettings, deleteMedia, movieStatus
 } from './api.js';
 import { toast } from './toast.js';
 
@@ -164,6 +164,58 @@ export const counts = derived([favorites, stashed], ([$f, $s]) => ({
   archived: $s.size,
   stashed: $s.size
 }));
+
+// --- Movie montage job (global) --------------------------------------------
+// The render runs in a server-side background thread, so its status is global,
+// not owned by the Generate Movie panel. Tracking it here lets the Montage
+// button in the selection bar animate while a render is in flight (and lets the
+// panel reconnect to a live — or just-finished — job when reopened). One shared
+// poll feeds both, so the panel doesn't need its own interval.
+const IDLE_MOVIE = { running: false, status: 'idle', job_id: null, progress: 0, detail: '', error: null, result: null };
+export const movieJob = writable(IDLE_MOVIE);
+let _moviePollTimer = null;
+
+export async function refreshMovieStatus() {
+  try {
+    const s = await movieStatus();
+    movieJob.set(s);
+    if (!s.running) stopMoviePolling();
+    return s;
+  } catch {
+    return get(movieJob);
+  }
+}
+function stopMoviePolling() {
+  if (_moviePollTimer) { clearInterval(_moviePollTimer); _moviePollTimer = null; }
+}
+// Begin (or keep) polling the render's progress. Safe to call repeatedly; it
+// no-ops if already polling and stops itself once the job is no longer running.
+export function ensureMoviePolling() {
+  if (typeof setInterval === 'undefined') return;
+  refreshMovieStatus();
+  if (!_moviePollTimer) _moviePollTimer = setInterval(refreshMovieStatus, 1500);
+}
+// Optimistic local update when the panel kicks off a render, so the button lights
+// up instantly without waiting for the first poll.
+export function markMovieStarted(jobId) {
+  movieJob.set({ ...IDLE_MOVIE, running: true, status: 'queued', detail: 'Queued…', job_id: jobId });
+  movieAck.set(null);
+  ensureMoviePolling();
+}
+
+// The status chip stays up from render start until the result is dealt with
+// (committed, "Make another", or dismissed). `movieAck` records the job id the
+// user has acknowledged so the chip — and a fresh panel open — can hide it.
+export const movieAck = writable(null);
+export function acknowledgeMovie(jobId) { if (jobId) movieAck.set(jobId); }
+
+// The job to surface in the chip/panel, or null when there's nothing pending: a
+// running render, or a finished/failed one the user hasn't acknowledged yet.
+export const movieChip = derived([movieJob, movieAck], ([$j, $ack]) => {
+  const finished = ($j.status === 'done' && $j.result) || $j.status === 'error';
+  const pending = $j.running || (finished && $j.job_id && $j.job_id !== $ack);
+  return pending ? $j : null;
+});
 
 // --- Delete (hard-delete: removes files on disk + blocklists from future syncs)
 // `deleted` hides items instantly in the current session; the server also drops

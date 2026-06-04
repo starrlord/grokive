@@ -6,9 +6,29 @@ other tooling can reuse them without importing the large legacy HTML template.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Any
+
+
+def media_shard(media_id: str) -> str:
+    """Two-hex-char bucket for a media id, e.g. ``media/videos/<ab>/<id>.mp4``.
+
+    Hashing the id (rather than slicing it) keeps the 256 buckets evenly filled
+    no matter the id's shape — UUIDs, ``montage_*`` ids, and base64-of-URL
+    filename stems would otherwise clump (every base64 stem starts ``aH...``)."""
+    return hashlib.sha1(str(media_id).encode("utf-8")).hexdigest()[:2]
+
+
+def file_content_hash(path: Path, _chunk: int = 1 << 20) -> str:
+    """blake2b digest of a file's bytes, for exact-duplicate detection."""
+    h = hashlib.blake2b(digest_size=20)
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(_chunk), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 STOPWORDS = {

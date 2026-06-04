@@ -5,9 +5,9 @@
   import { fetchMedia, fetchFacets, fetchLibrary, mediaByIds } from '$lib/api.js';
   import {
     filters, mode, favorites, stashed, deleted, applyLibrary,
-    selectMode, selection, toggleSelection, clearSelection,
+    selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, updateCollection, removeFromCollection
+    collections, updateCollection, removeFromCollection, ensureMoviePolling
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -20,6 +20,7 @@
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
+  import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
 
   const PAGE_SIZE = 120;
@@ -39,6 +40,7 @@
   let activeCanvasName = $state('');
   let showCollectionPicker = $state(false);
   let showMovie = $state(false);
+  let movieVideoIds = $state([]); // video ids fed to the Montage panel (selection or a collection)
   let showFilters = $state(false);
   let menuOpen = $state(false); // mobile sidebar drawer
   let sentinel = $state(null);
@@ -56,6 +58,12 @@
     if ($filters.view === 'all' || $filters.view === 'canvases') return items.filter(live);
     return items.filter((it) => !$stashed.has(it.id) && live(it));
   });
+  // The server `total` is the count it returned at fetch time. Client-side overlay
+  // actions (archive, favorite, delete) hide loaded items instantly without a
+  // refetch, so the header count goes stale (e.g. "2 recent items" after archiving
+  // both). Subtract the loaded items the overlay now hides to keep it honest — only
+  // loaded/visible items can be acted on, so unloaded ones are unaffected.
+  const displayTotal = $derived(Math.max(displayItems.length, total - (items.length - displayItems.length)));
   const activeCollection = $derived(($collections || []).find((c) => c.id === activeCollectionId) || null);
   const activeCanvas = $derived((facets.canvases || []).find((c) => c.id === $filters.canvas) || null);
   const activeCanvasTitle = $derived(activeCanvas?.name || activeCanvasName || 'Canvas');
@@ -139,6 +147,9 @@
     loadPlaylists();
     loadCollections();
     loadSettings();
+    // Detect any montage render already in flight (e.g. started in another tab or
+    // before a reload) so the Montage button animates and the panel can reconnect.
+    ensureMoviePolling();
     await refreshFacets();
   });
 
@@ -219,6 +230,14 @@
     if (!list.length) { alert('No playable videos in this collection.'); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
+  async function montageCollection(c) {
+    // Feed every video in the collection to the Montage panel — same as selecting
+    // them all, but without entering select mode.
+    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video');
+    if (list.length < 2) { alert('A montage needs at least 2 videos in the collection.'); return; }
+    movieVideoIds = list.map((v) => v.id);
+    showMovie = true;
+  }
   function saveCollectionName() {
     if (!activeCollection) return;
     const name = collectionName.trim();
@@ -277,7 +296,7 @@
 
   <main class="min-w-0 flex-1 p-3 sm:p-4" style="padding-bottom: {$selectMode ? '5rem' : 'max(1rem, env(safe-area-inset-bottom))'}">
     {#if $filters.view === 'collections' && !activeCollection}
-      <CollectionsGrid onopen={openCollection} onplay={playCollection} />
+      <CollectionsGrid onopen={openCollection} onplay={playCollection} onmovie={montageCollection} />
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
         <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={() => (activeCollectionId = null)}>Back</button>
@@ -309,7 +328,7 @@
         <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={closeCanvas}>Back</button>
         <div class="min-w-0 flex-1">
           <h1 class="line-clamp-2 text-base font-extrabold text-ink sm:text-lg" title={activeCanvasTitle}>{activeCanvasTitle}</h1>
-          <p class="text-sm text-muted">{total.toLocaleString()} items</p>
+          <p class="text-sm text-muted">{displayTotal.toLocaleString()} items</p>
         </div>
         {#if hasCanvasRefinements}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={clearCanvasRefinements}>Reset filters ✕</button>
@@ -355,7 +374,7 @@
       </div>
     {:else}
       <div class="mb-3 flex flex-wrap items-center gap-3">
-        <p class="text-sm text-muted">{total.toLocaleString()} {$filters.view === 'favorites' ? 'favorites' : $filters.view === 'archive' ? 'archived' : $filters.view === 'all' ? 'items' : 'recent items'}</p>
+        <p class="text-sm text-muted">{displayTotal.toLocaleString()} {$filters.view === 'favorites' ? 'favorites' : $filters.view === 'archive' ? 'archived' : $filters.view === 'all' ? 'items' : 'recent items'}</p>
         {#if hasActiveFilters($filters)}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={resetAll}>Reset filters ✕</button>
         {/if}
@@ -390,7 +409,7 @@
   <SelectBar videoIds={videoSelection} {selectableIds} collection={activeCollection}
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
-    onmovie={() => (showMovie = true)}
+    onmovie={() => { movieVideoIds = videoSelection; showMovie = true; }}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
 
@@ -407,8 +426,16 @@
 {/if}
 
 {#if showMovie}
-  <GenerateMovie videoIds={videoSelection} onclose={() => (showMovie = false)} />
+  <!-- Leaving the montage panel exits select mode AND clears the selection so the
+       bar doesn't linger and stale picks don't resurface on re-entry. The render
+       keeps going and stays reachable via the chip (which uses the job, not the
+       live selection). -->
+  <GenerateMovie videoIds={movieVideoIds} onclose={() => { showMovie = false; setSelectMode(false); clearSelection(); }} />
 {/if}
+
+<!-- Always-on background-task indicator for the montage render: persists across
+     views/select-mode until the result is committed or dismissed; click reopens. -->
+<MontageStatusChip onopen={() => { movieVideoIds = videoSelection; showMovie = true; }} />
 
 {#if showFilters}
   <FiltersModal {facets} onclose={() => (showFilters = false)} />

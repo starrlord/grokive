@@ -1,8 +1,15 @@
 <script>
-  import { selection, filters, setFavorites, setStashed, addPlaylist, setSelectMode, clearSelection, addSelection, removeMedia } from '$lib/state.js';
+  import { selection, filters, setFavorites, setStashed, addPlaylist, setSelectMode, clearSelection, addSelection, removeMedia, movieJob } from '$lib/state.js';
   import { exportSelection } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import ParticleField from './ParticleField.svelte';
+
+  // A montage render runs server-side, so its progress is global. While it's in
+  // flight the Montage button animates (and stays clickable regardless of the
+  // current selection) so it doubles as a live indicator + a way back into the panel.
+  const movieRunning = $derived($movieJob.running);
+  const moviePct = $derived(Math.round(($movieJob.progress || 0) * 100));
 
   let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {} } = $props();
   let name = $state('');
@@ -120,10 +127,16 @@
           <span>Export</span>
         {/if}
       </button>
-      <button class="select-btn" disabled={videoIds.length < 2} onclick={() => onmovie()}
-              title="Generate a beat-synced montage from the selected videos">
-        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        Montage
+      <button class="select-btn montage-btn" class:montage-running={movieRunning}
+              disabled={videoIds.length < 2 && !movieRunning} onclick={() => onmovie()}
+              title={movieRunning ? `Montage rendering — ${moviePct}%. Click to view progress.` : 'Generate a beat-synced montage from the selected videos'}>
+        {#if movieRunning}
+          <ParticleField active={false} count={9} scale={0.42} layers={1} class="montage-particles" />
+        {/if}
+        <span class="montage-label">
+          <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          {movieRunning ? `Rendering ${moviePct}%` : 'Montage'}
+        </span>
       </button>
     </div>
 
@@ -165,6 +178,7 @@
     pointer-events: auto;
     position: relative;
     width: max-content;
+    -webkit-overflow-scrolling: touch;
   }
 
   .is-exporting .select-dock::before {
@@ -358,6 +372,49 @@
     to { box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 42%, transparent); }
   }
 
+  /* Montage button doubles as a live render indicator: themed particles drift over
+     it and it glows while a montage is rendering server-side. */
+  .montage-btn {
+    overflow: hidden;
+    position: relative;
+  }
+
+  .montage-label {
+    align-items: center;
+    display: inline-flex;
+    gap: 0.4rem;
+    position: relative;
+    z-index: 1;
+  }
+
+  .montage-running {
+    animation: montage-glow 1100ms ease-in-out infinite alternate;
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--accent) 88%, transparent),
+      color-mix(in srgb, #a78bfa 72%, transparent));
+    border-color: transparent;
+    color: var(--on-accent);
+  }
+
+  .montage-running:hover:not(:disabled) {
+    background: linear-gradient(135deg,
+      color-mix(in srgb, var(--accent) 96%, transparent),
+      color-mix(in srgb, #a78bfa 82%, transparent));
+    border-color: transparent;
+  }
+
+  :global(.montage-particles) {
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    z-index: 0;
+  }
+
+  @keyframes montage-glow {
+    from { box-shadow: 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent); }
+    to { box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 55%, transparent); }
+  }
+
   @media (min-width: 1536px) {
     .select-shell {
       left: 20rem;
@@ -368,7 +425,14 @@
     }
   }
 
-  @media (max-width: 640px) {
+  /* Touch / narrow viewports (phones + iPad portrait): a single horizontally
+     scrolling row hides options off-screen with no visible affordance on iOS, so
+     the bar reads as broken. Wrap instead — every action stays reachable without
+     scrolling. `display: contents` on the clusters lets their buttons flow as
+     direct flex children of the dock so wrapping happens button-by-button (a
+     cluster on its own would overflow its own row); the cluster dividers simply
+     don't render, which is fine here. */
+  @media (max-width: 900px) {
     .select-shell {
       padding-left: 0.5rem;
       padding-right: 0.5rem;
@@ -376,8 +440,18 @@
 
     .select-dock {
       border-radius: var(--r-xl);
+      flex-wrap: wrap;
+      justify-content: center;
+      max-height: min(60vh, 20rem);
       max-width: 100%;
+      overflow-x: visible;
+      overflow-y: auto;
+      row-gap: 0.4rem;
       width: 100%;
+    }
+
+    .select-cluster {
+      display: contents;
     }
 
     .playlist-input {

@@ -36,7 +36,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Show parent media when parent metadata is available.
 - Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
-- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — visual motion peaks landed on the beat, cut density that follows the song's energy, GPU-accelerated rendering, and one-click **Add to Collection**.
+- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with GPU-accelerated rendering and one-click **Add to Collection**.
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
@@ -144,18 +144,17 @@ the RTX 30-series). Only the encode runs on the GPU; decoding and scaling stay o
    ```bash
    docker run -d --gpus all -p 8080:8080 -v ./data:/data ghcr.io/starrlord/grokive:latest
    ```
-   With `docker compose`, add a GPU reservation to the service:
+   With `docker compose`, set `runtime: nvidia` and pass the NVIDIA environment
+   overrides into the service:
    ```yaml
    services:
      grokive:
        # …existing config…
-       deploy:
-         resources:
-           reservations:
-             devices:
-               - driver: nvidia
-                 count: all
-                 capabilities: [gpu, video]
+       runtime: nvidia
+       environment:
+         # `all` capabilities includes `video` (required for NVENC) and `utility` (nvidia-smi).
+         - NVIDIA_VISIBLE_DEVICES=all
+         - NVIDIA_DRIVER_CAPABILITIES=all
    ```
 3. Nothing else — `VIDEO_ENCODER` stays `auto`.
 
@@ -261,6 +260,7 @@ selected become the candidate pool — the montage's order is *computed*, not yo
 
 ### Controls
 
+- **Style** — Classic, Cinematic, or Moody (see *Styles* below). Classic is the default.
 - **Song** — drag-and-drop or click to choose an audio file (`mp3`, `wav`, `flac`, `m4a`,
   `aac`, `ogg`, `opus`). The montage's length defaults to the song's length and the song
   becomes the only audio track.
@@ -275,6 +275,21 @@ selected become the candidate pool — the montage's order is *computed*, not yo
 - **Frame rate** — 24, 30, or 60 fps.
 - **Length** — optional override in seconds; leave blank to match the song.
 - **File name** — used for the download and as the montage's title in the gallery.
+
+### Styles
+
+A **Style** preset shapes the whole edit. **Classic** stays the default, so existing
+montages render exactly as before.
+
+- **Classic** — punchy **hard cuts** on the beat, with cut density driven by the song's
+  energy. The original style; the entire render stays on the GPU.
+- **Cinematic** — richer music analysis (onset-tightened beats, PLP for tempo-varying
+  tracks, and real structural sections), plus tasteful **beat-timed transitions** (a
+  dissolve at section changes, a fade-to-black on drops) and a subtle **on-beat zoom
+  punch** on each cut. Hard cuts stay the default; transitions only punctuate.
+- **Moody** — long **held shots** with a slow **push-in** (Ken Burns), punctuated by quick
+  **beat-bursts** where the song gets loud, plus a calmer footage bias so shots breathe.
+  Looks best **vertical (9:16)**.
 
 ### How it picks and cuts
 
@@ -299,8 +314,8 @@ preview plus:
 - **Download MP4** — save the file directly.
 - **Add to Collection** — commit the montage into your library under a **“Beat Montage”**
   collection (created automatically the first time). It's stored with a unique filename and
-  full provenance (song, cut count, duration, fps, the random seed, and the source clip
-  IDs), gets a thumbnail, and is indexed — so it's searchable, filterable (model **“Beat
+  full provenance (song, style preset, cut count, duration, fps, the random seed, and the
+  source clip IDs), gets a thumbnail, and is indexed — so it's searchable, filterable (model **“Beat
   Montage”**), and reusable like any other clip. Until you add or download it, the render
   lives only in a temporary area and is replaced by your next one.
 
@@ -308,9 +323,11 @@ preview plus:
 
 Needs `ffmpeg` on the server (already required) plus **`librosa`** for audio analysis
 (included in `requirements-server.txt` and the Docker image). With an NVIDIA GPU and
-[NVENC](#gpu-video-encoding-nvidia-nvenc) available, the entire render — decode, scale,
-pad, and encode — stays on the GPU, so a multi-minute montage renders in seconds; without
-a GPU it falls back to CPU encoding. Like exports, the job runs server-side before the
+[NVENC](#gpu-video-encoding-nvidia-nvenc) available, the **Classic** render — decode,
+scale, pad, and encode — stays entirely on the GPU, so a multi-minute montage renders in
+seconds; without a GPU it falls back to CPU encoding. The **Cinematic** and **Moody**
+per-shot zoom (push-in / on-beat punch) uses a CPU-only filter, so those shots render on
+the CPU while the final encode still uses NVENC when available. Like exports, the job runs server-side before the
 result is ready, so the [reverse-proxy timeout guidance above](#reverse-proxy-timeouts-for-large-exports)
 applies. One montage renders at a time.
 

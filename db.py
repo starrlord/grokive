@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
-from mediautil import group_key_and_label, media_rel_path, tags_for_groups
+from mediautil import group_key_and_label, media_rel_path, media_shard, tags_for_groups
 
 try:
     from PIL import Image
@@ -190,7 +190,15 @@ def build_index(
             mid = item["id"]
             rel = media_rel_path(item)
             href = _rel_href(rel, gallery_dir)
-            thumb_path = thumbnails_dir / f"{mid}.jpg"
+            # Thumbnails live sharded (thumbnails/<ab>/<id>.jpg); tolerate the legacy
+            # flat path too so un-migrated libraries still show thumbnails.
+            shard = media_shard(mid)
+            thumb_rel = f"thumbnails/{shard}/{mid}.jpg"
+            thumb_path = thumbnails_dir / shard / f"{mid}.jpg"
+            if not thumb_path.exists():
+                flat = thumbnails_dir / f"{mid}.jpg"
+                if flat.exists():
+                    thumb_path, thumb_rel = flat, f"thumbnails/{mid}.jpg"
             tw, th = _thumb_dims(thumb_path)
             # Real source dimensions for the resolution badge: prefer values captured
             # from Grok at download time, else the previous build's cache, else probe
@@ -198,7 +206,7 @@ def build_index(
             mw, mh = item.get("width"), item.get("height")
             if not (mw and mh):
                 mw, mh = dim_cache.get(mid) or _media_dims(item.get("media_type"), gallery_dir / rel)
-            thumb_href = f"thumbnails/{mid}.jpg" if thumb_path.exists() else None
+            thumb_href = thumb_rel if thumb_path.exists() else None
             media_file = gallery_dir / rel
             vtt = media_file.with_suffix(".vtt")
             subtitles = href.rsplit(".", 1)[0] + ".vtt" if vtt.exists() else None

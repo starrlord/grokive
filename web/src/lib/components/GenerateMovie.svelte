@@ -1,9 +1,11 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import { fly, fade } from 'svelte/transition';
   import { portal } from '$lib/portal.js';
-  import { generateMovie, movieStatus, movieResultUrl, commitMovie } from '$lib/api.js';
-  import { loadCollections } from '$lib/state.js';
+  import ParticleField from './ParticleField.svelte';
+  import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
+  import { loadCollections, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   // videoIds: ordered ids of the currently-selected videos (selection order).
@@ -20,8 +22,19 @@
     planning: 'Planning cuts', rendering: 'Rendering', done: 'Done', error: 'Error'
   };
 
+  const PRESETS = [
+    { id: 'classic', label: 'Classic', help: 'Punchy hard cuts on the beat — the original style.' },
+    { id: 'cinematic', label: 'Cinematic', help: 'Smarter analysis, full-frame framing (no black bars), beat-timed transitions at section changes/drops, a gentle push-in that lets shots breathe, and a zoom punch on the drops.' },
+    { id: 'moody', label: 'Moody', help: 'Long held shots with a slow push-in, punctuated by quick beat bursts on the loud parts. Calmer footage.' }
+  ];
+
   let song = $state(null);
+  let preset = $state('classic');
   let tightness = $state(0.5);
+  // "Let clips speak" — preset-independent. When on, hold on clips that have
+  // dialogue (from their subtitles) in the song's quiet spots and dip the music.
+  let letClipsSpeak = $state(false);
+  let speakMoments = $state('auto'); // 'auto' | '1'..'4'
   let resId = $state('land1080');
   let fps = $state(30);
   let targetDuration = $state('');
@@ -30,10 +43,20 @@
 
   let starting = $state(false);
   let startError = $state(''); // error from the kickoff POST (shown in-panel)
-  let job = $state(null); // last /status payload
   let committing = $state(false);
   let committed = $state(false);
-  let timer = null;
+  // The render's status lives in the global movieJob store (shared with the Montage
+  // button + the floating status chip). `owned` is whether THIS panel is surfacing
+  // that job — true while driving a live render or showing a not-yet-acknowledged
+  // result, false on a fresh open so an acknowledged/absent job shows the setup form.
+  let owned = $state(false);
+  const job = $derived(owned ? $movieJob : null);
+  // The clips this panel renders from. Seeded from the live selection (videoIds) on
+  // a fresh open, but captured once a render starts (and restored from the job's
+  // provenance on reconnect) so "Make another" re-renders the same clips even after
+  // the live selection is cleared or the panel was reopened from the chip.
+  let sessionIds = $state([]);
+  const activeIds = $derived(sessionIds.length ? sessionIds : videoIds);
 
   const res = $derived(RES.find((r) => r.id === resId) || RES[0]);
   const tightnessLabel = $derived(tightness < 0.34 ? 'Relaxed' : tightness > 0.66 ? 'Tight' : 'Balanced');
@@ -48,32 +71,34 @@
   const running = $derived(!!job && job.running);
   const done = $derived(!!job && job.status === 'done' && !!job.result);
   const errored = $derived(!!job && job.status === 'error');
-  const canGenerate = $derived(videoIds.length >= 2 && !!song && !starting && !running);
-
-  function poll() {
-    movieStatus().then((s) => {
-      job = s;
-      if (!s.running) stop();
-    }).catch(() => {});
-  }
-  function start() {
-    stop();
-    timer = setInterval(poll, 1200);
-  }
-  function stop() {
-    if (timer) { clearInterval(timer); timer = null; }
-  }
+  const canGenerate = $derived(activeIds.length >= 2 && !!song && !starting && !running);
+  // Prefer the JOB's source count + preset (from server provenance) whenever a job
+  // is owned — the live selection is only meaningful on the fresh setup form and is
+  // empty when the panel is reopened from the status chip.
+  const sourceCount = $derived(job?.sources ?? activeIds.length);
+  const styleLabel = $derived(PRESETS.find((p) => p.id === (job?.preset ?? job?.result?.preset))?.label || '');
 
   onMount(async () => {
-    // Reconnect: if a render is already in flight (e.g. user reopened the panel),
-    // resume showing its live progress instead of starting fresh.
-    try {
-      const s = await movieStatus();
-      if (s.running || s.status === 'done' || s.status === 'error') job = s;
-      if (s.running) start();
-    } catch {}
+    // Reconnect to whatever the status chip considers pending — a live render OR a
+    // finished/failed result not yet acknowledged — so reopening always lands you
+    // back on it. An acknowledged or absent job leaves the fresh setup form. Live
+    // progress is fed by the global poller.
+    await refreshMovieStatus();
+    if (get(movieChip)) {
+      owned = true;
+      // Remember the job's source clips so "Make another" works even though the
+      // live selection that started it is long gone.
+      const ids = get(movieJob).source_ids;
+      if (ids?.length) sessionIds = ids;
+      if (get(movieJob).running) ensureMoviePolling();
+    }
   });
-  onDestroy(stop);
+
+  // Closing never discards the job — the floating chip keeps it reachable until the
+  // result is acknowledged (commit / Make another / dismiss).
+  function close() {
+    onclose();
+  }
 
   function pickFile(e) {
     const f = e.target.files?.[0];
@@ -91,23 +116,30 @@
     if (!canGenerate) return;
     starting = true;
     startError = '';
+    // Lock in the clips we're rendering so "Make another" reuses them.
+    const ids = [...activeIds];
+    sessionIds = ids;
     try {
-      await generateMovie({
-        ids: videoIds,
+      const data = await generateMovie({
+        ids,
         song,
         options: {
           name: name.trim() || 'movie',
+          preset,
           tightness,
           width: res.w,
           height: res.h,
           fps,
           target_duration: targetDuration,
+          let_clips_speak: letClipsSpeak,
+          speak_moments: speakMoments,
           // Fresh seed every run so successive renders pick different moments.
           seed: Math.floor(Math.random() * 1_000_000_000)
         }
       });
-      job = { running: true, status: 'queued', progress: 0, detail: 'Queued…' };
-      start();
+      // Surface this render in the panel and light up the button + chip instantly.
+      owned = true;
+      markMovieStarted(data.job_id);
     } catch (e) {
       startError = e.message || 'Could not start generation.';
       toast(startError, { type: 'error' });
@@ -122,6 +154,7 @@
     try {
       await commitMovie();
       committed = true;
+      acknowledgeMovie(job?.job_id); // dealt with — clear the floating chip
       await loadCollections(); // surface the new "Beat Montage" collection
       toast('Added to “Beat Montage” collection', { type: 'success' });
     } catch (e) {
@@ -132,31 +165,48 @@
   }
 
   function reset() {
-    stop();
-    job = null;
+    acknowledgeMovie(job?.job_id); // discard this result; clear the chip
+    owned = false;
     committed = false;
     committing = false;
   }
   function onkey(e) {
-    if (e.key === 'Escape' && !running) onclose();
+    // Closing mid-render is fine — generation continues server-side and reopening
+    // the panel reconnects to the live job (see onMount), so don't trap the user.
+    if (e.key === 'Escape') close();
   }
 
   const pct = $derived(Math.round(((job?.progress) || 0) * 100));
+
+  // Particle field: the progress bar's track (sparks emit at its leading edge)
+  // and a burst counter bumped once when a render lands on `done`.
+  let barTrack = $state(null);
+  let burstCount = $state(0);
+  // Fire one celebratory burst when a render lands on `done`. Increment inside
+  // untrack so the effect depends only on `done`, not on burstCount itself —
+  // otherwise burstCount++ would re-trigger the effect and loop infinitely.
+  $effect(() => { if (done) untrack(() => burstCount++); });
 </script>
 
 <svelte:window onkeydown={onkey} />
 
 <div use:portal class="fixed inset-0 z-[70] grid place-items-center bg-[var(--overlay-strong)] p-4 backdrop-blur-sm" role="presentation"
-     transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget && !running) onclose(); }}>
-  <div class="panel flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
+     transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
+  {#if running || done}
+    <!-- Full-screen colourful parallax bokeh + aurora behind the panel; fires a
+         multi-colour burst from centre when the render finishes. -->
+    <ParticleField active={running} animate={running} layers={3} intensity={0.85} auroraAlpha={0.3} aurora
+      burst={burstCount} class="pointer-events-none absolute inset-0 z-0 h-full w-full" />
+  {/if}
+  <div class="panel relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
        transition:fly={{ y: 18, duration: 180 }}>
     <header class="flex items-center justify-between border-b border-line px-5 py-4">
       <div>
         <h2 class="text-lg font-extrabold tracking-tight">Generate Movie</h2>
-        <p class="text-sm text-muted">Beat-synced montage from {videoIds.length} selected video{videoIds.length === 1 ? '' : 's'}.</p>
+        <p class="text-sm text-muted">Beat-synced montage from {sourceCount} selected video{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.</p>
       </div>
-      <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line disabled:opacity-40"
-        aria-label="Close" disabled={running} onclick={onclose}>✕</button>
+      <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line"
+        aria-label="Close" onclick={close}>✕</button>
     </header>
 
     <div class="min-h-0 flex-1 overflow-y-auto p-5">
@@ -181,16 +231,24 @@
         </div>
       {:else if running}
         <!-- Progress -->
-        <div class="space-y-4 py-4">
-          <div class="flex items-center justify-between text-sm font-semibold">
-            <span>{STAGE_LABEL[job.status] || job.status}</span>
-            <span class="text-muted">{pct}%</span>
+        <div class="relative overflow-hidden px-5 py-4">
+          <!-- Subtle small bokeh + a faint cool wash inside the panel (kept low so
+               text stays crisp); sparks stream off the progress bar's leading edge. -->
+          <ParticleField active={running} layers={2} intensity={0.5} scale={0.5}
+            aurora auroraColors={['#22d3ee', '#60a5fa', '#a78bfa']} auroraAlpha={0.1}
+            emitEl={barTrack} emitAt={pct / 100}
+            class="pointer-events-none absolute inset-0 z-0 h-full w-full" />
+          <div class="relative z-10 space-y-4">
+            <div class="flex items-center justify-between text-sm font-semibold">
+              <span>{STAGE_LABEL[job.status] || job.status}</span>
+              <span class="text-muted">{pct}%</span>
+            </div>
+            <div bind:this={barTrack} class="h-2.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
+              <div class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-500" style="width: {pct}%"></div>
+            </div>
+            <p class="text-sm font-medium text-ink/90">{job.detail || 'Working…'}</p>
+            <p class="text-xs text-muted">Generation runs on the server and continues even if you close this panel.</p>
           </div>
-          <div class="h-2.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
-            <div class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-500" style="width: {pct}%"></div>
-          </div>
-          <p class="text-sm text-muted">{job.detail || 'Working…'}</p>
-          <p class="text-xs text-muted">Generation runs on the server and continues even if you close this panel.</p>
         </div>
       {:else}
         <!-- Setup -->
@@ -222,6 +280,19 @@
             </label>
           </div>
 
+          <!-- Style preset -->
+          <div>
+            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Style</div>
+            <div class="grid grid-cols-3 gap-1.5">
+              {#each PRESETS as p (p.id)}
+                <button type="button" title={p.help}
+                  class="rounded-lg border px-3 py-2 text-sm font-semibold transition {preset === p.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                  onclick={() => (preset = p.id)}>{p.label}</button>
+              {/each}
+            </div>
+            <p class="mt-2 text-xs leading-relaxed text-muted">{PRESETS.find((p) => p.id === preset)?.help}</p>
+          </div>
+
           <!-- Tightness -->
           <div>
             <div class="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
@@ -234,6 +305,32 @@
             <input type="range" min="0" max="1" step="0.05" bind:value={tightness} class="w-full accent-[var(--accent)]" title={TIGHTNESS_TIP} />
             <div class="mb-1 flex justify-between text-[11px] text-muted"><span>Relaxed</span><span>Tight</span></div>
             <p class="text-xs leading-relaxed text-muted">{tightnessHelp}</p>
+          </div>
+
+          <!-- Let clips speak (audio ducking) -->
+          <div class="rounded-lg border border-line p-3">
+            <label class="flex cursor-pointer items-start gap-3">
+              <input type="checkbox" bind:checked={letClipsSpeak}
+                class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
+              <span>
+                <span class="block text-sm font-semibold">Let clips speak</span>
+                <span class="mt-1 block text-xs leading-relaxed text-muted">
+                  In the song's quiet stretches, hold on a clip that has dialogue and dip the
+                  music so a full line comes through, then pick the beat back up. Only uses clips
+                  that already have subtitles (.srt/.vtt); clips without speech are skipped.
+                </span>
+              </span>
+            </label>
+            {#if letClipsSpeak}
+              <div class="mt-3 flex items-center gap-2 pl-7">
+                <span class="text-xs font-bold uppercase tracking-wider text-muted">Moments</span>
+                {#each ['auto', '1', '2', '3', '4'] as m (m)}
+                  <button type="button"
+                    class="rounded-lg border px-2.5 py-1 text-xs font-semibold capitalize transition {speakMoments === m ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                    onclick={() => (speakMoments = m)}>{m}</button>
+                {/each}
+              </div>
+            {/if}
           </div>
 
           <!-- Resolution + fps -->
@@ -277,7 +374,7 @@
     {#if !done && !running}
       <footer class="flex items-center justify-between gap-3 border-t border-line px-5 py-4">
         <p class="text-xs text-muted">
-          {#if videoIds.length < 2}Select at least 2 videos.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
+          {#if activeIds.length < 2}Select at least 2 videos.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
         </p>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>

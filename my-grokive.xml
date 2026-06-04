@@ -13,7 +13,7 @@
   <Category>MediaApp:Other Tools:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL/>
-  <ExtraParams/>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
@@ -78,6 +78,21 @@
       <Name>WHISPER_SERVER_URL</Name>
       <Mode/>
     </Variable>
+    <Variable>
+      <Value>all</Value>
+      <Name>NVIDIA_VISIBLE_DEVICES</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>all</Value>
+      <Name>NVIDIA_DRIVER_CAPABILITIES</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>auto</Value>
+      <Name>VIDEO_ENCODER</Name>
+      <Mode/>
+    </Variable>
   </Environment>
   <Config Name="WebUI Port" Target="8080" Default="8080" Mode="tcp" Description="Web interface port" Type="Port" Display="always" Required="true" Mask="false">8080</Config>
   <Config Name="Data (appdata)" Target="/data" Default="/mnt/user/appdata/grokive" Mode="rw" Description="Stores cURL config, metadata, the SQLite index, media, thumbnails and settings" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/grokive</Config>
@@ -88,4 +103,7 @@
   <Config Name="Disable Auth" Target="AUTH_DISABLED" Default="" Mode="" Description="Set to true to turn OFF the login (open UI). Only on a fully trusted, isolated LAN." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Trust Proxy" Target="TRUST_PROXY" Default="" Mode="" Description="Set to true when behind an HTTPS reverse proxy (real client IPs + Secure session cookie)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Whisper Server URL" Target="WHISPER_SERVER_URL" Default="" Mode="" Description="Optional: whisper-asr-webservice endpoint (e.g. http://host:9000/asr) to enable subtitle generation" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="NVIDIA Visible Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU passthrough for NVENC (playlist merges / subtitle burn-in). 'all' exposes every GPU, or set a specific 'GPU-&lt;uuid&gt;' (from nvidia-smi -L). Requires --runtime=nvidia (already in Extra Parameters) and the Nvidia Driver plugin." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="NVIDIA Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Driver capabilities exposed to the container. 'all' includes 'video' (required for NVENC) and 'utility' (nvidia-smi)." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+  <Config Name="Video Encoder" Target="VIDEO_ENCODER" Default="auto" Mode="" Description="Re-encoder for playlist merges and burned-in subtitles. 'auto' uses the NVIDIA GPU (NVENC) when visible, else CPU libx264. Force with 'nvenc' or 'cpu'." Type="Variable" Display="advanced" Required="false" Mask="false">auto</Config>
 </Container>

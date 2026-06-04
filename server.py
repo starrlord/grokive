@@ -45,6 +45,7 @@ from flask import (
 
 import db
 import moviegen
+from mediautil import media_shard
 # Aliased: the `/thumbnails/...` route function below is also named `thumbnails`
 # and would otherwise shadow this module at module scope.
 import thumbnails as thumbgen
@@ -679,12 +680,21 @@ def api_playlists_post() -> Response:
     return jsonify(ok=True, count=len(clean))
 
 
+# Upper bound for a media id reference stored in library.json / collections.json.
+# Media ids can be the file's name stem (see reindex.py), and a filesystem allows
+# up to 255-char names — manually-imported files (e.g. base64-URL names) routinely
+# exceed the old 128 cap, which silently truncated the id so archive/collection
+# membership never matched and the item could not leave Recent. 255 covers any
+# real on-disk id while still bounding abuse.
+MAX_MEDIA_ID_LEN = 255
+
+
 def _collection_id_list(value) -> list[str]:
     if not isinstance(value, list):
         return []
     seen, out = set(), []
     for item in value[:100000]:
-        key = str(item)[:128]
+        key = str(item)[:MAX_MEDIA_ID_LEN]
         if key and key not in seen:
             seen.add(key)
             out.append(key)
@@ -701,7 +711,7 @@ def _clean_collection(entry: dict) -> dict | None:
         "id": str(entry.get("id") or "")[:64] or name,
         "name": name,
         "ids": ids,
-        "cover_id": str(entry.get("cover_id") or "")[:128],
+        "cover_id": str(entry.get("cover_id") or "")[:MAX_MEDIA_ID_LEN],
         "created_at": str(entry.get("created_at") or now)[:32],
         "updated_at": str(entry.get("updated_at") or now)[:32],
     }
@@ -1212,8 +1222,17 @@ def api_movie_generate() -> Response:
 
     target = request.form.get("target_duration", "").strip()
     seed_raw = request.form.get("seed", "").strip()
+    preset = (request.form.get("preset") or moviegen.DEFAULT_PRESET).strip()
+    if preset not in moviegen.PRESETS:
+        preset = moviegen.DEFAULT_PRESET
+    # "Let clips speak": preset-independent. The count is "auto" or a small int.
+    let_speak = (request.form.get("let_clips_speak") or "").strip().lower() in ("1", "true", "on", "yes")
+    speak_raw = (request.form.get("speak_moments") or "auto").strip().lower()
+    speak_moments = speak_raw if speak_raw == "auto" else (
+        str(max(1, min(6, int(speak_raw)))) if speak_raw.isdigit() else "auto")
     options = {
         "name": (request.form.get("name") or "movie")[:80],
+        "preset": preset,
         "tightness": _num("tightness", 0.5, 0.0, 1.0),
         "width": int(_num("width", 1920, 160, 3840, int)),
         "height": int(_num("height", 1080, 160, 2160, int)),
@@ -1222,6 +1241,8 @@ def api_movie_generate() -> Response:
         # Each run sends a fresh seed so successive renders differ; absent/invalid
         # -> deterministic (strict best).
         "seed": (int(seed_raw) if seed_raw.lstrip("-").isdigit() else None),
+        "let_clips_speak": let_speak,
+        "speak_moments": speak_moments,
     }
 
     with _movie_lock:
@@ -1240,7 +1261,10 @@ def api_movie_generate() -> Response:
                       commit_meta={
                           "name": options["name"], "song": song.filename,
                           "seed": options["seed"], "tightness": options["tightness"],
-                          "fps": options["fps"], "source_ids": [str(i) for i in ids],
+                          "fps": options["fps"], "preset": options["preset"],
+                          "let_clips_speak": options["let_clips_speak"],
+                          "speak_moments": options["speak_moments"],
+                          "source_ids": [str(i) for i in ids],
                       })
     threading.Thread(target=_movie_worker, args=(job_id, paths, song_path, options), daemon=True).start()
     return jsonify(ok=True, job_id=job_id), 202
@@ -1249,6 +1273,7 @@ def api_movie_generate() -> Response:
 @app.get("/api/movie/status")
 def api_movie_status() -> Response:
     r = _movie["result"]
+    meta = _movie["commit_meta"] or {}
     return jsonify(
         running=_movie["running"],
         job_id=_movie["job_id"],
@@ -1259,6 +1284,14 @@ def api_movie_status() -> Response:
         error=_movie["error"],
         started_at=_movie["started_at"],
         finished_at=_movie["finished_at"],
+        # Submit-time provenance so the panel header is correct even when reopened
+        # from the status chip with no live selection (and mid-render, before a
+        # result exists): the source videos that went in, and which preset. The
+        # ids let "Make another" re-render the same clips after the live selection
+        # is gone.
+        sources=len(meta.get("source_ids") or []),
+        source_ids=meta.get("source_ids") or [],
+        preset=meta.get("preset"),
         # Don't leak the absolute server path to the client.
         result=({k: v for k, v in r.items() if k != "path"} if r else None),
     )
@@ -1289,12 +1322,14 @@ def _commit_montage() -> dict:
     meta = _movie.get("commit_meta") or {}
 
     mid = "montage_" + secrets.token_hex(8)  # unique; never collides with Grok UUIDs
-    rel = f"media/montages/{mid}.mp4"
+    rel = f"media/montages/{media_shard(mid)}/{mid}.mp4"
     dest = GALLERY_DIR / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(r["path"], dest)
     try:
-        thumbgen.make_video_thumb(dest, THUMBS_DIR / f"{mid}.jpg")
+        thumb_dest = thumbgen.thumb_path({"id": mid}, THUMBS_DIR)
+        thumb_dest.parent.mkdir(parents=True, exist_ok=True)
+        thumbgen.make_video_thumb(dest, thumb_dest)
     except Exception as exc:  # pragma: no cover - thumbnail is best-effort
         print(f"montage thumbnail failed: {exc}")
 
@@ -1315,6 +1350,7 @@ def _commit_montage() -> dict:
         "height": r.get("height"),
         # Provenance — ignored by the index, kept in metadata.json for reference.
         "montage": True,
+        "preset": meta.get("preset") or r.get("preset"),
         "fps": r.get("fps"),
         "duration": r.get("duration"),
         "seed": meta.get("seed"),
@@ -1544,7 +1580,7 @@ def api_library_post() -> Response:
             return []
         seen, out = set(), []
         for item in value[:100000]:
-            key = str(item)[:128]
+            key = str(item)[:MAX_MEDIA_ID_LEN]
             if key and key not in seen:
                 seen.add(key)
                 out.append(key)

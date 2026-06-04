@@ -16,6 +16,8 @@ import httpx
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests.exceptions import RequestException as CffiRequestException
 
+from mediautil import media_shard
+
 
 DEFAULT_METADATA = Path("metadata.json")
 DEFAULT_FAILURES = Path("failed_downloads.json")
@@ -665,10 +667,13 @@ def process_item(
         return False
     source_url = str(raw["source_url"])
     media_type = resolve_media_type(raw)
-    folder = Path("media/videos" if media_type == "video" else "media/images")
+    base = Path("media/videos" if media_type == "video" else "media/images")
+    folder = base / media_shard(item_id)
     # If the media file is already on disk (e.g. copied in from another machine)
-    # but missing from metadata, index it instead of re-downloading.
-    existing_file = next(iter((GALLERY_ROOT / folder).glob(f"{item_id}.*")), None)
+    # but missing from metadata, index it instead of re-downloading. Check the
+    # sharded location first, then the legacy flat one.
+    existing_file = (next(iter((GALLERY_ROOT / folder).glob(f"{item_id}.*")), None)
+                     or next(iter((GALLERY_ROOT / base).glob(f"{item_id}.*")), None))
     if existing_file is not None and existing_file.is_file():
         record = normalize_record(raw, existing_file.relative_to(GALLERY_ROOT))
         by_id[item_id] = record.__dict__
@@ -677,6 +682,7 @@ def process_item(
             print(f"indexed existing {item_id} -> {existing_file}")
         return False
     try:
+        (GALLERY_ROOT / folder).mkdir(parents=True, exist_ok=True)
         local = download_media(client, media_spec, source_url, GALLERY_ROOT / folder / item_id)
     except Exception as exc:
         append_failure(

@@ -79,6 +79,7 @@
         {@const it = cell.item}
         {@const fav = $favorites.has(it.id)}
         {@const sel = selection.has(it.id)}
+        {@const isMontage = it.model === 'Beat Montage'}
         <!-- Mouse handlers only position a hover tooltip; the real click target is the Open button below. -->
         <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
              class:ring-2={sel} class:select-none={selectMode}
@@ -107,7 +108,13 @@
                uses the shorter side so portrait and landscape both read sensibly. -->
           <span class="card-meta pointer-events-none absolute bottom-2 right-2 z-[2]">
             {#if it.media_w && it.media_h}<span class="meta-badge">{Math.min(it.media_w, it.media_h)}p</span>{/if}
-            {#if it.media_type === 'video'}<span class="meta-badge meta-badge-video">video</span>{/if}
+            {#if isMontage}
+              <span class="meta-badge meta-badge-music" title="Music montage" aria-label="Music montage">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              </span>
+            {:else if it.media_type === 'video'}
+              <span class="meta-badge meta-badge-video">video</span>
+            {/if}
             {#if it.has_subtitles}<span class="meta-badge">CC</span>{/if}
           </span>
 
@@ -199,6 +206,20 @@
 
   .meta-badge-video {
     padding-inline: 0.5rem;
+  }
+
+  /* Music-montage marker: accent-filled pill with a music-note glyph, matching the
+     Montage action's icon. Stands out from the neutral resolution/CC badges so a
+     beat montage reads at a glance on the Recent tab. */
+  .meta-badge-music {
+    background: var(--accent);
+    color: var(--on-accent);
+    padding-inline: 0.4rem;
+  }
+
+  .meta-badge-music svg {
+    height: 0.85rem;
+    width: 0.85rem;
   }
 
   .card-actions {

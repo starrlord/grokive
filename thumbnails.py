@@ -15,11 +15,11 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
-from mediautil import media_rel_path
+from mediautil import media_rel_path, media_shard
 
 
 def thumb_path(item: dict[str, Any], thumbnails_dir: Path) -> Path:
-    return thumbnails_dir / f"{item['id']}.jpg"
+    return thumbnails_dir / media_shard(item["id"]) / f"{item['id']}.jpg"
 
 
 def make_image_thumb(source: Path, dest: Path) -> bool:
