@@ -284,7 +284,7 @@
         <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
           bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
         <span class="text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
-        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-white disabled:opacity-50"
+        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection)}>Play videos</button>
       </div>
 
@@ -337,15 +337,15 @@
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {#each facets.canvases || [] as c (c.id)}
           <article class="group overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
-            <button type="button" class="relative block aspect-square w-full overflow-hidden bg-black text-left" onclick={() => openCanvas(c)}>
+            <button type="button" class="relative block aspect-square w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => openCanvas(c)}>
               {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-105" />{/if}
-              <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent px-3 pb-2.5 pt-8 text-white">
+              <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim)] to-transparent px-3 pb-2.5 pt-8 text-[var(--media-control-ink)]">
                 <span class="block truncate text-sm font-bold" title={c.name}>{c.name}</span>
                 <span class="block text-xs opacity-80">{c.count} items · {c.videos} video</span>
               </span>
             </button>
             <div class="flex items-center gap-2 p-2">
-              <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-white disabled:opacity-45"
+              <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-[var(--on-accent)] disabled:opacity-45"
                 title="Play videos" aria-label={`Play ${c.name} videos`} disabled={!c.videos} onclick={() => playCanvas(c)}>▶</button>
               <button type="button" class="min-w-0 flex-1 truncate text-left text-sm font-semibold hover:underline" title={c.name} onclick={() => openCanvas(c)}>{c.name}</button>
               <span class="text-xs text-muted">{c.videos || 0}</span>
@@ -419,9 +419,9 @@
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && menuOpen) menuOpen = false; }} />
 {#if menuOpen}
   <div use:portal class="fixed inset-0 z-50 lg:hidden">
-    <div class="absolute inset-0 bg-black/65 backdrop-blur-sm" role="presentation"
+    <div class="absolute inset-0 bg-[var(--overlay)] backdrop-blur-sm" role="presentation"
          transition:fade={{ duration: 150 }} onclick={() => (menuOpen = false)}></div>
-    <div class="absolute inset-y-0 left-0 flex w-[86vw] max-w-sm flex-col bg-[var(--surface-solid)] shadow-[8px_0_40px_rgba(0,0,0,0.5)]"
+    <div class="absolute inset-y-0 left-0 flex w-[86vw] max-w-sm flex-col bg-[var(--surface-solid)] shadow-[var(--shadow-drawer)]"
          role="dialog" aria-modal="true" aria-label="Menu" tabindex="-1"
          style="padding-top: max(0.5rem, env(safe-area-inset-top)); padding-bottom: env(safe-area-inset-bottom); padding-left: env(safe-area-inset-left)"
          transition:fly={{ x: -360, duration: 220 }}>

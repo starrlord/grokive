@@ -42,7 +42,7 @@
 
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
 
-<div use:portal class="fixed inset-0 z-[65] grid place-items-center bg-black/65 p-4 backdrop-blur-sm" role="presentation"
+<div use:portal class="fixed inset-0 z-[65] grid place-items-center bg-[var(--overlay)] p-4 backdrop-blur-sm" role="presentation"
      transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div class="panel flex max-h-[88dvh] w-full max-w-lg flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Add to collection" tabindex="-1" transition:fly={{ y: 18, duration: 160 }}>
     <div class="border-b border-line p-4">
@@ -59,7 +59,7 @@
         <div class="flex gap-2">
           <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
             placeholder="Collection name" bind:value={name} maxlength="80" />
-          <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
+          <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
             disabled={!name.trim() || !selected.length} onclick={create}>Create</button>
         </div>
       </div>
@@ -86,7 +86,7 @@
                 {#if c.cover}
                   <img src={c.cover} alt="" class="h-10 w-14 shrink-0 rounded-sm object-cover" />
                 {:else}
-                  <span class="h-10 w-14 shrink-0 rounded-sm bg-black/40"></span>
+                  <span class="h-10 w-14 shrink-0 rounded-sm bg-[var(--media-placeholder)]"></span>
                 {/if}
                 <span class="min-w-0 flex-1">
                   <span class="block truncate text-sm font-semibold">{c.name}</span>

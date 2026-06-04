@@ -21,9 +21,16 @@ const persist = (key, value) => {
 
 // --- Display preferences (persisted) ---------------------------------------
 export const THEMES = [
-  { id: 'violet', label: 'Violet' },
-  { id: 'classic', label: 'Classic' },
-  { id: 'light', label: 'Light' }
+  { id: 'violet', label: 'Violet', preview: ['#15131c', '#211f2b', '#8b5cf6', '#4bb3a8'] },
+  { id: 'aurora', label: 'Obsidian Aurora', preview: ['#070b13', '#101827', '#22d3ee', '#84cc16'] },
+  { id: 'cobalt', label: 'Cobalt Mirage', preview: ['#070a1b', '#1c2543', '#4367ff', '#ffd95a'] },
+  { id: 'nocturne', label: 'Neon Nocturne', preview: ['#090817', '#191431', '#7c5cff', '#e879f9'] },
+  { id: 'graphite', label: 'Graphite Atelier', preview: ['#090a0c', '#14161a', '#7dd3c7', '#f3d6a3'] },
+  { id: 'rainforest', label: 'Rainforest Noir', preview: ['#06100d', '#10201a', '#34d399', '#c084fc'] },
+  { id: 'ember', label: 'Ember Glass', preview: ['#100d0c', '#1d1816', '#ff9f7a', '#76e4f7'] },
+  { id: 'arctic', label: 'Arctic Alloy', preview: ['#070b10', '#111923', '#a7f3ff', '#b8f7d4'] },
+  { id: 'classic', label: 'Classic', preview: ['#0c0d0a', '#161711', '#8b5cf6', '#4bb3a8'] },
+  { id: 'light', label: 'Light', preview: ['#f6f5f2', '#ffffff', '#7c3aed', '#4bb3a8'] }
 ];
 // Migrate the old dark/light flag: 'dark' was the warm cinematic palette.
 const savedTheme = (() => {

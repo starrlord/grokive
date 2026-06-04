@@ -18,7 +18,7 @@
   <div class="mb-5">
     <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Media type</div>
     <div class="grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
-      {#each types as t}
+      {#each types as t (t.id)}
         <button type="button"
           class="rounded-md py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted'}"
           onclick={() => setMediaType(t.id)}>{t.label}</button>
@@ -32,7 +32,7 @@
       <div class="flex flex-wrap gap-1.5">
         {#each facets.resolutions as r (r.height)}
           <button type="button"
-            class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {$filters.resolutions.includes(r.height) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line hover:border-[var(--accent)]'}"
+            class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {$filters.resolutions.includes(r.height) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
             onclick={() => toggleResolution(r.height)}>{r.height}p <span class="opacity-70">{r.count}</span></button>
         {/each}
       </div>
@@ -47,8 +47,8 @@
 
     {#if $filters.tags.length}
       <div class="mb-2 flex flex-wrap gap-1.5">
-        {#each $filters.tags as t}
-          <button class="rounded-full bg-[var(--accent)] px-2.5 py-1 text-xs font-semibold text-white" onclick={() => toggleTag(t)}>{t} ✕</button>
+        {#each $filters.tags as t (t)}
+          <button class="rounded-full bg-[var(--accent)] px-2.5 py-1 text-xs font-semibold text-[var(--on-accent)]" onclick={() => toggleTag(t)}>{t} ✕</button>
         {/each}
       </div>
     {/if}
@@ -70,7 +70,7 @@
       <div class="flex flex-col gap-1">
         {#each facets.models as m (m.name)}
           <button type="button"
-            class="flex items-center justify-between rounded-lg border px-2.5 py-1.5 text-left text-sm {$filters.models.includes(m.name) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line'}"
+            class="flex items-center justify-between rounded-lg border px-2.5 py-1.5 text-left text-sm {$filters.models.includes(m.name) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line'}"
             onclick={() => toggleModel(m.name)}>
             <span class="truncate">{m.name}</span><span class="ml-2 text-xs opacity-70">{m.count}</span>
           </button>

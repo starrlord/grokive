@@ -38,17 +38,17 @@
       {#each $playlists as pl (pl.id)}
         {@const busy = exporting.has(pl.id)}
         <div class="flex items-center gap-1.5 rounded-lg border border-line p-1.5">
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-white" title="Play" onclick={() => onplay(pl)}>▶</button>
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-[var(--on-accent)]" title="Play" onclick={() => onplay(pl)}>▶</button>
           <button class="min-w-0 flex-1 truncate text-left text-sm hover:underline" title="Edit" onclick={() => onedit(pl)}>{pl.name}</button>
           <span class="text-xs text-muted">{pl.ids.length}</span>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-teal-500/40 text-teal-400 transition hover:border-teal-400 hover:bg-teal-500/10 disabled:cursor-default disabled:hover:bg-transparent" title={busy ? 'Exporting…' : 'Export MP4'} onclick={() => doExport(pl)} disabled={busy} aria-label={busy ? 'Exporting playlist' : 'Export playlist'} aria-busy={busy}>
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-[var(--success-border)] text-[var(--success-ink)] transition hover:border-[var(--success-ink)] hover:bg-[var(--success-bg)] disabled:cursor-default disabled:hover:bg-transparent" title={busy ? 'Exporting…' : 'Export MP4'} onclick={() => doExport(pl)} disabled={busy} aria-label={busy ? 'Exporting playlist' : 'Export playlist'} aria-busy={busy}>
             {#if busy}
               <svg viewBox="0 0 24 24" class="h-4 w-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
             {:else}
               <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
             {/if}
           </button>
-          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line text-muted transition hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-400" title="Delete" onclick={() => (confirming = pl)} aria-label="Delete playlist">
+          <button class="grid h-7 w-7 shrink-0 place-items-center rounded-sm border border-line text-muted transition hover:border-[var(--danger-border-strong)] hover:bg-[var(--danger-bg)] hover:text-[var(--danger-ink)]" title="Delete" onclick={() => (confirming = pl)} aria-label="Delete playlist">
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
           </button>
         </div>

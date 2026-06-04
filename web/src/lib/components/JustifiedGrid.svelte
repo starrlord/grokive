@@ -73,7 +73,7 @@
 <svelte:window onpointerup={() => (painting = false)} onpointercancel={() => (painting = false)} />
 
 <div class="w-full" bind:clientWidth={width} style="--g:{gap}px">
-  {#each rows as row}
+  {#each rows as row (row.cells[0]?.item.id)}
     <div class="flex" style="gap:var(--g); margin-bottom:var(--g)">
       {#each row.cells as cell (cell.item.id)}
         {@const it = cell.item}
@@ -116,8 +116,8 @@
                selects this card. pointer-events gated to hover so touch taps on the
                corner don't accidentally enter select mode. -->
           <button type="button"
-            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-white text-sm transition
-                   {sel ? 'bg-[var(--accent)] text-white' : 'bg-black/50 text-white/90'}
+            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-[var(--media-control-ink)] text-sm transition
+                   {sel ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'bg-[var(--selection-control-bg)] text-[var(--media-control-ink-muted)]'}
                    {selectMode ? '' : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'}"
             aria-label={sel ? 'Deselect' : 'Select'} aria-pressed={sel}
             onpointerdown={(e) => e.stopPropagation()}
@@ -128,7 +128,7 @@
             {@const isStashed = $stashed.has(it.id)}
             <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1.5">
               <button type="button" aria-label="Favorite" title="Favorite"
-                class="card-action-btn {fav ? 'text-[#ff5a7a]' : ''}"
+                class="card-action-btn {fav ? 'text-[var(--favorite)]' : ''}"
                 onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
               <button type="button" aria-label={isStashed ? 'Restore' : 'Archive'} title={isStashed ? 'Restore' : 'Archive'}
                 class="card-action-btn {isStashed ? 'card-action-active' : ''}"
@@ -136,7 +136,7 @@
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>
               </button>
               <button type="button" aria-label="Delete" title="Delete"
-                class="card-action-btn hover:bg-red-500"
+                class="card-action-btn hover:bg-[var(--danger)]"
                 onclick={(e) => { e.stopPropagation(); confirming = it; }}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
               </button>
@@ -183,9 +183,9 @@
 
   .meta-badge {
     align-items: center;
-    background: rgb(0 0 0 / 0.68);
+    background: var(--media-badge-bg);
     border-radius: 999px;
-    color: white;
+    color: var(--media-control-ink);
     display: inline-flex;
     font-size: 0.625rem;
     font-weight: 800;
@@ -218,10 +218,10 @@
 
   .card-action-btn {
     align-items: center;
-    background: rgb(0 0 0 / 0.52);
-    border: 1px solid rgb(255 255 255 / 0.16);
+    background: var(--media-control-bg);
+    border: 1px solid var(--media-control-border);
     border-radius: 999px;
-    color: white;
+    color: var(--media-control-ink);
     display: grid;
     height: 2rem;
     place-items: center;
@@ -231,8 +231,8 @@
 
   .card-action-btn:hover,
   .card-action-btn:focus-visible {
-    background: rgb(0 0 0 / 0.72);
-    border-color: rgb(255 255 255 / 0.36);
+    background: var(--media-control-bg-hover);
+    border-color: var(--media-control-border-hover);
   }
 
   .card-action-active {

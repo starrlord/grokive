@@ -1,6 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import { fade, fly } from 'svelte/transition';
+  import { fly } from 'svelte/transition';
   import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -54,12 +53,6 @@
   // the player. So we start muted (which iOS *will* autoplay, controls auto-hide),
   // and the first tap anywhere unmutes — and the preference sticks across clips.
   let wantSound = $state(false);
-  // The mute hint is a one-time discoverability nudge: it auto-dismisses so it never
-  // lingers over the video. Once gone, a tap anywhere on the stage still unmutes.
-  let soundHintDismissed = $state(false);
-  let soundHintTimer;
-  onMount(() => { soundHintTimer = setTimeout(() => (soundHintDismissed = true), 3500); });
-  onDestroy(() => clearTimeout(soundHintTimer));
   function enableSound() {
     showControls = true;
     if (wantSound) return;
@@ -158,7 +151,7 @@
 <svelte:window on:keydown={onkey} />
 
 {#if item}
-  <div class="fixed inset-0 z-50 bg-black/92 backdrop-blur-sm" role="dialog" aria-modal="true">
+  <div class="fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true">
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
     <div bind:this={stageEl} class="absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
          onpointerdown={enableSound}
@@ -166,7 +159,7 @@
       {#if item.media_type === 'video'}
         <!-- caption track is (re)built imperatively in the $effect so playlist clips keep subtitles -->
         <video bind:this={videoEl} controls={showControls} autoplay playsinline muted={!wantSound} onended={onended}
-               style={fitStyle(item)} class="rounded-lg bg-black"></video>
+               style={fitStyle(item)} class="rounded-lg bg-[var(--media-bg)]"></video>
       {:else}
         <img src={item.href} alt="" style={fitStyle(item)} class="rounded-lg" />
       {/if}
@@ -174,15 +167,15 @@
 
     <!-- Top scrim: grounds the floating chrome so it stays legible over bright
          frames, and visually separates controls from the media on full-bleed clips. -->
-    <div class="pointer-events-none absolute inset-x-0 top-0 z-[5] h-28 bg-gradient-to-b from-black/60 via-black/25 to-transparent"></div>
+    <div class="pointer-events-none absolute inset-x-0 top-0 z-[5] h-28 bg-gradient-to-b from-[var(--lightbox-scrim-start)] via-[var(--lightbox-scrim-mid)] to-transparent"></div>
 
     <!-- Top chrome (safe-area inset so it clears notches / Dynamic Island) -->
     <div class="absolute z-10 flex gap-2" style="top: max(0.75rem, env(safe-area-inset-top)); right: max(0.75rem, env(safe-area-inset-right));">
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[#ff5a7a]' : ''}"
+      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
         title="Favorite" onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
         title="Info (i)" onclick={() => (showInfo = !showInfo)}>ⓘ</button>
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-red-400"
+      <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
         title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
         <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
       </button>
@@ -205,14 +198,6 @@
       {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
 
-    <!-- Tap-for-sound hint while muted: sits just above the counter, out of the way
-         of the video, and auto-dismisses (see soundHintDismissed) so it never lingers. -->
-    {#if item.media_type === 'video' && !wantSound && !soundHintDismissed}
-      <button class="glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3.5 py-2 text-sm font-semibold shadow-lg"
-        style="bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 2.75rem);"
-        onclick={enableSound} transition:fade={{ duration: 200 }}>🔇 Tap for sound</button>
-    {/if}
-
     <!-- Info panel: hidden by default, slides up over the bottom when opened -->
     {#if showInfo}
       <div class="panel absolute inset-x-0 bottom-0 z-20 max-h-[50vh] overflow-auto px-6 py-4"
@@ -232,7 +217,7 @@
           ].filter(Boolean).join('  ·  ')}
         </p>
         <div class="flex flex-wrap gap-2">
-          <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {$favorites.has(item.id) ? 'text-[#ff5a7a]' : ''}"
+          <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
             onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥ Favorited' : '♡ Favorite'}</button>
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold"
             onclick={(e) => copy(e, item.prompt)}>Copy prompt</button>

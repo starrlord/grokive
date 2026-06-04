@@ -153,12 +153,12 @@
   }
 
   .select-dock {
-    background: color-mix(in srgb, var(--surface-solid) 88%, #111 12%);
+    background: color-mix(in srgb, var(--surface-solid) 88%, var(--surface-tint) 12%);
     border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
     border-radius: var(--r-2xl);
     box-shadow:
-      0 18px 42px rgba(0, 0, 0, 0.42),
-      inset 0 1px 0 color-mix(in srgb, white 7%, transparent);
+      var(--shadow-dock),
+      inset 0 1px 0 var(--surface-highlight);
     gap: 0.35rem;
     max-width: min(100%, 74rem);
     padding: 0.45rem;
@@ -214,7 +214,7 @@
   .select-badge {
     background: var(--accent);
     border-radius: 999px;
-    color: white;
+    color: var(--on-accent);
     display: grid;
     font-size: 0.75rem;
     font-weight: 900;
@@ -258,21 +258,21 @@
   .select-primary {
     background: var(--accent);
     border-color: transparent;
-    color: white;
+    color: var(--on-accent);
   }
 
   .select-danger {
-    border-color: color-mix(in srgb, #ef4444 52%, transparent);
-    color: #f87171;
+    border-color: color-mix(in srgb, var(--danger) 52%, transparent);
+    color: var(--danger-ink);
   }
 
   .select-danger:hover:not(:disabled) {
-    background: color-mix(in srgb, #ef4444 12%, transparent);
-    border-color: #ef4444;
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    border-color: var(--danger);
   }
 
   .playlist-input {
-    background: color-mix(in srgb, var(--surface-2) 92%, black);
+    background: color-mix(in srgb, var(--surface-2) 92%, var(--media-bg));
     border-color: var(--line);
     color: var(--ink);
     font-weight: 600;
@@ -286,7 +286,7 @@
     border: 1px solid var(--line);
     border-radius: var(--r-xl);
     bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 4.5rem);
-    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--shadow);
     display: flex;
     gap: 0.45rem;
     left: 50%;
@@ -307,7 +307,7 @@
     border: 1px solid var(--line);
     border-radius: var(--r-xl);
     bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 4.5rem);
-    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    box-shadow: var(--shadow);
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
@@ -331,15 +331,15 @@
 
   .export-active {
     animation: export-pulse 900ms ease-in-out infinite alternate;
-    background: linear-gradient(135deg, var(--accent), #14b8a6);
+    background: linear-gradient(135deg, var(--accent), var(--success));
     border-color: transparent;
-    color: white;
+    color: var(--on-accent);
   }
 
   .export-orbit {
     animation: export-spin 800ms linear infinite;
-    border: 2px solid color-mix(in srgb, white 35%, transparent);
-    border-top-color: white;
+    border: 2px solid var(--spinner-track);
+    border-top-color: var(--on-accent);
     border-radius: 999px;
     height: 0.9rem;
     width: 0.9rem;

@@ -62,7 +62,7 @@
   </div>
 
   <nav class="topbar-views flex max-w-full gap-1 overflow-x-auto rounded-full border border-line bg-[var(--surface-2)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-    {#each views as v}
+    {#each views as v (v.id)}
       <button type="button"
         class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-semibold transition {$filters.view === v.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted hover:text-ink'}"
         aria-current={$filters.view === v.id ? 'page' : undefined}
@@ -73,7 +73,7 @@
   <div class="topbar-tools flex flex-wrap items-center gap-1.5">
     <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
       title="Time period" value={$filters.period} onchange={(e) => setPeriod(e.target.value)}>
-      {#each periods as p}<option value={p.id}>{p.label}</option>{/each}
+      {#each periods as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
     </select>
     <select class="rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm"
       value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
@@ -90,7 +90,7 @@
     </button>
     <span class="mx-0.5 hidden h-6 w-px self-center bg-line sm:block" aria-hidden="true"></span>
     <button type="button"
-      class="rounded-lg border px-3 py-1.5 text-sm font-semibold {$selectMode ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line'}"
+      class="topbar-action rounded-lg border px-3 py-1.5 text-sm font-semibold transition {$selectMode ? 'topbar-action-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line'}"
       onclick={() => setSelectMode(!$selectMode)}>{$selectMode ? 'Done' : 'Select'}</button>
   </div>
 
@@ -129,6 +129,24 @@
     .topbar-tools::-webkit-scrollbar { display: none; }
     .topbar-tools :global(select) { max-width: 7.5rem; }
     .topbar-search { grid-area: search; width: 100%; min-width: 0; }
+  }
+
+  .topbar-action {
+    background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+    box-shadow: inset 0 1px 0 var(--surface-highlight);
+  }
+
+  .topbar-action:hover,
+  .topbar-action:focus-visible {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+
+  .topbar-action-active:hover,
+  .topbar-action-active:focus-visible {
+    background: color-mix(in srgb, var(--accent) 88%, var(--ink) 12%);
+    color: var(--on-accent);
   }
 
   @media (min-width: 768px) and (max-width: 1279px) {

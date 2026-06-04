@@ -22,14 +22,14 @@
   {#each items as it (it.id)}
     {@const fav = $favorites.has(it.id)}
     <article class="panel grid grid-cols-1 overflow-hidden rounded-card sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <button type="button" class="group relative block w-full overflow-hidden bg-black"
+      <button type="button" class="group relative block w-full overflow-hidden bg-[var(--media-bg)]"
         style="aspect-ratio:{ratio(it)}; max-height:72vh" onclick={() => onopen(it, items)}>
         {#if it.thumb}
           <img src={it.thumb} alt="" loading="lazy" decoding="async"
                class="h-full w-full object-contain transition-transform duration-500 group-hover:scale-[1.02]" />
         {/if}
         {#if it.media_type === 'video'}
-          <span class="absolute left-3 top-3 grid h-11 w-11 place-items-center rounded-full bg-black/55 text-white backdrop-blur-sm">▶</span>
+          <span class="absolute left-3 top-3 grid h-11 w-11 place-items-center rounded-full bg-[var(--media-play-bg)] text-[var(--media-control-ink)] backdrop-blur-sm">▶</span>
         {/if}
       </button>
 
@@ -38,18 +38,18 @@
         <p class="text-sm text-muted">{[it.model, fmtDate(it.created_at), it.media_type].filter(Boolean).join(' · ')}</p>
         {#if it.tags?.length}
           <div class="flex flex-wrap gap-1.5">
-            {#each it.tags.slice(0, 6) as tag}
+            {#each it.tags.slice(0, 6) as tag (tag)}
               <span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">{tag}</span>
             {/each}
           </div>
         {/if}
         <div class="mt-auto flex gap-2 pt-2">
           <button type="button"
-            class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {fav ? 'text-[#ff5a7a]' : ''}"
+            class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {fav ? 'text-[var(--favorite)]' : ''}"
             onclick={() => toggleFavorite(it.id)}>{fav ? '♥ Favorited' : '♡ Favorite'}</button>
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold"
             onclick={(e) => copy(e, it.prompt)}>Copy prompt</button>
-          <button type="button" class="rounded-lg border border-red-500/50 px-3 py-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/10"
+          <button type="button" class="rounded-lg border border-[var(--danger-border-strong)] px-3 py-2 text-sm font-semibold text-[var(--danger-ink)] transition hover:bg-[var(--danger-bg)]"
             onclick={() => (confirming = it)}>Delete</button>
         </div>
       </div>

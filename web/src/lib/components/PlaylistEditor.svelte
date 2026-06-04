@@ -89,11 +89,11 @@
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && !confirming) close(); }} />
 
 <!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
-<div class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
+<div class="fixed inset-0 z-50 grid place-items-center bg-[var(--overlay-strong)] p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
   <div class="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Edit playlist" tabindex="-1">
     <div class="flex items-center gap-3 border-b border-line p-4">
       <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-bold outline-none transition focus:border-[var(--accent)]" bind:value={name} maxlength="80" aria-label="Playlist name" />
-      <button class="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white transition hover:brightness-110 active:brightness-95" onclick={close}>Done</button>
+      <button class="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)] transition hover:brightness-110 active:brightness-95" onclick={close}>Done</button>
     </div>
     <div class="flex items-center justify-between gap-3 px-4 pt-3 text-xs text-muted">
       <span>Drag the handle (or ▲/▼) to reorder · plays top to bottom</span>
@@ -110,9 +110,9 @@
              ondragover={(e) => e.preventDefault()}
              ondrop={() => onDrop(id)}>
           <span class="cursor-grab select-none px-0.5 text-base text-muted transition hover:text-ink" title="Drag to reorder" aria-hidden="true">☰</span>
-          <div class="relative h-16 w-28 shrink-0 overflow-hidden rounded-md bg-black/40">
+          <div class="relative h-16 w-28 shrink-0 overflow-hidden rounded-md bg-[var(--media-placeholder)]">
             {#if it?.thumb}<img src={it.thumb} alt="" class="h-full w-full object-cover" style="object-position: {it.media_h > it.media_w ? '50% 22%' : '50% 50%'}" />{/if}
-            <span class="absolute left-1 top-1 grid h-4 min-w-4 place-items-center rounded-sm bg-black/70 px-1 text-[0.625rem] font-bold leading-none text-white tabular-nums">{idx + 1}</span>
+            <span class="absolute left-1 top-1 grid h-4 min-w-4 place-items-center rounded-sm bg-[var(--overlay-strong)] px-1 text-[0.625rem] font-bold leading-none text-[var(--media-control-ink)] tabular-nums">{idx + 1}</span>
           </div>
           <button type="button"
             class="-mx-1 min-w-0 flex-1 cursor-pointer rounded-md px-1 py-0.5 text-left text-sm leading-snug transition-colors hover:bg-[color-mix(in_srgb,var(--ink)_7%,transparent)]"
@@ -125,7 +125,7 @@
               <span class="w-px self-stretch bg-line" aria-hidden="true"></span>
               <button class="grid h-7 w-7 place-items-center text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === ids.length - 1} onclick={() => move(id, 1)} aria-label="Move down">▼</button>
             </div>
-            <button class="grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition hover:border-[#ef4444] hover:bg-[color-mix(in_srgb,#ef4444_14%,transparent)] hover:text-[#f87171]" onclick={() => remove(id)} aria-label="Remove from playlist">×</button>
+            <button class="grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition hover:border-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_14%,transparent)] hover:text-[var(--danger-ink)]" onclick={() => remove(id)} aria-label="Remove from playlist">×</button>
           </div>
         </div>
       {/each}
@@ -137,9 +137,9 @@
     </div>
 
     <div class="flex items-center gap-2 border-t border-line p-4">
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-white transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" disabled={!videos.length} onclick={play}>Play</button>
+      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" disabled={!videos.length} onclick={play}>Play</button>
       <button class="rounded-lg border border-line px-4 py-2 font-semibold transition enabled:hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--line))] enabled:hover:bg-[var(--surface-2)] disabled:opacity-50" disabled={!videos.length || busy} onclick={doExport}>{busy ? 'Exporting…' : 'Export'}</button>
-      <button class="ml-auto rounded-lg border border-[color-mix(in_srgb,#ef4444_50%,transparent)] px-4 py-2 font-semibold text-[#f87171] transition hover:border-[#ef4444] hover:bg-[color-mix(in_srgb,#ef4444_12%,transparent)]" onclick={() => (confirming = true)}>Delete playlist</button>
+      <button class="ml-auto rounded-lg border border-[var(--danger-border-strong)] px-4 py-2 font-semibold text-[var(--danger-ink)] transition hover:border-[var(--danger)] hover:bg-[var(--danger-bg)]" onclick={() => (confirming = true)}>Delete playlist</button>
     </div>
   </div>
 </div>

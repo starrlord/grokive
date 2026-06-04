@@ -14,6 +14,9 @@
   $effect(() => {
     document.documentElement.dataset.theme = $theme;
     document.documentElement.dataset.mode = $mode;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+    if (meta && bg) meta.setAttribute('content', bg);
   });
 
   onMount(async () => {

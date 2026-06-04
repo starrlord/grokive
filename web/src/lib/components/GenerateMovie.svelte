@@ -146,7 +146,7 @@
 
 <svelte:window onkeydown={onkey} />
 
-<div use:portal class="fixed inset-0 z-[70] grid place-items-center bg-black/70 p-4 backdrop-blur-sm" role="presentation"
+<div use:portal class="fixed inset-0 z-[70] grid place-items-center bg-[var(--overlay-strong)] p-4 backdrop-blur-sm" role="presentation"
      transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget && !running) onclose(); }}>
   <div class="panel flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
        transition:fly={{ y: 18, duration: 180 }}>
@@ -163,13 +163,15 @@
       {#if done}
         <!-- Result -->
         <div class="space-y-4">
-          <video class="mx-auto block max-h-[55vh] max-w-full rounded-xl bg-black" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
+          <!-- Music-only generated preview has no speech track. -->
+          <!-- svelte-ignore a11y_media_has_caption -->
+          <video class="mx-auto block max-h-[55vh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
           <p class="text-sm text-muted">
             {job.result.cuts} cuts · {job.result.width}×{job.result.height} · {job.result.fps} fps · {job.result.duration}s
             · {(job.result.size_bytes / 1048576).toFixed(1)} MB
           </p>
           <div class="flex flex-wrap gap-2">
-            <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-white" href={movieResultUrl(true, job.job_id)} download={job.result.filename}>⇩ Download MP4</a>
+            <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-[var(--on-accent)]" href={movieResultUrl(true, job.job_id)} download={job.result.filename}>⇩ Download MP4</a>
             <button type="button" class="rounded-lg border border-line px-4 py-2.5 font-semibold disabled:opacity-60"
               disabled={committing || committed} onclick={addToCollection}>
               {#if committed}✓ In “Beat Montage”{:else if committing}Adding…{:else}+ Add to Collection{/if}
@@ -194,9 +196,9 @@
         <!-- Setup -->
         <div class="space-y-5">
           {#if startError}
-            <p class="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{startError}</p>
+            <p class="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink-soft)]">{startError}</p>
           {:else if errored}
-            <p class="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">{job.error || 'Generation failed.'}</p>
+            <p class="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink-soft)]">{job.error || 'Generation failed.'}</p>
           {/if}
 
           <!-- Song -->
@@ -239,8 +241,8 @@
             <div>
               <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Aspect / resolution</div>
               <div class="grid grid-cols-2 gap-1.5">
-                {#each RES as r}
-                  <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {resId === r.id ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line hover:border-[var(--accent)]'}"
+                {#each RES as r (r.id)}
+                  <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {resId === r.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                     onclick={() => (resId = r.id)}>{r.label}</button>
                 {/each}
               </div>
@@ -249,8 +251,8 @@
               <div>
                 <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Frame rate</div>
                 <div class="grid grid-cols-3 gap-1.5">
-                  {#each [24, 30, 60] as f}
-                    <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {fps === f ? 'border-transparent bg-[var(--accent)] text-white' : 'border-line hover:border-[var(--accent)]'}"
+                  {#each [24, 30, 60] as f (f)}
+                    <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {fps === f ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                       onclick={() => (fps = f)}>{f}</button>
                   {/each}
                 </div>
@@ -277,7 +279,7 @@
         <p class="text-xs text-muted">
           {#if videoIds.length < 2}Select at least 2 videos.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
         </p>
-        <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-white disabled:opacity-45"
+        <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>
           {starting ? 'Starting…' : 'Generate Clip'}
         </button>
