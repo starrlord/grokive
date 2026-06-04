@@ -5,7 +5,7 @@
   import { portal } from '$lib/portal.js';
   import ParticleField from './ParticleField.svelte';
   import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
-  import { loadCollections, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie } from '$lib/state.js';
+  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   // videoIds: ordered ids of the currently-selected videos (selection order).
@@ -152,8 +152,11 @@
     if (committing || committed) return;
     committing = true;
     try {
-      await commitMovie();
+      const res = await commitMovie();
       committed = true;
+      // Auto-archive the finished montage so it doesn't clutter Recent — it stays
+      // in the "Beat Montage" collection (and Archive / All Media).
+      if (res?.id) setStashed([String(res.id)], true);
       acknowledgeMovie(job?.job_id); // dealt with — clear the floating chip
       await loadCollections(); // surface the new "Beat Montage" collection
       toast('Added to “Beat Montage” collection', { type: 'success' });

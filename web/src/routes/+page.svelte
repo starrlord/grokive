@@ -80,6 +80,10 @@
   const byId = $derived(new Map([...items, ...collectionItems].map((it) => [it.id, it])));
   const selectionSet = $derived(new Set($selection));
   const videoSelection = $derived($selection.filter((id) => byId.get(id)?.media_type === 'video'));
+  // Inputs for the Montage panel: videos only, and never other montages (a montage
+  // can't be a source clip). videoSelection itself keeps montages — they're still
+  // valid to play / export / add to a playlist.
+  const montageVideoIds = $derived(videoSelection.filter((id) => byId.get(id)?.model !== 'Beat Montage'));
 
   async function load(reset) {
     if (loading) return;
@@ -233,8 +237,8 @@
   async function montageCollection(c) {
     // Feed every video in the collection to the Montage panel — same as selecting
     // them all, but without entering select mode.
-    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video');
-    if (list.length < 2) { alert('A montage needs at least 2 videos in the collection.'); return; }
+    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
+    if (list.length < 2) { alert('A montage needs at least 2 non-montage videos in the collection.'); return; }
     movieVideoIds = list.map((v) => v.id);
     showMovie = true;
   }
@@ -409,7 +413,7 @@
   <SelectBar videoIds={videoSelection} {selectableIds} collection={activeCollection}
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
-    onmovie={() => { movieVideoIds = videoSelection; showMovie = true; }}
+    onmovie={() => { movieVideoIds = montageVideoIds; showMovie = true; }}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
 
@@ -435,7 +439,7 @@
 
 <!-- Always-on background-task indicator for the montage render: persists across
      views/select-mode until the result is committed or dismissed; click reopens. -->
-<MontageStatusChip onopen={() => { movieVideoIds = videoSelection; showMovie = true; }} />
+<MontageStatusChip onopen={() => { movieVideoIds = montageVideoIds; showMovie = true; }} />
 
 {#if showFilters}
   <FiltersModal {facets} onclose={() => (showFilters = false)} />

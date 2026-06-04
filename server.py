@@ -806,16 +806,20 @@ def _metadata_index() -> dict:
     return index
 
 
-def _video_paths_for_ids(ids: list) -> list[Path]:
+def _video_paths_for_ids(ids: list, *, exclude_montages: bool = False) -> list[Path]:
     """Ordered, existing video files for a list of item ids (order preserved).
     Ignores images, missing files, and anything that would escape the gallery
-    root (path traversal)."""
+    root (path traversal). With ``exclude_montages`` it also skips beat-montage
+    outputs (``model == "Beat Montage"``) so a montage can't be fed back into a new
+    montage — used by the montage generator, not by playlist/MP4 export."""
     index = _metadata_index()
     gallery_root = GALLERY_DIR.resolve()
     paths: list[Path] = []
     for raw_id in ids or []:
         item = index.get(str(raw_id))
         if not item or item.get("media_type") != "video":
+            continue
+        if exclude_montages and item.get("model") == "Beat Montage":
             continue
         rel = str(item.get("local_path", "")).replace("\\", "/")
         if not rel:
@@ -1203,9 +1207,11 @@ def api_movie_generate() -> Response:
         ids = []
     if not isinstance(ids, list):
         ids = []
-    paths = _video_paths_for_ids(ids)
+    # A montage is built from source clips, never from other montages — exclude
+    # them so a beat-montage can't be fed back into a new one.
+    paths = _video_paths_for_ids(ids, exclude_montages=True)
     if len(paths) < 2:
-        return jsonify(ok=False, error="Select at least 2 videos that exist on the server."), 400
+        return jsonify(ok=False, error="Select at least 2 non-montage videos that exist on the server."), 400
 
     song = request.files.get("song")
     if not song or not song.filename:
