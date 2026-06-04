@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS media (
   thumb_h           INTEGER,
   media_w           INTEGER,
   media_h           INTEGER,
-  has_subtitles     INTEGER DEFAULT 0
+  has_subtitles     INTEGER DEFAULT 0,
+  size_bytes        INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at);
 CREATE INDEX IF NOT EXISTS idx_media_type    ON media(media_type);
@@ -72,7 +73,7 @@ MEDIA_COLUMNS = [
     "id", "media_type", "prompt", "normalized_prompt", "model", "created_at",
     "parent_id", "source_url", "local_path", "href", "thumb", "subtitles",
     "canvas_id", "canvas_name", "thumb_w", "thumb_h", "media_w", "media_h",
-    "has_subtitles",
+    "has_subtitles", "size_bytes",
 ]
 
 
@@ -164,7 +165,7 @@ def build_index(
     try:
         conn.executescript(SCHEMA)
         # Migrate pre-existing DBs: CREATE TABLE IF NOT EXISTS won't add new columns.
-        for col in ("media_w", "media_h"):
+        for col in ("media_w", "media_h", "size_bytes"):
             try:
                 conn.execute(f"ALTER TABLE media ADD COLUMN {col} INTEGER")
             except sqlite3.OperationalError:
@@ -198,8 +199,14 @@ def build_index(
             if not (mw and mh):
                 mw, mh = dim_cache.get(mid) or _media_dims(item.get("media_type"), gallery_dir / rel)
             thumb_href = f"thumbnails/{mid}.jpg" if thumb_path.exists() else None
-            vtt = (gallery_dir / rel).with_suffix(".vtt")
+            media_file = gallery_dir / rel
+            vtt = media_file.with_suffix(".vtt")
             subtitles = href.rsplit(".", 1)[0] + ".vtt" if vtt.exists() else None
+            # File size is a cheap stat (no ffprobe), so capture it every build.
+            try:
+                size_bytes = media_file.stat().st_size
+            except OSError:
+                size_bytes = None
             tags = tags_by_id.get(mid, [])
             key, _ = group_key_and_label(item)
             media_rows.append((
@@ -207,7 +214,7 @@ def build_index(
                 item.get("model"), item.get("created_at"), item.get("parent_id"),
                 item.get("source_url"), rel, href, thumb_href, subtitles,
                 item.get("canvas_id"), item.get("canvas_name"), tw, th, mw, mh,
-                1 if subtitles else 0,
+                1 if subtitles else 0, size_bytes,
             ))
             for tag in tags:
                 tag_rows.append((mid, tag))

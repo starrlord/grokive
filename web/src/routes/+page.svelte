@@ -119,6 +119,17 @@
       if (!activeCollection || $filters.view !== 'collections') refreshFacets();
     }
   });
+
+  // Selection is scoped to the current browsing context: switching view, opening a
+  // canvas, or drilling into a collection clears it so the action bar never carries
+  // items from a place you've navigated away from. Within-view refinement (search,
+  // tags, models) keeps the selection. Select mode itself stays on.
+  let ctxSig = '';
+  $effect(() => {
+    const next = `${$filters.view}|${$filters.canvas ?? ''}|${activeCollectionId ?? ''}`;
+    if (ctxSig !== '' && next !== ctxSig) clearSelection();
+    ctxSig = next;
+  });
   async function refreshFacets() {
     try { facets = await fetchFacets($filters, activeCollectionId); } catch {}
   }

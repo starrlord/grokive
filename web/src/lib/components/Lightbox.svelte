@@ -13,6 +13,16 @@
     setTimeout(() => (b.textContent = prev), 1200);
   }
 
+  // Human file size: "812 KB", "3.8 MB", "2 GB" (drops a trailing .0).
+  function fmtSize(b) {
+    if (b == null || b === '') return '';
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 ** 2) return `${Math.round(b / 1024)} KB`;
+    if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
+    const gb = b / 1024 ** 3;
+    return `${gb.toFixed(gb < 10 ? 1 : 0).replace(/\.0$/, '')} GB`;
+  }
+
   let { list = [], index = 0, autoAdvance = false, title = '', onclose = () => {} } = $props();
   let i = $state(index);
   $effect(() => { i = index; });
@@ -212,7 +222,14 @@
           <button class="shrink-0 rounded-sm border border-line px-2 py-0.5 text-xs" onclick={() => (showInfo = false)}>Hide</button>
         </div>
         <p class="mb-3 text-sm text-muted">
-          {[item.media_type, item.model, (item.created_at || '').slice(0, 10), (item.href || '').split('/').pop()].filter(Boolean).join('  ·  ')}
+          {[
+            item.media_type,
+            item.media_w && item.media_h ? `${item.media_w}×${item.media_h}` : null,
+            fmtSize(item.size_bytes),
+            item.model,
+            (item.created_at || '').slice(0, 10),
+            (item.href || '').split('/').pop()
+          ].filter(Boolean).join('  ·  ')}
         </p>
         <div class="flex flex-wrap gap-2">
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {$favorites.has(item.id) ? 'text-[#ff5a7a]' : ''}"
