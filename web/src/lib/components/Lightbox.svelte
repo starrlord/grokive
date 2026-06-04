@@ -66,14 +66,15 @@
     }
   }
 
-  // Largest box that fits within 94vw x 92dvh while preserving the media's aspect
+  // Largest box that fits within 94vw x the lightbox media height while preserving the media's aspect
   // (upscaling allowed, so portrait 9:16 clips fill the height instead of showing
   // at their native pixel size). Falls back to max-only when dimensions are unknown.
   function fitStyle(it) {
+    const maxH = 'var(--lightbox-media-max-h)';
     if (it && it.thumb_w && it.thumb_h) {
-      return `width:min(94vw, calc(92dvh * ${it.thumb_w} / ${it.thumb_h})); height:auto; max-height:92dvh; max-width:94vw;`;
+      return `width:min(94vw, calc(${maxH} * ${it.thumb_w} / ${it.thumb_h})); height:auto; max-height:${maxH}; max-width:94vw;`;
     }
-    return 'max-width:94vw; max-height:92dvh;';
+    return `max-width:94vw; max-height:${maxH};`;
   }
 
   function step(d) {
@@ -151,17 +152,17 @@
 <svelte:window on:keydown={onkey} />
 
 {#if item}
-  <div class="fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true">
+  <div class="lightbox fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true">
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
-    <div bind:this={stageEl} class="absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
+    <div bind:this={stageEl} class="lightbox-stage absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
          onpointerdown={enableSound}
          onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
       {#if item.media_type === 'video'}
         <!-- caption track is (re)built imperatively in the $effect so playlist clips keep subtitles -->
         <video bind:this={videoEl} controls={showControls} autoplay playsinline muted={!wantSound} onended={onended}
-               style={fitStyle(item)} class="rounded-lg bg-[var(--media-bg)]"></video>
+               style={fitStyle(item)} class="lightbox-media rounded-lg bg-[var(--media-bg)]"></video>
       {:else}
-        <img src={item.href} alt="" style={fitStyle(item)} class="rounded-lg" />
+        <img src={item.href} alt="" style={fitStyle(item)} class="lightbox-media rounded-lg" />
       {/if}
     </div>
 
@@ -194,7 +195,7 @@
     {/if}
 
     <!-- Counter (small, unobtrusive; safe-area inset so it clears the home indicator) -->
-    <div class="glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
+    <div class="lightbox-counter glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
       {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
 
@@ -233,3 +234,28 @@
     {/if}
   </div>
 {/if}
+
+<style>
+  .lightbox {
+    --lightbox-media-max-h: 92dvh;
+  }
+
+  .lightbox-media {
+    object-fit: contain;
+  }
+
+  @media (orientation: landscape) and (max-height: 520px) {
+    .lightbox {
+      --lightbox-counter-space: calc(3.6rem + env(safe-area-inset-bottom));
+      --lightbox-media-max-h: calc(100dvh - var(--lightbox-counter-space));
+    }
+
+    .lightbox-stage {
+      padding-bottom: var(--lightbox-counter-space);
+    }
+
+    .lightbox-counter {
+      bottom: max(0.35rem, env(safe-area-inset-bottom)) !important;
+    }
+  }
+</style>

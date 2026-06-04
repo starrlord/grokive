@@ -58,67 +58,88 @@
 <svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
 
 <!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the buttons inside. -->
-<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-[var(--overlay)] p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel w-full max-w-2xl overflow-hidden rounded-card p-5" role="dialog" aria-modal="true" aria-label="Config" tabindex="-1">
-    <h2 class="mb-3 text-lg font-bold">Config</h2>
+<div use:portal class="fixed inset-0 z-[60] grid items-start justify-items-center overflow-y-auto bg-[var(--overlay)] p-3 backdrop-blur-sm sm:place-items-center sm:p-4" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
+  <div class="config-panel panel flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-card sm:max-h-[calc(100dvh-2rem)]" role="dialog" aria-modal="true" aria-label="Config" tabindex="-1">
+    <header class="shrink-0 px-4 pt-4 sm:px-5 sm:pt-5">
+      <h2 class="text-lg font-bold">Config</h2>
+    </header>
 
-    <h3 class="mb-2 font-bold">Appearance</h3>
-    <div class="theme-picker mb-3 grid gap-2 sm:grid-cols-2">
-      {#each THEMES as t (t.id)}
-        <button type="button"
-          class="theme-choice rounded-lg border p-2 text-left transition {$theme === t.id ? 'theme-choice-active border-transparent' : 'border-line hover:border-[var(--accent)]'}"
-          aria-pressed={$theme === t.id}
-          onclick={() => setTheme(t.id)}>
-          <span class="theme-swatch mb-2 grid h-9 overflow-hidden rounded-md border border-line" style={`--sw-bg:${t.preview[0]}; --sw-panel:${t.preview[1]}; --sw-a:${t.preview[2]}; --sw-b:${t.preview[3]};`}>
-            <span class="theme-swatch-bg">
-              <span class="theme-swatch-panel"></span>
-              <span class="theme-swatch-accent"></span>
-              <span class="theme-swatch-secondary"></span>
+    <div class="config-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5">
+      <h3 class="mb-2 font-bold">Appearance</h3>
+      <div class="theme-picker mb-3 grid grid-cols-2 gap-1.5 sm:gap-2">
+        {#each THEMES as t (t.id)}
+          <button type="button"
+            class="theme-choice rounded-lg border p-1.5 text-left transition sm:p-2 {$theme === t.id ? 'theme-choice-active border-transparent' : 'border-line hover:border-[var(--accent)]'}"
+            aria-pressed={$theme === t.id}
+            onclick={() => setTheme(t.id)}>
+            <span class="theme-swatch mb-1.5 grid h-7 overflow-hidden rounded-md border border-line sm:mb-2 sm:h-9" style={`--sw-bg:${t.preview[0]}; --sw-panel:${t.preview[1]}; --sw-a:${t.preview[2]}; --sw-b:${t.preview[3]};`}>
+              <span class="theme-swatch-bg">
+                <span class="theme-swatch-panel"></span>
+                <span class="theme-swatch-accent"></span>
+                <span class="theme-swatch-secondary"></span>
+              </span>
             </span>
-          </span>
-          <span class="block truncate text-sm font-bold">{t.label}</span>
-        </button>
-      {/each}
-    </div>
-    <div class="mb-4 flex gap-2">
-      {#each layouts as l (l.id)}
-        <button class="rounded-lg border px-3 py-1.5 text-sm font-semibold {$mode === l.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line'}" onclick={() => mode.set(l.id)}>{l.label}</button>
-      {/each}
-    </div>
-    <hr class="my-4 border-line" />
-
-    <h3 class="mb-2 font-bold">Grok account</h3>
-    <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-[var(--code-bg)] px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-[var(--code-bg)] px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
-    <textarea class="h-40 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
-      placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
-    <p class="mt-1 text-xs text-muted">{curlNote}</p>
-
-    <hr class="my-4 border-line" />
-    <h3 class="mb-1 font-bold">Subtitles (Whisper)</h3>
-    <p class="mb-2 text-sm text-muted">Optional whisper-asr-webservice endpoint, e.g. <code class="rounded-sm bg-[var(--code-bg)] px-1">http://192.168.1.10:9000/asr</code></p>
-    <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
-      placeholder={envLocked ? 'Set by WHISPER_SERVER_URL env var' : 'http://host:9000/asr'} bind:value={whisper} disabled={envLocked} />
-    <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
-      <input type="checkbox" bind:checked={burn} /> Burn subtitles into merged playlist exports
-    </label>
-
-    {#if authRequired}
-      <hr class="my-4 border-line" />
-      <div class="flex items-center justify-between">
-        <h3 class="font-bold">Account</h3>
-        <button class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold" onclick={doLogout}>Log out</button>
+            <span class="block truncate text-xs font-bold sm:text-sm">{t.label}</span>
+          </button>
+        {/each}
       </div>
-    {/if}
+      <div class="mb-4 flex gap-2">
+        {#each layouts as l (l.id)}
+          <button class="rounded-lg border px-3 py-1.5 text-sm font-semibold {$mode === l.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line'}" onclick={() => mode.set(l.id)}>{l.label}</button>
+        {/each}
+      </div>
+      <hr class="my-4 border-line" />
 
-    <div class="mt-4 flex items-center justify-end gap-2">
-      <span class="mr-auto text-sm {msgClass}">{msg}</span>
+      <h3 class="mb-2 font-bold">Grok account</h3>
+      <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-[var(--code-bg)] px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-[var(--code-bg)] px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
+      <textarea class="h-28 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none sm:h-40"
+        placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
+      <p class="mt-1 text-xs text-muted">{curlNote}</p>
+
+      <hr class="my-4 border-line" />
+      <h3 class="mb-1 font-bold">Subtitles (Whisper)</h3>
+      <p class="mb-2 text-sm text-muted">Optional whisper-asr-webservice endpoint, e.g. <code class="rounded-sm bg-[var(--code-bg)] px-1">http://192.168.1.10:9000/asr</code></p>
+      <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+        placeholder={envLocked ? 'Set by WHISPER_SERVER_URL env var' : 'http://host:9000/asr'} bind:value={whisper} disabled={envLocked} />
+      <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={burn} /> Burn subtitles into merged playlist exports
+      </label>
+
+      {#if authRequired}
+        <hr class="my-4 border-line" />
+        <div class="flex items-center justify-between">
+          <h3 class="font-bold">Account</h3>
+          <button class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold" onclick={doLogout}>Log out</button>
+        </div>
+      {/if}
+    </div>
+
+    <footer class="config-actions flex shrink-0 items-center justify-end gap-2 px-4 py-3 sm:px-5 sm:py-4">
+      <span class="mr-auto min-w-0 flex-1 truncate text-sm {msgClass}">{msg}</span>
       <button class="rounded-lg border border-line px-4 py-2 font-semibold" onclick={onclose}>Cancel</button>
       <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)]" onclick={save}>Save</button>
-    </div>
+    </footer>
   </div>
 </div>
 
 <style>
+  .config-panel {
+    margin-bottom: max(0.75rem, env(safe-area-inset-bottom));
+    margin-left: max(0rem, env(safe-area-inset-left));
+    margin-right: max(0rem, env(safe-area-inset-right));
+    margin-top: max(0.75rem, env(safe-area-inset-top));
+  }
+
+  .config-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .config-actions {
+    background: color-mix(in srgb, var(--surface-solid) 88%, transparent);
+    border-top: 1px solid var(--line);
+  }
+
   .theme-choice {
     background: color-mix(in srgb, var(--surface-2) 45%, transparent);
   }
