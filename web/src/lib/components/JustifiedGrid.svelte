@@ -71,14 +71,21 @@
         {@const isMontage = it.model === 'Beat Montage'}
         <!-- The real click target is the Open/select button below. -->
         <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
-             class:ring-2={sel} class:select-none={selectMode}
-             class:selecting-card={selectMode}
-             style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)">
+             class:select-none={selectMode}
+             style="width:{cell.w}px; height:{cell.h}px">
           {#if it.thumb}
             <img src={it.thumb} alt="" loading="lazy" decoding="async" draggable="false"
                  class="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
           {:else}
             <div class="grid h-full w-full place-items-center text-xs text-muted">no thumbnail</div>
+          {/if}
+
+          <!-- Selection outline. Drawn as an INSET overlay (inside the card) rather
+               than an outset ring: the row's content-visibility:auto applies paint
+               containment, which clips an outset ring at the row edge — that produced
+               the half-highlighted look. An inset border stays within the card. -->
+          {#if sel}
+            <span class="pointer-events-none absolute inset-0 z-[3] rounded-card border-2 border-[var(--accent)]"></span>
           {/if}
 
           <!-- click/select hit area. In select mode, mouse paints via pointer events
