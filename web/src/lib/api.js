@@ -1,9 +1,20 @@
 // Thin client for the Flask JSON API (same origin).
+import { toast } from '$lib/toast.js';
 
 async function getJSON(url) {
   const res = await fetch(url, { headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
+}
+
+// Fire-and-forget persistence (favorites / playlists / collections). Callers don't
+// await these, so a silent failure would diverge the client from the server with no
+// sign. Surface a toast on failure instead of swallowing — the local store keeps the
+// optimistic change, but the user is told it didn't persist.
+function saveJSON(url, body) {
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then((r) => { if (!r.ok) throw new Error(String(r.status)); })
+    .catch(() => toast("Couldn't save your change — it may not stick. Check your connection.", { type: 'error' }));
 }
 
 export function fetchMedia(f, page = 1, pageSize = 120, collectionId = null) {
@@ -46,22 +57,19 @@ export async function mediaByIds(ids) {
 export async function fetchLibrary() {
   try { return await getJSON('/api/library'); } catch { return { favorites: [], stashed: [] }; }
 }
-export const saveLibrary = (library) =>
-  fetch('/api/library', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(library) }).catch(() => {});
+export const saveLibrary = (library) => saveJSON('/api/library', library);
 
 // --- Playlists -------------------------------------------------------------
 export async function fetchPlaylists() {
   try { return (await getJSON('/api/playlists')).playlists || []; } catch { return []; }
 }
-export const savePlaylists = (playlists) =>
-  fetch('/api/playlists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ playlists }) }).catch(() => {});
+export const savePlaylists = (playlists) => saveJSON('/api/playlists', { playlists });
 
 // --- Collections -----------------------------------------------------------
 export async function fetchCollections() {
   try { return (await getJSON('/api/collections')).collections || []; } catch { return []; }
 }
-export const saveCollections = (collections) =>
-  fetch('/api/collections', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ collections }) }).catch(() => {});
+export const saveCollections = (collections) => saveJSON('/api/collections', { collections });
 
 // --- Export (streamed MP4 download) ----------------------------------------
 async function downloadBlob(response, name) {

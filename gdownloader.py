@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import re
 import shlex
 import time
@@ -292,8 +293,18 @@ def load_deleted_ids(path: Path) -> set[str]:
     return {str(x) for x in data} if isinstance(data, list) else set()
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via a temp file + os.replace so a crash/OOM mid-write can never leave
+    a truncated, unparseable file behind. metadata.json is the library's single
+    source of truth and is rewritten after every downloaded item, so a partial
+    write here is the most likely real-world corruption path."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_metadata(path: Path, items: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(items, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(items, indent=2, ensure_ascii=False))
 
 
 def append_failure(path: Path, failure: dict[str, Any]) -> None:
@@ -301,7 +312,7 @@ def append_failure(path: Path, failure: dict[str, Any]) -> None:
     if path.exists():
         failures = json.loads(path.read_text(encoding="utf-8"))
     failures.append(failure)
-    path.write_text(json.dumps(failures, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(failures, indent=2, ensure_ascii=False))
 
 
 def request_json(client: httpx.Client, spec: RequestSpec) -> Any:

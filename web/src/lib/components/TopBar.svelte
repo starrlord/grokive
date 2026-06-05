@@ -82,10 +82,10 @@
       <option value="prompt">Prompt A–Z</option>
       <option value="model">Model A–Z</option>
     </select>
-    <button type="button" title="Layout mode" class="grid h-9 w-9 place-items-center rounded-lg border border-line text-sm" onclick={toggleMode}>
+    <button type="button" title="Layout mode" aria-label="Toggle layout mode" class="grid h-9 w-9 place-items-center rounded-lg border border-line text-sm" onclick={toggleMode}>
       {$mode === 'cinematic' ? '▦' : '▤'}
     </button>
-    <button type="button" title="Light / dark" class="grid h-9 w-9 place-items-center rounded-lg border border-line" onclick={toggleLight}>
+    <button type="button" title="Light / dark" aria-label="Toggle light / dark theme" class="grid h-9 w-9 place-items-center rounded-lg border border-line" onclick={toggleLight}>
       {$theme === 'light' ? '☀' : '☾'}
     </button>
     <span class="mx-0.5 hidden h-6 w-px self-center bg-line sm:block" aria-hidden="true"></span>

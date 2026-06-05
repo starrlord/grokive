@@ -19,6 +19,7 @@
   import { fly } from 'svelte/transition';
   import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
+  import { trapFocus } from '$lib/focusTrap.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   async function copy(e, text) {
@@ -186,10 +187,10 @@
   }
 </script>
 
-<svelte:window on:keydown={onkey} />
+<svelte:window onkeydown={onkey} />
 
 {#if item}
-  <div class="lightbox fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true">
+  <div class="lightbox fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true" tabindex="-1" use:trapFocus>
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
     <div bind:this={stageEl} class="lightbox-stage absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
          onpointerdown={enableSound}
@@ -214,9 +215,9 @@
     <!-- Top chrome (safe-area inset so it clears notches / Dynamic Island) -->
     <div class="absolute z-10 flex gap-2" style="top: max(0.75rem, env(safe-area-inset-top)); right: max(0.75rem, env(safe-area-inset-right));">
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
-        title="Favorite" onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
+        title="Favorite" aria-label={$favorites.has(item.id) ? 'Unfavorite' : 'Favorite'} aria-pressed={$favorites.has(item.id)} onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
-        title="Info (i)" onclick={() => (showInfo = !showInfo)}>ⓘ</button>
+        title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => (showInfo = !showInfo)}>ⓘ</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
         title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
         <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
@@ -224,15 +225,15 @@
       <button class="glass rounded-lg px-3 py-2 font-bold" onclick={close}>Close</button>
     </div>
     {#if elementFsSupported || item.media_type === 'video'}
-      <button class="glass absolute z-10 grid h-10 w-10 place-items-center rounded-lg" style="top: max(0.75rem, env(safe-area-inset-top)); left: max(0.75rem, env(safe-area-inset-left));" title="Fullscreen (f)" onclick={toggleFs}>⛶</button>
+      <button class="glass absolute z-10 grid h-10 w-10 place-items-center rounded-lg" style="top: max(0.75rem, env(safe-area-inset-top)); left: max(0.75rem, env(safe-area-inset-left));" title="Fullscreen (f)" aria-label="Fullscreen" onclick={toggleFs}>⛶</button>
     {/if}
 
     <!-- Side nav -->
     {#if i > 0}
-      <button class="glass absolute left-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" onclick={() => step(-1)}>‹</button>
+      <button class="glass absolute left-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" aria-label="Previous (←)" title="Previous (←)" onclick={() => step(-1)}>‹</button>
     {/if}
     {#if i < liveList.length - 1}
-      <button class="glass absolute right-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" onclick={() => step(1)}>›</button>
+      <button class="glass absolute right-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" aria-label="Next (→)" title="Next (→)" onclick={() => step(1)}>›</button>
     {/if}
 
     <!-- Counter (small, unobtrusive; safe-area inset so it clears the home indicator) -->

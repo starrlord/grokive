@@ -1,6 +1,7 @@
 <script>
   import { filters, toggleTag, toggleModel, toggleResolution, setMediaType, clearFilters } from '$lib/state.js';
-  import { portal } from '$lib/portal.js';
+  import Modal from './Modal.svelte';
+  import Button from './Button.svelte';
 
   let { facets = { tags: [], models: [] }, onclose = () => {} } = $props();
   let q = $state('');
@@ -17,15 +18,10 @@
   ];
 </script>
 
-<svelte:window onkeydown={(e) => e.key === 'Escape' && onclose()} />
-
-<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
-<div use:portal class="fixed inset-0 z-[60] grid place-items-center bg-[var(--overlay)] p-4 backdrop-blur-sm" role="presentation"
-     onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Filters" tabindex="-1">
+<Modal {onclose} ariaLabel="Filters" z="z-[60]" panelClass="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card">
     <div class="flex items-center gap-3 border-b border-line p-4">
       <input class="flex-1 rounded-full border border-line bg-[var(--surface-2)] px-4 py-2 text-sm outline-none" placeholder="Filter tags…" bind:value={q} />
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)]" onclick={onclose}>Done</button>
+      <Button onclick={onclose}>Done</Button>
     </div>
 
     <div class="overflow-auto p-4">
@@ -77,7 +73,6 @@
     </div>
 
     <div class="flex gap-2 border-t border-line p-4">
-      <button class="rounded-lg border border-line px-4 py-2 font-semibold" onclick={() => clearFilters()}>Clear all</button>
+      <Button variant="secondary" onclick={() => clearFilters()}>Clear all</Button>
     </div>
-  </div>
-</div>
+</Modal>

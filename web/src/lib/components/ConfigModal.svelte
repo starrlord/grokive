@@ -3,6 +3,7 @@
   import { getConfig, postConfig, getSettings, postSettings, authStatus, logout } from '$lib/api.js';
   import { loadSettings, theme, setTheme, THEMES, mode } from '$lib/state.js';
   import { portal } from '$lib/portal.js';
+  import { trapFocus } from '$lib/focusTrap.js';
 
   const layouts = [
     { id: 'cinematic', label: 'Grid' },
@@ -48,9 +49,14 @@
     }
     const body = { burn_subtitles: burn };
     if (!envLocked) body.whisper_server_url = whisper.trim();
-    try { await postSettings(body); } catch {}
+    let settingsErr = '';
+    try {
+      const r = await postSettings(body);
+      if (r && r.ok === false) settingsErr = 'Could not save settings.';
+    } catch { settingsErr = 'Could not save settings.'; }
     await loadSettings();
-    if (curlErr) { msg = curlErr; msgClass = 'text-[var(--danger-ink)]'; }
+    const err = curlErr || settingsErr;
+    if (err) { msg = err; msgClass = 'text-[var(--danger-ink)]'; }
     else { msg = 'Saved.'; msgClass = 'text-[var(--success-ink)]'; setTimeout(onclose, 800); }
   }
 </script>
@@ -59,7 +65,7 @@
 
 <!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the buttons inside. -->
 <div use:portal class="fixed inset-0 z-[60] grid items-start justify-items-center overflow-y-auto bg-[var(--overlay)] p-3 backdrop-blur-sm sm:place-items-center sm:p-4" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="config-panel panel flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-card sm:max-h-[calc(100dvh-2rem)]" role="dialog" aria-modal="true" aria-label="Config" tabindex="-1">
+  <div class="config-panel panel flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-card sm:max-h-[calc(100dvh-2rem)]" role="dialog" aria-modal="true" aria-label="Config" tabindex="-1" use:trapFocus>
     <header class="shrink-0 px-4 pt-4 sm:px-5 sm:pt-5">
       <h2 class="text-lg font-bold">Config</h2>
     </header>

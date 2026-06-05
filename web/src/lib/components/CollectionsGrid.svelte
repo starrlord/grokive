@@ -42,16 +42,16 @@
           </span>
         </button>
         <div class="flex items-center gap-2 p-2">
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-[var(--on-accent)] disabled:opacity-45"
+          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm bg-[var(--accent)] text-[var(--on-accent)] disabled:opacity-45"
             title="Play videos" aria-label="Play collection videos" disabled={!c.video_count} onclick={() => onplay(c)}>▶</button>
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm border border-line text-muted transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45"
+          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm border border-line text-muted transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45"
             title="Beat montage from these videos" aria-label="Create a beat montage from this collection's videos"
             disabled={(c.video_count ?? 0) < 2} onclick={() => onmovie(c)}>
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
           </button>
           <button type="button" class="min-w-0 flex-1 truncate text-left text-sm font-semibold hover:underline" onclick={() => onopen(c)}>{c.name}</button>
           <span class="text-xs text-muted">{c.item_count ?? c.ids?.length ?? 0}</span>
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm border border-line text-muted transition hover:border-[var(--danger-border-strong)] hover:bg-[var(--danger-bg)] hover:text-[var(--danger-ink)]"
+          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm border border-line text-muted transition hover:border-[var(--danger-border-strong)] hover:bg-[var(--danger-bg)] hover:text-[var(--danger-ink)]"
             title="Delete collection" aria-label="Delete collection" onclick={() => (confirming = c)}>
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
           </button>

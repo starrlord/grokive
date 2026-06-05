@@ -3,6 +3,7 @@
   import { get } from 'svelte/store';
   import { fly, fade } from 'svelte/transition';
   import { portal } from '$lib/portal.js';
+  import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
   import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
   import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie } from '$lib/state.js';
@@ -201,11 +202,11 @@
     <ParticleField active={running} animate={running} layers={3} intensity={0.85} auroraAlpha={0.3} aurora
       burst={burstCount} class="pointer-events-none absolute inset-0 z-0 h-full w-full" />
   {/if}
-  <div class="panel relative z-10 flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
-       transition:fly={{ y: 18, duration: 180 }}>
+  <div class="panel relative z-10 flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Create Montage" tabindex="-1"
+       use:trapFocus transition:fly={{ y: 18, duration: 180 }}>
     <header class="flex items-center justify-between border-b border-line px-5 py-4">
       <div>
-        <h2 class="text-lg font-extrabold tracking-tight">Generate Movie</h2>
+        <h2 class="text-lg font-extrabold tracking-tight">Create Montage</h2>
         <p class="text-sm text-muted">Beat-synced montage from {sourceCount} selected video{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.</p>
       </div>
       <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line"
@@ -301,7 +302,7 @@
             <div class="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
               <span class="inline-flex items-center gap-1">
                 Cut tightness
-                <span class="grid h-3.5 w-3.5 cursor-help place-items-center rounded-full border border-current text-[9px] font-bold opacity-70" title={TIGHTNESS_TIP}>?</span>
+                <span class="grid h-4 w-4 cursor-help place-items-center rounded-full border border-current text-[10px] font-bold opacity-70" title={TIGHTNESS_TIP}>?</span>
               </span>
               <span class="normal-case text-[var(--accent)]" title={tightnessHelp}>{tightnessLabel}</span>
             </div>
@@ -381,7 +382,7 @@
         </p>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>
-          {starting ? 'Starting…' : 'Generate Clip'}
+          {starting ? 'Starting…' : 'Generate Montage'}
         </button>
       </footer>
     {/if}

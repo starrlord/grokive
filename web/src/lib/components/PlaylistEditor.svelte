@@ -2,6 +2,9 @@
   import { onMount } from 'svelte';
   import { updatePlaylist, removePlaylist } from '$lib/state.js';
   import { mediaByIds, exportSelection } from '$lib/api.js';
+  import { toast } from '$lib/toast.js';
+  import Modal from './Modal.svelte';
+  import Button from './Button.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let { playlist, onclose = () => {}, onplay = () => {} } = $props();
@@ -76,7 +79,7 @@
   function play() { commit(); onplay(videos, name.trim() || playlist.name); }
   async function doExport() {
     busy = true;
-    try { await exportSelection(videos.map((v) => v.id)); } catch (e) { alert(e.message); } finally { busy = false; }
+    try { await exportSelection(videos.map((v) => v.id)); } catch (e) { toast(e.message || 'Export failed.', { type: 'error' }); } finally { busy = false; }
   }
   function del() {
     removePlaylist(playlist.id);
@@ -85,15 +88,13 @@
   }
 </script>
 
-<!-- `!confirming` so Escape closes the delete-confirm dialog (its own handler) before the editor. -->
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && !confirming) close(); }} />
-
-<!-- Backdrop is presentational chrome; dismissal is mirrored by Escape (above) and the Done button. -->
-<div class="fixed inset-0 z-50 grid place-items-center bg-[var(--overlay-strong)] p-4 backdrop-blur-sm" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
-  <div class="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Edit playlist" tabindex="-1">
+<!-- closeOnEscape defers to the nested delete-confirm dialog: while it's open, Escape
+     closes the confirm (its own handler) rather than the editor. -->
+<Modal onclose={close} ariaLabel="Edit playlist" z="z-50" overlay="overlay-strong" closeOnEscape={!confirming}
+       panelClass="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card">
     <div class="flex items-center gap-3 border-b border-line p-4">
       <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-bold outline-none transition focus:border-[var(--accent)]" bind:value={name} maxlength="80" aria-label="Playlist name" />
-      <button class="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)] transition hover:brightness-110 active:brightness-95" onclick={close}>Done</button>
+      <Button class="shrink-0" onclick={close}>Done</Button>
     </div>
     <div class="flex items-center justify-between gap-3 px-4 pt-3 text-xs text-muted">
       <span>Drag the handle (or ▲/▼) to reorder · plays top to bottom</span>
@@ -121,11 +122,11 @@
             onclick={() => toggleExpand(id)}><span class="prompt-roll block break-words" use:reveal={expanded[id] || false}>{it?.prompt || it?.local_path?.split('/').pop() || id}</span></button>
           <div class="flex shrink-0 items-center gap-1.5">
             <div class="flex overflow-hidden rounded-md border border-line">
-              <button class="grid h-7 w-7 place-items-center text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === 0} onclick={() => move(id, -1)} aria-label="Move up">▲</button>
+              <button class="grid h-7 w-7 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === 0} onclick={() => move(id, -1)} aria-label="Move up">▲</button>
               <span class="w-px self-stretch bg-line" aria-hidden="true"></span>
-              <button class="grid h-7 w-7 place-items-center text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === ids.length - 1} onclick={() => move(id, 1)} aria-label="Move down">▼</button>
+              <button class="grid h-7 w-7 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === ids.length - 1} onclick={() => move(id, 1)} aria-label="Move down">▼</button>
             </div>
-            <button class="grid h-7 w-7 place-items-center rounded-md border border-line text-muted transition hover:border-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_14%,transparent)] hover:text-[var(--danger-ink)]" onclick={() => remove(id)} aria-label="Remove from playlist">×</button>
+            <button class="grid h-7 w-7 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-md border border-line text-muted transition hover:border-[var(--danger)] hover:bg-[color-mix(in_srgb,var(--danger)_14%,transparent)] hover:text-[var(--danger-ink)]" onclick={() => remove(id)} aria-label="Remove from playlist">×</button>
           </div>
         </div>
       {/each}
@@ -137,12 +138,11 @@
     </div>
 
     <div class="flex items-center gap-2 border-t border-line p-4">
-      <button class="rounded-lg bg-[var(--accent)] px-4 py-2 font-bold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" disabled={!videos.length} onclick={play}>Play</button>
-      <button class="rounded-lg border border-line px-4 py-2 font-semibold transition enabled:hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--line))] enabled:hover:bg-[var(--surface-2)] disabled:opacity-50" disabled={!videos.length || busy} onclick={doExport}>{busy ? 'Exporting…' : 'Export'}</button>
+      <Button disabled={!videos.length} onclick={play}>Play</Button>
+      <Button variant="secondary" disabled={!videos.length || busy} onclick={doExport}>{busy ? 'Exporting…' : 'Export'}</Button>
       <button class="ml-auto rounded-lg border border-[var(--danger-border-strong)] px-4 py-2 font-semibold text-[var(--danger-ink)] transition hover:border-[var(--danger)] hover:bg-[var(--danger-bg)]" onclick={() => (confirming = true)}>Delete playlist</button>
     </div>
-  </div>
-</div>
+</Modal>
 
 {#if confirming}
   <ConfirmDialog title="Delete playlist?" message={`“${playlist.name}” will be permanently removed. This can't be undone.`}

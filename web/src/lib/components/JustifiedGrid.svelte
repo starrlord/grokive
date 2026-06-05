@@ -1,5 +1,4 @@
 <script>
-  import { fade } from 'svelte/transition';
   import { justify } from '$lib/justified.js';
   import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, setSelectMode } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -54,39 +53,27 @@
     }
   }
 
-  // Floating prompt tooltip — used in select mode, where the on-card prompt panel
-  // is hidden so it doesn't intercept selection taps. Flips toward screen centre.
-  let tip = $state(null);
-  function showTip(e, text) {
-    if (!text || painting) return;
-    tip = {
-      text,
-      x: e.clientX,
-      y: e.clientY,
-      flipX: e.clientX > window.innerWidth * 0.6,
-      flipY: e.clientY > window.innerHeight * 0.72
-    };
-  }
-
 </script>
 
 <svelte:window onpointerup={() => (painting = false)} onpointercancel={() => (painting = false)} />
 
 <div class="w-full" bind:clientWidth={width} style="--g:{gap}px">
   {#each rows as row (row.cells[0]?.item.id)}
-    <div class="flex" style="gap:var(--g); margin-bottom:var(--g)">
+    <!-- content-visibility:auto (see .grid-row) lets the browser skip rendering rows
+         outside the viewport — cheap, native virtualization that keeps the DOM,
+         selection, and scroll behaviour intact. contain-intrinsic-size reserves the
+         row's real width×height so skipped rows don't collapse or shift the scrollbar. -->
+    <div class="grid-row flex" style="gap:var(--g); margin-bottom:var(--g); contain-intrinsic-size:auto {width}px auto {row.cells[0]?.h ?? targetHeight}px">
       {#each row.cells as cell (cell.item.id)}
         {@const it = cell.item}
         {@const fav = $favorites.has(it.id)}
         {@const sel = selection.has(it.id)}
         {@const isMontage = it.model === 'Beat Montage'}
-        <!-- Mouse handlers only position a hover tooltip; the real click target is the Open button below. -->
+        <!-- The real click target is the Open/select button below. -->
         <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
              class:ring-2={sel} class:select-none={selectMode}
              class:selecting-card={selectMode}
-             style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)"
-             onmousemove={(e) => { if (selectMode) showTip(e, it.prompt); }}
-             onmouseleave={() => (tip = null)}>
+             style="width:{cell.w}px; height:{cell.h}px; --tw-ring-color:var(--accent)">
           {#if it.thumb}
             <img src={it.thumb} alt="" loading="lazy" decoding="async" draggable="false"
                  class="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
@@ -122,8 +109,10 @@
                otherwise. Clicking it outside select mode flips into select mode and
                selects this card. pointer-events gated to hover so touch taps on the
                corner don't accidentally enter select mode. -->
+          <!-- pointer-coarse:* keeps the circle visible & tappable on touch (no hover),
+               so phone users can enter select mode and reach every bulk action. -->
           <button type="button"
-            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-[var(--media-control-ink)] text-sm transition
+            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-[var(--media-control-ink)] text-sm transition pointer-coarse:opacity-100 pointer-coarse:pointer-events-auto
                    {sel ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'bg-[var(--selection-control-bg)] text-[var(--media-control-ink-muted)]'}
                    {selectMode ? '' : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'}"
             aria-label={sel ? 'Deselect' : 'Select'} aria-pressed={sel}
@@ -164,15 +153,14 @@
     oncancel={() => (confirming = null)} />
 {/if}
 
-{#if selectMode && tip}
-  <div class="pointer-events-none fixed z-[60] max-w-xs rounded-lg border border-line bg-[var(--surface-solid)] px-3 py-2 text-xs leading-relaxed shadow-2xl"
-       style="left:{tip.x}px; top:{tip.y}px; transform: translate({tip.flipX ? 'calc(-100% - 14px)' : '14px'}, {tip.flipY ? 'calc(-100% - 14px)' : '14px'});"
-       transition:fade={{ duration: 90 }}>
-    {tip.text}
-  </div>
-{/if}
-
 <style>
+  /* Native virtualization: off-screen rows aren't rendered/laid out. The per-row
+     contain-intrinsic-size (set inline) keeps total height stable so scrolling and
+     the infinite-scroll sentinel behave exactly as before. */
+  .grid-row {
+    content-visibility: auto;
+  }
+
   .card-frame {
     container-type: inline-size;
   }
@@ -237,6 +225,18 @@
     transform: translateY(0);
   }
 
+  /* Touch has no hover, which would otherwise leave favourite/archive/delete
+     unreachable per card — so reveal them persistently on coarse pointers. Delete
+     still routes through the confirm dialog, so an accidental tap can't destroy a
+     file. */
+  @media (pointer: coarse) {
+    .card-actions {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+    }
+  }
+
   .card-action-btn {
     align-items: center;
     background: var(--media-control-bg);
@@ -274,7 +274,7 @@
     }
 
     .meta-badge {
-      font-size: 0.5625rem;
+      font-size: 0.625rem;
       min-height: 1.125rem;
       padding: 0.2rem 0.35rem;
     }

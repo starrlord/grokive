@@ -84,7 +84,7 @@
   .chip-ring svg { height: 28px; transform: rotate(-90deg); width: 28px; }
   .chip-ring .track { fill: none; stroke: color-mix(in srgb, var(--line) 85%, transparent); stroke-width: 3; }
   .chip-ring .bar { fill: none; stroke: var(--accent); stroke-linecap: round; stroke-width: 3; transition: stroke-dashoffset 450ms ease; }
-  .chip-pct { color: var(--ink); font-size: 0.5rem; font-weight: 800; position: absolute; }
+  .chip-pct { color: var(--ink); font-size: 0.625rem; font-weight: 800; position: absolute; }
 
   .chip-icon { flex: 0 0 auto; display: grid; height: 28px; place-items: center; border-radius: 999px; width: 28px; font-weight: 900; font-size: 0.8rem; }
   .chip-icon.ok { background: var(--accent); color: var(--on-accent); }

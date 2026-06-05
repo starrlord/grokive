@@ -1,6 +1,6 @@
 <script>
-  import { fade, fly } from 'svelte/transition';
-  import { portal } from '$lib/portal.js';
+  import Modal from './Modal.svelte';
+  import Button from './Button.svelte';
   import {
     collections, addCollection, addToCollection,
     loadCollections, setStashed, setSelectMode, clearSelection
@@ -40,15 +40,11 @@
   }
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape') onclose(); }} />
-
-<div use:portal class="fixed inset-0 z-[65] grid place-items-center bg-[var(--overlay)] p-4 backdrop-blur-sm" role="presentation"
-     transition:fade={{ duration: 120 }} onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
-  <div class="panel flex max-h-[88dvh] w-full max-w-lg flex-col overflow-hidden rounded-card" role="dialog" aria-modal="true" aria-label="Add to collection" tabindex="-1" transition:fly={{ y: 18, duration: 160 }}>
+<Modal {onclose} ariaLabel="Add to collection" z="z-[65]" panelClass="panel flex max-h-[88dvh] w-full max-w-lg flex-col overflow-hidden rounded-card">
     <div class="border-b border-line p-4">
       <div class="mb-1 flex items-center justify-between gap-3">
         <h2 class="text-lg font-extrabold">Add to Collection</h2>
-        <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line" aria-label="Close" onclick={onclose}>x</button>
+        <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line" aria-label="Close" onclick={onclose}>✕</button>
       </div>
       <p class="text-sm text-muted">{selected.length} selected</p>
     </div>
@@ -59,8 +55,7 @@
         <div class="flex gap-2">
           <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
             placeholder="Collection name" bind:value={name} maxlength="80" />
-          <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
-            disabled={!name.trim() || !selected.length} onclick={create}>Create</button>
+          <Button class="text-sm" disabled={!name.trim() || !selected.length} onclick={create}>Create</Button>
         </div>
       </div>
 
@@ -98,5 +93,4 @@
         </div>
       </div>
     </div>
-  </div>
-</div>
+</Modal>

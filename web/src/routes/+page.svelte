@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { fly, fade } from 'svelte/transition';
   import { portal } from '$lib/portal.js';
+  import { trapFocus } from '$lib/focusTrap.js';
+  import { toast } from '$lib/toast.js';
   import { fetchMedia, fetchFacets, fetchLibrary, mediaByIds } from '$lib/api.js';
   import {
     filters, mode, favorites, stashed, deleted, applyLibrary,
@@ -223,7 +225,7 @@
   }
   async function playPlaylist(pl) {
     const list = (await mediaByIds(pl.ids)).filter((v) => v.media_type === 'video');
-    if (!list.length) { alert('No playable videos in this playlist.'); return; }
+    if (!list.length) { toast('No playable videos in this playlist.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: pl.name };
   }
   function openCollection(c) {
@@ -231,14 +233,14 @@
   }
   async function playCollection(c) {
     const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video');
-    if (!list.length) { alert('No playable videos in this collection.'); return; }
+    if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
   async function montageCollection(c) {
     // Feed every video in the collection to the Montage panel — same as selecting
     // them all, but without entering select mode.
     const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
-    if (list.length < 2) { alert('A montage needs at least 2 non-montage videos in the collection.'); return; }
+    if (list.length < 2) { toast('A montage needs at least 2 non-montage videos in the collection.', { type: 'error' }); return; }
     movieVideoIds = list.map((v) => v.id);
     showMovie = true;
   }
@@ -274,17 +276,24 @@
       resolutions: [],
       period: 'all'
     };
+    const CANVAS_PAGE = 500;
     let nextPage = 1;
     let loaded = [];
     let expected = c.videos || PAGE_SIZE;
-    do {
-      const res = await fetchMedia(canvasFilters, nextPage, 500);
-      loaded = [...loaded, ...(res.items || [])];
+    // Bound the loop: stop once we have everything `total` promised, but also bail
+    // on an empty page and cap total pages so a server that reports a `total` higher
+    // than the rows it returns can never spin this into an infinite fetch.
+    while (loaded.length < expected) {
+      const res = await fetchMedia(canvasFilters, nextPage, CANVAS_PAGE);
+      const batch = res.items || [];
+      loaded = [...loaded, ...batch];
       expected = res.total || loaded.length;
       nextPage += 1;
-    } while (loaded.length < expected);
+      if (batch.length < CANVAS_PAGE) break; // last (or short/empty) page — done
+      if (nextPage > Math.ceil(expected / CANVAS_PAGE) + 1) break; // hard safety cap
+    }
     const list = loaded.filter((it) => it.media_type === 'video');
-    if (!list.length) { alert('No playable videos in this canvas.'); return; }
+    if (!list.length) { toast('No playable videos in this canvas.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name || 'Canvas' };
   }
 </script>
@@ -294,7 +303,7 @@
 <TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} />
 
 <div class="flex">
-  <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100vh - 56px)">
+  <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
     <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
   </aside>
 
@@ -455,7 +464,7 @@
     <div class="absolute inset-y-0 left-0 flex w-[86vw] max-w-sm flex-col bg-[var(--surface-solid)] shadow-[var(--shadow-drawer)]"
          role="dialog" aria-modal="true" aria-label="Menu" tabindex="-1"
          style="padding-top: max(0.5rem, env(safe-area-inset-top)); padding-bottom: env(safe-area-inset-bottom); padding-left: env(safe-area-inset-left)"
-         transition:fly={{ x: -360, duration: 220 }}>
+         use:trapFocus transition:fly={{ x: -360, duration: 220 }}>
       <div class="flex items-center justify-between border-b border-line px-4 py-3">
         <span class="text-lg font-extrabold tracking-tight">Grokive</span>
         <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line" aria-label="Close menu" onclick={() => (menuOpen = false)}>✕</button>

@@ -553,15 +553,20 @@ def api_sync() -> Response:
 
 @app.get("/api/sync/status")
 def api_sync_status() -> Response:
+    # Snapshot under the lock so the response reflects one consistent moment rather
+    # than a torn mix while a worker thread is updating the job.
+    with _sync_lock:
+        snap = dict(_sync)
+        log_tail = list(_sync["log"])[-60:]
     return jsonify(
-        running=_sync["running"],
-        job=_sync["job"],
-        step=_sync["step"],
-        returncode=_sync["returncode"],
-        started_at=_sync["started_at"],
-        finished_at=_sync["finished_at"],
-        auth_hint=_sync["auth_hint"],
-        log=list(_sync["log"])[-60:],
+        running=snap["running"],
+        job=snap["job"],
+        step=snap["step"],
+        returncode=snap["returncode"],
+        started_at=snap["started_at"],
+        finished_at=snap["finished_at"],
+        auth_hint=snap["auth_hint"],
+        log=log_tail,
     )
 
 
@@ -588,7 +593,13 @@ def api_settings_get() -> Response:
 @app.post("/api/settings")
 def api_settings_post() -> Response:
     payload = request.get_json(silent=True) or {}
-    settings = _load_settings()
+    # Strict load so a corrupt settings.json doesn't get silently rewritten as {},
+    # dropping whichever key this request didn't include.
+    try:
+        loaded = _load_json_strict(SETTINGS_FILE, {})
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    settings = loaded if isinstance(loaded, dict) else {}
     if not WHISPER_ENV and "whisper_server_url" in payload:
         settings["whisper_server_url"] = str(payload.get("whisper_server_url") or "").strip()[:500]
     if "burn_subtitles" in payload:
@@ -717,14 +728,18 @@ def _clean_collection(entry: dict) -> dict | None:
     }
 
 
-def _load_collections() -> list[dict]:
+def _load_collections(strict: bool = False) -> list[dict]:
+    # strict=True (used by mutation paths that rewrite collections.json) raises on a
+    # present-but-unreadable file instead of silently treating it as empty.
     data: list = []
     if COLLECTIONS_FILE.exists():
         try:
             loaded = json.loads(COLLECTIONS_FILE.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 data = loaded
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise CorruptStateError(f"collections.json exists but could not be read: {exc}") from exc
             data = []
     clean: list[dict] = []
     for entry in data[:1000]:
@@ -1062,6 +1077,14 @@ def _burn_subtitles_into(video_path: Path) -> Path:
     return burned
 
 
+# Cap concurrent exports. Each export runs a full ffmpeg merge synchronously on its
+# waitress worker thread (and holds it through the streamed download), so an
+# unbounded burst could occupy every worker and freeze the whole UI. With 8 worker
+# threads, 2 export slots leaves plenty for normal browsing; excess requests get a
+# quick 503 instead of tying up a thread waiting.
+_EXPORT_SLOTS = threading.BoundedSemaphore(2)
+
+
 def _export_response(paths: list[Path], name: str):
     """Merge ``paths`` (in order), optionally burn subtitles, and stream the result
     as an MP4 download. The temp dir is deleted after streaming — nothing persists.
@@ -1071,6 +1094,9 @@ def _export_response(paths: list[Path], name: str):
     if not paths:
         return jsonify(ok=False, error="No videos to export are available on the server."), 400
 
+    if not _EXPORT_SLOTS.acquire(blocking=False):
+        return jsonify(ok=False, error="The server is busy with other exports — please try again in a moment."), 503
+
     tmpdir = Path(tempfile.mkdtemp(prefix="ga-export-"))
     out_path = tmpdir / "merged.mp4"
     try:
@@ -1079,12 +1105,20 @@ def _export_response(paths: list[Path], name: str):
             out_path = _burn_subtitles_into(out_path)
     except Exception as exc:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        _EXPORT_SLOTS.release()
         return jsonify(ok=False, error=f"Merge failed: {exc}"), 500
 
-    size = out_path.stat().st_size
-    safe_name = re.sub(r"[^\w.-]+", "_", name or "export").strip("_") or "export"
+    try:
+        size = out_path.stat().st_size
+        safe_name = re.sub(r"[^\w.-]+", "_", name or "export").strip("_") or "export"
+    except Exception as exc:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        _EXPORT_SLOTS.release()
+        return jsonify(ok=False, error=f"Merge failed: {exc}"), 500
 
     def generate():
+        # The export slot is held for the whole stream (the worker thread is busy
+        # until the client finishes downloading), then released here.
         try:
             with open(out_path, "rb") as fh:
                 while True:
@@ -1094,6 +1128,7 @@ def _export_response(paths: list[Path], name: str):
                     yield chunk
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            _EXPORT_SLOTS.release()
 
     return Response(
         generate(),
@@ -1152,6 +1187,7 @@ _movie = {
     "result": None,        # {path, filename, width, height, fps, duration, size_bytes, cuts}
     "commit_meta": None,   # provenance captured at submit (song, seed, source ids…)
     "committed": False,    # already added to the gallery?
+    "committing": False,   # a commit is in-flight (guards against double-commit)
     "committed_id": None,  # the gallery media id once committed
     "acknowledged": False, # user dealt with the finished result (dismissed/committed/discarded)
 }
@@ -1161,10 +1197,13 @@ BEAT_MONTAGE_COLLECTION = "beat-montage"
 
 
 def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, detail: str = "") -> None:
-    _movie["status"] = status
-    _movie["progress"] = round(float(overall), 4)
-    _movie["stage_progress"] = round(float(stage_progress), 4)
-    _movie["detail"] = detail
+    # Update the progress fields as one burst under the lock so /status never reads
+    # a half-updated mix (e.g. new status with stale progress) across waitress threads.
+    with _movie_lock:
+        _movie["status"] = status
+        _movie["progress"] = round(float(overall), 4)
+        _movie["stage_progress"] = round(float(stage_progress), 4)
+        _movie["detail"] = detail
 
 
 def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict) -> None:
@@ -1180,19 +1219,22 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict
             hwaccel_decode=_use_nvenc(),
             progress=_movie_progress,
         )
-        _movie["result"] = {
-            "path": str(out_path),
-            "filename": f"{options.get('name') or 'movie'}.mp4",
-            **result,
-        }
+        with _movie_lock:
+            _movie["result"] = {
+                "path": str(out_path),
+                "filename": f"{options.get('name') or 'movie'}.mp4",
+                **result,
+            }
         _movie_progress("done", 1.0, 1.0, "Done")
     except Exception as exc:  # pragma: no cover - defensive
-        _movie["status"] = "error"
-        _movie["error"] = str(exc)[:400]
-        _movie["detail"] = "Generation failed"
+        with _movie_lock:
+            _movie["status"] = "error"
+            _movie["error"] = str(exc)[:400]
+            _movie["detail"] = "Generation failed"
     finally:
-        _movie["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        _movie["running"] = False
+        with _movie_lock:
+            _movie["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _movie["running"] = False
 
 
 @app.post("/api/movie/generate")
@@ -1264,7 +1306,7 @@ def api_movie_generate() -> Response:
         _movie.update(running=True, job_id=job_id, status="queued", progress=0.0,
                       stage_progress=0.0, detail="Queued…", error=None, result=None,
                       started_at=time.strftime("%Y-%m-%d %H:%M:%S"), finished_at=None,
-                      committed=False, committed_id=None, acknowledged=False,
+                      committed=False, committing=False, committed_id=None, acknowledged=False,
                       commit_meta={
                           "name": options["name"], "song": song.filename,
                           "seed": options["seed"], "tightness": options["tightness"],
@@ -1279,18 +1321,24 @@ def api_movie_generate() -> Response:
 
 @app.get("/api/movie/status")
 def api_movie_status() -> Response:
-    r = _movie["result"]
-    meta = _movie["commit_meta"] or {}
+    # Copy the whole job under the lock so the response is a single consistent
+    # snapshot, never a mix of fields from before and after a worker update. The
+    # worker only ever *reassigns* result/commit_meta (never mutates them in place),
+    # so reading those nested dicts after the shallow copy is safe.
+    with _movie_lock:
+        snap = dict(_movie)
+    r = snap["result"]
+    meta = snap["commit_meta"] or {}
     return jsonify(
-        running=_movie["running"],
-        job_id=_movie["job_id"],
-        status=_movie["status"],
-        progress=_movie["progress"],
-        stage_progress=_movie["stage_progress"],
-        detail=_movie["detail"],
-        error=_movie["error"],
-        started_at=_movie["started_at"],
-        finished_at=_movie["finished_at"],
+        running=snap["running"],
+        job_id=snap["job_id"],
+        status=snap["status"],
+        progress=snap["progress"],
+        stage_progress=snap["stage_progress"],
+        detail=snap["detail"],
+        error=snap["error"],
+        started_at=snap["started_at"],
+        finished_at=snap["finished_at"],
         # Submit-time provenance so the panel header is correct even when reopened
         # from the status chip with no live selection (and mid-render, before a
         # result exists): the source videos that went in, and which preset. The
@@ -1302,9 +1350,9 @@ def api_movie_status() -> Response:
         # Whether the finished result was already added to the gallery and whether
         # the user has dealt with it. These survive reloads (unlike the client's
         # in-memory ack), so the floating chip can stay dismissed across sessions.
-        committed=_movie["committed"],
-        committed_id=_movie["committed_id"],
-        acknowledged=_movie["acknowledged"],
+        committed=snap["committed"],
+        committed_id=snap["committed_id"],
+        acknowledged=snap["acknowledged"],
         # Don't leak the absolute server path to the client.
         result=({k: v for k, v in r.items() if k != "path"} if r else None),
     )
@@ -1371,19 +1419,16 @@ def _commit_montage() -> dict:
         "source_ids": meta.get("source_ids") or [],
         "song": song,
     }
-    items: list = []
-    if METADATA_FILE.exists():
-        try:
-            loaded = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                items = loaded
-        except Exception:
-            items = []
+    # Strict load: if metadata.json exists but is unreadable, abort rather than
+    # rewrite it with only this montage (which would erase the whole library).
+    loaded = _load_json_strict(METADATA_FILE, [])
+    items: list = loaded if isinstance(loaded, list) else []
     items.append(record)
     _atomic_write_json(METADATA_FILE, items)
 
-    # Add to the 'Beat Montage' collection (create on first use).
-    collections = _load_collections()
+    # Add to the 'Beat Montage' collection (create on first use). Strict load for
+    # the same reason — a corrupt read must not wipe the user's other collections.
+    collections = _load_collections(strict=True)
     coll = next((c for c in collections
                  if c.get("id") == BEAT_MONTAGE_COLLECTION or str(c.get("name", "")).lower() == "beat montage"), None)
     today = time.strftime("%Y-%m-%d")
@@ -1408,21 +1453,31 @@ def _commit_montage() -> dict:
 @app.post("/api/movie/commit")
 def api_movie_commit() -> Response:
     """Add the finished montage to the gallery + the 'Beat Montage' collection."""
-    if _movie.get("running"):
-        return jsonify(ok=False, error="Still rendering."), 409
-    r = _movie.get("result")
-    if not r or not Path(r["path"]).exists():
-        return jsonify(ok=False, error="No finished movie to add."), 409
-    if _movie.get("committed"):
-        return jsonify(ok=True, id=_movie.get("committed_id"),
-                       collection_id=BEAT_MONTAGE_COLLECTION, already=True)
+    # Claim the commit atomically: validate and flip `committing` under the lock so
+    # two near-simultaneous clicks can't both pass the checks and double-commit.
+    with _movie_lock:
+        if _movie.get("running"):
+            return jsonify(ok=False, error="Still rendering."), 409
+        r = _movie.get("result")
+        if not r or not Path(r["path"]).exists():
+            return jsonify(ok=False, error="No finished movie to add."), 409
+        if _movie.get("committed"):
+            return jsonify(ok=True, id=_movie.get("committed_id"),
+                           collection_id=BEAT_MONTAGE_COLLECTION, already=True)
+        if _movie.get("committing"):
+            return jsonify(ok=False, error="Commit already in progress."), 409
+        _movie["committing"] = True
     try:
         res = _commit_montage()
     except Exception as exc:
+        with _movie_lock:
+            _movie["committing"] = False
         return jsonify(ok=False, error=str(exc)[:300]), 500
-    _movie["committed"] = True
-    _movie["committed_id"] = res["id"]
-    _movie["acknowledged"] = True  # committing is dealing with it — chip stays gone
+    with _movie_lock:
+        _movie["committed"] = True
+        _movie["committed_id"] = res["id"]
+        _movie["acknowledged"] = True  # committing is dealing with it — chip stays gone
+        _movie["committing"] = False
     return jsonify(ok=True, **res)
 
 
@@ -1431,9 +1486,11 @@ def api_movie_dismiss() -> Response:
     """Mark the finished montage as dealt with so the floating status chip stays
     hidden — durably, across reloads/tabs (the client's ack is memory-only). No-op
     while a render is still running."""
-    if not _movie.get("running"):
-        _movie["acknowledged"] = True
-    return jsonify(ok=True, acknowledged=_movie["acknowledged"])
+    with _movie_lock:
+        if not _movie.get("running"):
+            _movie["acknowledged"] = True
+        acknowledged = _movie["acknowledged"]
+    return jsonify(ok=True, acknowledged=acknowledged)
 
 
 def rebuild_db() -> None:
@@ -1618,6 +1675,25 @@ def api_library_post() -> Response:
     return jsonify(ok=True, favorites=len(data["favorites"]), stashed=len(data["stashed"]))
 
 
+class CorruptStateError(RuntimeError):
+    """A state file exists but is unparseable. Mutation paths raise this instead of
+    treating the file as empty, so a partial/corrupt read can never cause us to
+    overwrite or blocklist over real data that is only momentarily unreadable."""
+
+
+def _load_json_strict(path: Path, default):
+    """Parse a state file that the caller is about to REWRITE. Returns `default`
+    when the file is absent (a legitimately empty starting point) but raises
+    CorruptStateError when it exists yet cannot be parsed. Read-only callers that
+    can safely degrade to empty should keep using the tolerant inline json.loads."""
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CorruptStateError(f"{path.name} exists but could not be read: {exc}") from exc
+
+
 def _atomic_write_json(path: Path, data) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -1719,14 +1795,15 @@ def api_media_delete() -> Response:
     if not ids:
         return jsonify(ok=False, error="No items to delete."), 400
 
-    items = []
-    if METADATA_FILE.exists():
-        try:
-            loaded = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                items = loaded
-        except Exception:
-            items = []
+    # Strict load: a present-but-unreadable metadata.json must abort the delete
+    # before we blocklist these ids / purge them from library/playlists/collections.
+    # Otherwise a transient read error would permanently blocklist items that were
+    # never actually removed.
+    try:
+        loaded = _load_json_strict(METADATA_FILE, [])
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    items = loaded if isinstance(loaded, list) else []
     kept, removed = [], 0
     for item in items:
         if isinstance(item, dict) and str(item.get("id")) in ids:

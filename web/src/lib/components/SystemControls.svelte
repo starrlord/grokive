@@ -17,11 +17,20 @@
   // status doesn't fire a toast on every page load).
   let observedRunning = false;
 
+  // Single self-scheduling poll loop. `polling` is set synchronously at the top so a
+  // Sync click during the in-flight request can't spawn a second concurrent loop, and
+  // `schedule()` always clears the prior timer so exactly one timeout is ever pending
+  // (no leak on unmount). `kick()` just ensures a loop is running.
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(poll, 2000);
+  }
   async function poll() {
-    try { status = await syncStatus(); } catch { return; }
+    polling = true;
+    try { status = await syncStatus(); } catch { polling = false; return; }
     if (status.running) {
       observedRunning = true;
-      timer = setTimeout(poll, 2000);
+      schedule();
     } else {
       polling = false;
       if (!observedRunning) return;
@@ -36,7 +45,7 @@
       }
     }
   }
-  function kick() { if (!polling) { polling = true; observedRunning = true; poll(); } }
+  function kick() { observedRunning = true; if (!polling) poll(); }
 
   async function doSync() { await startSync(); kick(); }
   async function doSubs() {
