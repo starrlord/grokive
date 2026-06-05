@@ -78,14 +78,8 @@
 
 <!-- Theme swatch — reused in the Appearance row (small) and the picker grid (large). -->
 {#snippet swatch(t, cls)}
-  <span class="theme-swatch grid overflow-hidden rounded-md border border-line {cls}"
-        style={`--sw-bg:${t.preview[0]}; --sw-panel:${t.preview[1]}; --sw-a:${t.preview[2]}; --sw-b:${t.preview[3]};`}>
-    <span class="theme-swatch-bg">
-      <span class="theme-swatch-panel"></span>
-      <span class="theme-swatch-accent"></span>
-      <span class="theme-swatch-secondary"></span>
-    </span>
-  </span>
+  <span class="theme-swatch overflow-hidden rounded-md border border-line {cls}"
+        style={`--sw-bg:${t.preview[0]}; --sw-panel:${t.preview[1]}; --sw-a:${t.preview[2]}; --sw-b:${t.preview[3]};`}></span>
 {/snippet}
 
 <!-- Backdrop: full-screen sheet on phones (panel fills it), centered card on ≥sm. -->
@@ -237,47 +231,14 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent);
   }
 
-  .theme-swatch-bg {
+  /* Gradient blend chip: the theme's accent glows from the top-left, its secondary
+     from the bottom-right, over a background-tinted base — so the chip reads as the
+     theme's mood and keeps dark vs. Light distinguishable. Purely gradient-based, so
+     it scales cleanly to any size (compact row + picker grid) with nothing to clip. */
+  .theme-swatch {
     background:
-      radial-gradient(circle at 82% 18%, color-mix(in srgb, var(--sw-b) 70%, transparent) 0 10%, transparent 24%),
-      linear-gradient(135deg, var(--sw-bg), color-mix(in srgb, var(--sw-bg) 72%, var(--sw-a)));
-    display: block;
-    height: 100%;
-    position: relative;
-  }
-
-  /* Decorations are positioned in % (not fixed rem) so the swatch reads correctly
-     at any size — the compact Appearance row and the larger picker grid both — with
-     no overflow/clipping. */
-  .theme-swatch-panel {
-    background: var(--sw-panel);
-    border-radius: 20%;
-    bottom: 16%;
-    left: 10%;
-    position: absolute;
-    top: 16%;
-    width: 42%;
-  }
-
-  .theme-swatch-accent,
-  .theme-swatch-secondary {
-    border-radius: 999px;
-    position: absolute;
-  }
-
-  .theme-swatch-accent {
-    background: var(--sw-a);
-    height: 12%;
-    left: 60%;
-    top: 30%;
-    width: 30%;
-  }
-
-  .theme-swatch-secondary {
-    background: var(--sw-b);
-    bottom: 22%;
-    height: 22%;
-    right: 10%;
-    width: 14%;
+      radial-gradient(115% 115% at 14% 12%, var(--sw-a) 0%, transparent 56%),
+      radial-gradient(120% 120% at 86% 90%, var(--sw-b) 0%, transparent 58%),
+      linear-gradient(135deg, var(--sw-bg), color-mix(in srgb, var(--sw-bg) 80%, var(--sw-panel)));
   }
 </style>
