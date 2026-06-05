@@ -242,7 +242,7 @@
 
     <!-- Info panel: hidden by default, slides up over the bottom when opened -->
     {#if showInfo}
-      <div class="panel absolute inset-x-0 bottom-0 z-20 max-h-[50vh] overflow-auto px-6 py-4"
+      <div class="panel absolute inset-x-0 bottom-0 z-20 max-h-[50dvh] overflow-auto px-6 py-4"
            transition:fly={{ y: 240, duration: 180 }}>
         <div class="mb-2 flex items-start gap-3">
           <p class="flex-1 leading-relaxed">{item.prompt || 'Untitled prompt'}</p>
