@@ -133,7 +133,7 @@
               aria-label="Change theme" onclick={() => (pickingTheme = true)}>
               <span class="text-sm font-semibold">Theme</span>
               <span class="ml-auto flex min-w-0 items-center gap-2 text-sm">
-                {@render swatch(current, 'h-6 w-10 shrink-0')}
+                {@render swatch(current, 'h-8 w-12 shrink-0')}
                 <span class="truncate font-medium">{current.label}</span>
                 <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
               </span>
@@ -246,14 +246,17 @@
     position: relative;
   }
 
+  /* Decorations are positioned in % (not fixed rem) so the swatch reads correctly
+     at any size — the compact Appearance row and the larger picker grid both — with
+     no overflow/clipping. */
   .theme-swatch-panel {
     background: var(--sw-panel);
-    border-radius: 0.35rem;
-    bottom: 0.35rem;
-    left: 0.45rem;
+    border-radius: 20%;
+    bottom: 16%;
+    left: 10%;
     position: absolute;
-    top: 0.5rem;
-    width: 56%;
+    top: 16%;
+    width: 42%;
   }
 
   .theme-swatch-accent,
@@ -264,17 +267,17 @@
 
   .theme-swatch-accent {
     background: var(--sw-a);
-    height: 0.45rem;
-    left: 0.8rem;
-    top: 0.85rem;
-    width: 2.25rem;
+    height: 12%;
+    left: 60%;
+    top: 30%;
+    width: 30%;
   }
 
   .theme-swatch-secondary {
     background: var(--sw-b);
-    bottom: 0.75rem;
-    height: 0.65rem;
-    right: 0.75rem;
-    width: 0.65rem;
+    bottom: 22%;
+    height: 22%;
+    right: 10%;
+    width: 14%;
   }
 </style>
