@@ -557,7 +557,9 @@ def api_sync_status() -> Response:
     # than a torn mix while a worker thread is updating the job.
     with _sync_lock:
         snap = dict(_sync)
-        log_tail = list(_sync["log"])[-60:]
+        # Keep enough tail that the client can reconstruct every step (header +
+        # output + footer) for the parsed Summary view, not just the last few lines.
+        log_tail = list(_sync["log"])[-200:]
     return jsonify(
         running=snap["running"],
         job=snap["job"],
