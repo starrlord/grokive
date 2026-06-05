@@ -2,7 +2,7 @@ import { writable, derived, get } from 'svelte/store';
 import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
-  getSettings, deleteMedia, movieStatus
+  getSettings, deleteMedia, movieStatus, dismissMovie
 } from './api.js';
 import { toast } from './toast.js';
 
@@ -207,13 +207,21 @@ export function markMovieStarted(jobId) {
 // (committed, "Make another", or dismissed). `movieAck` records the job id the
 // user has acknowledged so the chip — and a fresh panel open — can hide it.
 export const movieAck = writable(null);
-export function acknowledgeMovie(jobId) { if (jobId) movieAck.set(jobId); }
+export function acknowledgeMovie(jobId) {
+  if (!jobId) return;
+  movieAck.set(jobId);          // hide the chip now, this session
+  dismissMovie();               // and durably, so a reload doesn't resurrect it
+}
 
 // The job to surface in the chip/panel, or null when there's nothing pending: a
-// running render, or a finished/failed one the user hasn't acknowledged yet.
+// running render, or a finished/failed one not yet dealt with. "Dealt with" is
+// either the in-memory ack (this session) or the server's durable `acknowledged`
+// flag (set on dismiss/commit) — the latter is what keeps the chip gone across
+// reloads, since `movieAck` resets to null on a fresh load.
 export const movieChip = derived([movieJob, movieAck], ([$j, $ack]) => {
   const finished = ($j.status === 'done' && $j.result) || $j.status === 'error';
-  const pending = $j.running || (finished && $j.job_id && $j.job_id !== $ack);
+  const dealtWith = $j.acknowledged || $j.job_id === $ack;
+  const pending = $j.running || (finished && $j.job_id && !dealtWith);
   return pending ? $j : null;
 });
 

@@ -115,6 +115,11 @@ export async function generateMovie({ ids, song, options }) {
   return data; // { ok, job_id }
 }
 export const movieStatus = () => getJSON('/api/movie/status');
+// Durably tell the server the finished montage was dealt with, so the floating
+// chip stays hidden across reloads. Fire-and-forget — the local ack hides it now.
+export async function dismissMovie() {
+  try { await fetch('/api/movie/dismiss', { method: 'POST' }); } catch { /* best-effort */ }
+}
 export async function commitMovie() {
   const res = await fetch('/api/movie/commit', { method: 'POST' });
   const data = await res.json().catch(() => ({}));

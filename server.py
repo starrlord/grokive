@@ -1153,6 +1153,7 @@ _movie = {
     "commit_meta": None,   # provenance captured at submit (song, seed, source ids…)
     "committed": False,    # already added to the gallery?
     "committed_id": None,  # the gallery media id once committed
+    "acknowledged": False, # user dealt with the finished result (dismissed/committed/discarded)
 }
 
 _SONG_EXTS = {"mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"}
@@ -1263,7 +1264,7 @@ def api_movie_generate() -> Response:
         _movie.update(running=True, job_id=job_id, status="queued", progress=0.0,
                       stage_progress=0.0, detail="Queued…", error=None, result=None,
                       started_at=time.strftime("%Y-%m-%d %H:%M:%S"), finished_at=None,
-                      committed=False, committed_id=None,
+                      committed=False, committed_id=None, acknowledged=False,
                       commit_meta={
                           "name": options["name"], "song": song.filename,
                           "seed": options["seed"], "tightness": options["tightness"],
@@ -1298,6 +1299,12 @@ def api_movie_status() -> Response:
         sources=len(meta.get("source_ids") or []),
         source_ids=meta.get("source_ids") or [],
         preset=meta.get("preset"),
+        # Whether the finished result was already added to the gallery and whether
+        # the user has dealt with it. These survive reloads (unlike the client's
+        # in-memory ack), so the floating chip can stay dismissed across sessions.
+        committed=_movie["committed"],
+        committed_id=_movie["committed_id"],
+        acknowledged=_movie["acknowledged"],
         # Don't leak the absolute server path to the client.
         result=({k: v for k, v in r.items() if k != "path"} if r else None),
     )
@@ -1415,7 +1422,18 @@ def api_movie_commit() -> Response:
         return jsonify(ok=False, error=str(exc)[:300]), 500
     _movie["committed"] = True
     _movie["committed_id"] = res["id"]
+    _movie["acknowledged"] = True  # committing is dealing with it — chip stays gone
     return jsonify(ok=True, **res)
+
+
+@app.post("/api/movie/dismiss")
+def api_movie_dismiss() -> Response:
+    """Mark the finished montage as dealt with so the floating status chip stays
+    hidden — durably, across reloads/tabs (the client's ack is memory-only). No-op
+    while a render is still running."""
+    if not _movie.get("running"):
+        _movie["acknowledged"] = True
+    return jsonify(ok=True, acknowledged=_movie["acknowledged"])
 
 
 def rebuild_db() -> None:

@@ -201,7 +201,7 @@
     <ParticleField active={running} animate={running} layers={3} intensity={0.85} auroraAlpha={0.3} aurora
       burst={burstCount} class="pointer-events-none absolute inset-0 z-0 h-full w-full" />
   {/if}
-  <div class="panel relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
+  <div class="panel relative z-10 flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl" role="dialog" aria-modal="true" aria-label="Generate Movie" tabindex="-1"
        transition:fly={{ y: 18, duration: 180 }}>
     <header class="flex items-center justify-between border-b border-line px-5 py-4">
       <div>
@@ -218,7 +218,7 @@
         <div class="space-y-4">
           <!-- Music-only generated preview has no speech track. -->
           <!-- svelte-ignore a11y_media_has_caption -->
-          <video class="mx-auto block max-h-[55vh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
+          <video class="mx-auto block max-h-[55dvh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
           <p class="text-sm text-muted">
             {job.result.cuts} cuts · {job.result.width}×{job.result.height} · {job.result.fps} fps · {job.result.duration}s
             · {(job.result.size_bytes / 1048576).toFixed(1)} MB
