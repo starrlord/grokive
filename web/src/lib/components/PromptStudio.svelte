@@ -25,7 +25,7 @@
   let composeTimer;
   let remixBusy = $state(false);
   let focused = $state(null);
-  let studioMode = $state('compose'); // 'compose' | 'scene'
+  let studioMode = $state('compose'); // 'compose' | 'scene' | 'freeform' | 'saved'
 
   // Phase 1 browse state.
   let embed = $state({ configured: false, embedded: 0, total_unique: 0, missing: 0, running: false, done: 0, total: 0, error: null });
@@ -74,24 +74,50 @@ Rules you MUST follow:
   let personaOpen = $state(false);
   let personaLoaded = $state(false);
   let personaSaveTimer;
+  let lastSavedJson = ''; // snapshot of the last loaded/saved cards — gates the save effect
   const activeIdx = $derived(personaCards.findIndex((c) => c.id === activePersonaId));
   const activeCard = $derived(activeIdx >= 0 ? personaCards[activeIdx] : null);
   const persona = $derived(activeCard?.text || '');
 
+  // The one-time localStorage→server migration decision, recorded per-device. Once set, an empty
+  // server list means "the user has no personas" (not "seed/migrate again") — so deleting every
+  // card sticks instead of resurrecting the example. Gated on this flag (never on the stale shadow
+  // copy), so a returning device with leftover `ga.personaCards` doesn't re-clobber the server.
+  const personasMigrated = () => { try { return localStorage.getItem('ga.personasMigrated') === '1'; } catch { return false; } };
+  const markPersonasMigrated = () => { try { localStorage.setItem('ga.personasMigrated', '1'); } catch {} };
+
   async function initPersonas() {
-    let cards = await fetchPersonas();
-    if (!cards.length) {
-      cards = loadLocalCards();        // migrate the device's old cards, or seed the example
+    const fetched = await fetchPersonas(); // null = GET failed; [] = server genuinely empty
+    if (fetched === null) {
+      // Server unreachable. Show a best-effort local view but NEVER auto-save over whatever is
+      // really on the server — only an explicit edit writes (and may then fail loudly). Marking the
+      // current cards as "clean" keeps the save effect quiet until the user actually changes something.
+      const local = loadLocalCards();
+      personaCards = local;
+      activePersonaId = loadActiveId(local);
+      lastSavedJson = JSON.stringify(local);
+      personaLoaded = true;
+      toast("Couldn't load your personas — reload before editing so changes save correctly.", { type: 'error' });
+      return;
+    }
+    let cards = fetched;
+    if (!cards.length && !personasMigrated()) {
+      cards = loadLocalCards();        // one-time: migrate this device's old cards, or seed the example
       if (cards.length) savePersonas(cards);
     }
+    markPersonasMigrated();            // the migration decision is now made on this device
     personaCards = cards;
     activePersonaId = loadActiveId(cards);
+    lastSavedJson = JSON.stringify(cards);
     personaLoaded = true;
   }
-  // Persist cards to the server (debounced) once loaded; the active selection stays per-device.
+  // Persist cards to the server (debounced) when they actually change; the active selection stays
+  // per-device. The lastSavedJson guard skips the initial load and any no-op rewrite, so a page
+  // load never POSTs identical data back.
   $effect(() => {
-    JSON.stringify(personaCards); // deep-track edits / add / delete
-    if (!personaLoaded) return;
+    const json = JSON.stringify(personaCards); // deep-track edits / add / delete
+    if (!personaLoaded || json === lastSavedJson) return;
+    lastSavedJson = json;
     clearTimeout(personaSaveTimer);
     personaSaveTimer = setTimeout(() => savePersonas(personaCards), 600);
   });

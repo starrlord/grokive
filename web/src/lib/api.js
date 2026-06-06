@@ -228,9 +228,11 @@ export async function fetchSavedResponses() {
 }
 export const saveSavedResponses = (responses) => saveJSON('/api/prompts/responses', { responses });
 
-// Persona cards (durable, server-side, shared across devices).
+// Persona cards (durable, server-side, shared across devices). Returns null when the GET FAILS
+// (so callers don't mistake an unreachable server for a genuinely empty list and overwrite it);
+// returns [] only when the server really has no cards.
 export async function fetchPersonas() {
-  try { return (await getJSON('/api/prompts/personas')).personas || []; } catch { return []; }
+  try { return (await getJSON('/api/prompts/personas')).personas || []; } catch { return null; }
 }
 export const savePersonas = (personas) => saveJSON('/api/prompts/personas', { personas });
 
