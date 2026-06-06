@@ -61,6 +61,20 @@
   let videoEl = $state(null);
   let stageEl = $state(null);
   let showInfo = $state(false);
+  // The bottom counter (title · "3 / 47") sits exactly where iOS draws captions
+  // and its native control bar, so leaving it up permanently covers both. Reveal
+  // it on each clip change and on pointer activity, then fade it out while the
+  // clip plays so it stops obscuring the media and subtitles.
+  let counterVisible = $state(true);
+  let counterTimer;
+  function pokeCounter() {
+    counterVisible = true;
+    clearTimeout(counterTimer);
+    counterTimer = setTimeout(() => { counterVisible = false; }, 2500);
+  }
+  // Reading `item` makes this re-run whenever the clip changes (open, step,
+  // auto-advance, or a delete shifting the index).
+  $effect(() => { if (item) pokeCounter(); });
   // iOS overlays its native control bar for a few seconds whenever a clip starts,
   // covering the autoplaying video. On touch devices we start with controls off so
   // the clean clip shows, then reveal native controls on the first tap (same tap
@@ -86,6 +100,7 @@
   }
   function enableSound() {
     showControls = true;
+    pokeCounter();
     if (wantSound) return;
     wantSound = true;
     if (videoEl) {
@@ -100,6 +115,7 @@
     }
   }
   onDestroy(() => {
+    clearTimeout(counterTimer);
     try { mediaSourceNode?.disconnect(); } catch {}
     mediaSourceNode = null;  // the shared AudioContext stays alive for reuse
   });
@@ -194,6 +210,7 @@
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
     <div bind:this={stageEl} class="lightbox-stage absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
          onpointerdown={enableSound}
+         onpointermove={pokeCounter}
          onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
       {#if item.media_type === 'video'}
         <!-- caption track is (re)built imperatively in the $effect so playlist clips keep subtitles -->
@@ -236,8 +253,10 @@
       <button class="glass absolute right-3 top-1/2 z-10 grid h-12 w-12 -translate-y-1/2 place-items-center rounded-full text-2xl" aria-label="Next (→)" title="Next (→)" onclick={() => step(1)}>›</button>
     {/if}
 
-    <!-- Counter (small, unobtrusive; safe-area inset so it clears the home indicator) -->
-    <div class="lightbox-counter glass absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
+    <!-- Counter (small, unobtrusive; safe-area inset so it clears the home indicator).
+         pointer-events-none so it never shadows a tap on the stage below; fades out
+         a couple seconds after each clip starts so it clears captions and the frame. -->
+    <div class="lightbox-counter glass pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted transition-opacity duration-300 {counterVisible ? 'opacity-100' : 'opacity-0'}" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
       {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
 

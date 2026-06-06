@@ -157,6 +157,77 @@ export const getSettings = () => getJSON('/api/settings');
 export const postSettings = (body) =>
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
+// --- Prompt Studio (Phase 0: corpus vocabulary + structured composer) -------
+export async function fetchPromptVocabulary() {
+  try { return await getJSON('/api/prompts/vocabulary'); }
+  catch { return { total_prompts: 0, unique_prompts: 0, slots: [], prompts: [] }; }
+}
+async function postJSON(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return res.ok ? res.json() : null;
+}
+// Two-stage Grok Imagine prompts: { image } (detailed base frame) + { motion } (short animate).
+export const composePrompts = (components) =>
+  postJSON('/api/prompts/compose', { components }).then((d) => ({ image: d?.image ?? '', motion: d?.motion ?? '' }));
+export const parsePrompt = (text, llm = false) =>
+  postJSON('/api/prompts/parse', { text, llm }).then((d) => (d?.components ?? {}));
+
+// Phase 1 — local embeddings: semantic search + auto theme clusters.
+export const promptEmbedStatus = () => getJSON('/api/prompts/status').catch(() => ({ embed_configured: false }));
+export const startPromptEmbed = () =>
+  fetch('/api/prompts/embed', { method: 'POST' }).then((r) => r.json()).catch(() => ({}));
+export const fetchPromptThemes = (k) =>
+  getJSON(`/api/prompts/themes${k ? `?k=${k}` : ''}`).catch(() => ({ themes: [] }));
+export function similarPrompts({ id, text, k = 30 } = {}) {
+  const p = new URLSearchParams();
+  if (id) p.set('id', id);
+  if (text) p.set('text', text);
+  p.set('k', String(k));
+  return getJSON(`/api/prompts/similar?${p.toString()}`).catch(() => ({ results: [] }));
+}
+
+// Phase 2 — local LLM: prompt variations / remix / polish.
+export async function generatePrompts(body) {
+  const res = await fetch('/api/prompts/generate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Generation failed.');
+  return d; // { variations: string[], model }
+}
+
+// Scene Builder — script a continuous multi-clip scene (length ÷ 6s/10s increment → beats).
+export async function generateScene(body) {
+  const res = await fetch('/api/prompts/scene', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Scene generation failed.');
+  return d; // { beats: string[], clips, increment, length_seconds }
+}
+
+// Freeform — direct, unconstrained generation in the active persona's voice (numbered list).
+export async function generateFreeform(body) {
+  const res = await fetch('/api/prompts/freeform', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Generation failed.');
+  return d; // { items: string[], model }
+}
+
+// Saved scenes (durable, server-side, shared across devices).
+export async function fetchScenes() {
+  try { return (await getJSON('/api/prompts/scenes')).scenes || []; } catch { return []; }
+}
+export const saveScenes = (scenes) => saveJSON('/api/prompts/scenes', { scenes });
+
+// Saved responses — starred Prompt Studio outputs (durable, server-side).
+export async function fetchSavedResponses() {
+  try { return (await getJSON('/api/prompts/responses')).responses || []; } catch { return []; }
+}
+export const saveSavedResponses = (responses) => saveJSON('/api/prompts/responses', { responses });
+
 // --- Auth ------------------------------------------------------------------
 export async function authStatus() {
   try {

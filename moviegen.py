@@ -1525,3 +1525,54 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         "size_bytes": size, "cuts": len(edl.entries), "seed": seed,
         "preset": preset, "transitions": n_trans, "spoken": len(duck_windows),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Subprocess worker entry
+# --------------------------------------------------------------------------- #
+# server.py runs generate() in a SEPARATE PROCESS (`python moviegen.py render`),
+# not a thread, so the OS reclaims this job's whole memory footprint — the librosa
+# arrays plus the numba JIT state (~2.5GB) — the instant the process exits. A render
+# living in the long-lived server process could never give that memory back, because
+# CPython/glibc keep freed heap arenas mapped. The job spec arrives as one JSON
+# object on stdin; progress plus the final result/error leave as newline-delimited
+# JSON on stdout for the parent to mirror into its job state. stderr carries
+# librosa/numba chatter and any traceback, which the parent captures for diagnostics.
+
+def _worker_main() -> int:
+    import sys
+
+    spec = json.loads(sys.stdin.read())
+
+    def emit(obj: dict) -> None:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    def progress(status, overall, stage_progress=0.0, detail="") -> None:
+        emit({"t": "progress", "status": status, "overall": overall,
+              "stage_progress": stage_progress, "detail": detail})
+
+    try:
+        result = generate(
+            video_paths=[Path(p) for p in spec["video_paths"]],
+            song_path=Path(spec["song_path"]),
+            options=spec["options"],
+            work_dir=Path(spec["work_dir"]),
+            out_path=Path(spec["out_path"]),
+            video_encode_args=list(spec["video_encode_args"]),
+            hwaccel_decode=bool(spec["hwaccel_decode"]),
+            progress=progress,
+        )
+        emit({"t": "result", "result": result})
+        return 0
+    except Exception as exc:
+        emit({"t": "error", "error": str(exc)[:400]})
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    # The only entry point: `python moviegen.py render` drives one job from a JSON
+    # spec on stdin. Anything else is a misuse (this module is otherwise a library).
+    raise SystemExit(_worker_main() if sys.argv[1:2] == ["render"] else 2)

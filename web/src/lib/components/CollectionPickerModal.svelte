@@ -10,7 +10,7 @@
   let { ids = [], onclose = () => {} } = $props();
   let q = $state('');
   let name = $state('');
-  let archiveAfter = $state(false);
+  let archiveAfter = $state(true);
 
   const selected = $derived((ids || []).map(String).filter(Boolean));
   const shown = $derived(($collections || []).filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));

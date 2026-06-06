@@ -45,6 +45,7 @@ from flask import (
 
 import db
 import moviegen
+import promptstudio
 from mediautil import media_shard
 # Aliased: the `/thumbnails/...` route function below is also named `thumbnails`
 # and would otherwise shadow this module at module scope.
@@ -64,9 +65,15 @@ METADATA_FILE = DATA_DIR / "metadata.json"
 DELETED_FILE = DATA_DIR / "deleted_ids.json"  # blocklist: ids the downloader must never re-pull
 PLAYLISTS_FILE = DATA_DIR / "playlists.json"
 COLLECTIONS_FILE = DATA_DIR / "collections.json"
+SCENES_FILE = DATA_DIR / "scenes.json"  # saved Prompt Studio Scene Builder scenes
+RESPONSES_FILE = DATA_DIR / "saved_responses.json"  # Prompt Studio responses the user starred
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
+# Prompt Studio embeddings — a DURABLE store, separate from index.db (which is a
+# disposable read-model rebuilt from metadata.json). Keyed by prompt-text hash so a
+# reindex never discards the embedding work and only new prompts get embedded.
+PROMPT_DB_FILE = DATA_DIR / "prompt_studio.db"
 MOVIE_DIR = DATA_DIR / "movie_tmp"  # working dir + last "Generate Movie" output
 # Built SvelteKit SPA (produced by `web/` -> adapter-static), served at "/".
 SPA_DIR = Path(os.environ.get("SPA_DIR", ROOT / "web" / "build")).resolve()
@@ -95,6 +102,15 @@ ADMIN_PASSWORD_GENERATED = False
 # HTTPS detection for secure cookies). Only enable when actually behind a proxy.
 TRUST_PROXY = _envbool("TRUST_PROXY")
 WHISPER_ENV = os.environ.get("WHISPER_SERVER_URL", "").strip()
+# Prompt Studio AI engine — optional, self-hosted, gated exactly like Whisper. Point
+# these at an Ollama / OpenAI-compatible server (its /v1 base). Feature degrades to the
+# Phase-0 offline composer when unset. Env vars win over the saved settings.
+EMBED_ENV = os.environ.get("EMBED_SERVER_URL", "").strip()
+EMBED_MODEL_ENV = os.environ.get("EMBED_MODEL", "").strip()
+LLM_ENV = os.environ.get("LLM_SERVER_URL", "").strip()
+LLM_MODEL_ENV = os.environ.get("LLM_MODEL", "").strip()
+EMBED_MODEL_DEFAULT = "nomic-embed-text"
+LLM_MODEL_DEFAULT = "dolphin3"
 
 
 def _auth_mode() -> str:
@@ -286,6 +302,24 @@ def _whisper_url() -> str:
 
 def _burn_enabled() -> bool:
     return bool(_load_settings().get("burn_subtitles"))
+
+
+def _embed_url() -> str:
+    """Effective embeddings endpoint (OpenAI-compatible base, e.g. .../v1). Env wins."""
+    return EMBED_ENV or str(_load_settings().get("embed_server_url", "")).strip()
+
+
+def _embed_model() -> str:
+    return EMBED_MODEL_ENV or str(_load_settings().get("embed_model", "")).strip() or EMBED_MODEL_DEFAULT
+
+
+def _llm_url() -> str:
+    """Effective chat endpoint (OpenAI-compatible base, e.g. .../v1). Env wins."""
+    return LLM_ENV or str(_load_settings().get("llm_server_url", "")).strip()
+
+
+def _llm_model() -> str:
+    return LLM_MODEL_ENV or str(_load_settings().get("llm_model", "")).strip() or LLM_MODEL_DEFAULT
 
 
 # --------------------------------------------------------------------------- #
@@ -589,6 +623,14 @@ def api_settings_get() -> Response:
         whisper_configured=bool(_whisper_url()),
         whisper_env_locked=bool(WHISPER_ENV),
         burn_subtitles=bool(settings.get("burn_subtitles")),
+        embed_server_url=_embed_url(),
+        embed_model=_embed_model(),
+        embed_configured=bool(_embed_url()),
+        embed_env_locked=bool(EMBED_ENV),
+        llm_server_url=_llm_url(),
+        llm_model=_llm_model(),
+        llm_configured=bool(_llm_url()),
+        llm_env_locked=bool(LLM_ENV),
     )
 
 
@@ -606,11 +648,22 @@ def api_settings_post() -> Response:
         settings["whisper_server_url"] = str(payload.get("whisper_server_url") or "").strip()[:500]
     if "burn_subtitles" in payload:
         settings["burn_subtitles"] = bool(payload.get("burn_subtitles"))
+    # Prompt Studio endpoints — only writable when not pinned by an env var.
+    if not EMBED_ENV and "embed_server_url" in payload:
+        settings["embed_server_url"] = str(payload.get("embed_server_url") or "").strip()[:500]
+    if not EMBED_MODEL_ENV and "embed_model" in payload:
+        settings["embed_model"] = str(payload.get("embed_model") or "").strip()[:120]
+    if not LLM_ENV and "llm_server_url" in payload:
+        settings["llm_server_url"] = str(payload.get("llm_server_url") or "").strip()[:500]
+    if not LLM_MODEL_ENV and "llm_model" in payload:
+        settings["llm_model"] = str(payload.get("llm_model") or "").strip()[:120]
     _save_settings(settings)
     return jsonify(
         ok=True,
         whisper_configured=bool(_whisper_url()),
         burn_subtitles=bool(settings.get("burn_subtitles")),
+        embed_configured=bool(_embed_url()),
+        llm_configured=bool(_llm_url()),
     )
 
 
@@ -1208,26 +1261,86 @@ def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, de
         _movie["detail"] = detail
 
 
+# Absolute path to this repo's moviegen.py. The render runs as `python moviegen.py
+# render` in a CHILD PROCESS (see moviegen._worker_main), not a thread, so the OS
+# reclaims the job's full memory footprint (librosa arrays + numba JIT, ~2.5GB) the
+# instant it exits — a long-lived server thread could never hand that back.
+_MOVIEGEN_PY = str(Path(moviegen.__file__).resolve())
+
+
 def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict) -> None:
+    """Drive one montage render in a separate process and mirror its streamed
+    progress into the shared job state. The child reads a JSON spec on stdin and
+    emits newline-delimited JSON (progress / result / error) on stdout; its stderr
+    is captured to a log so an OOM/segfault before any message still yields a reason."""
+    out_path = MOVIE_DIR / f"movie_{job_id}.mp4"
+    spec = {
+        "video_paths": [str(p) for p in paths],
+        "song_path": str(song_path),
+        "options": options,
+        "work_dir": str(MOVIE_DIR),
+        "out_path": str(out_path),
+        "video_encode_args": _video_encode_args(CRF),
+        "hwaccel_decode": _use_nvenc(),
+    }
+    stderr_log = MOVIE_DIR / "worker_stderr.log"
+    result = None
+    error = None
+    returncode = None
     try:
-        out_path = MOVIE_DIR / f"movie_{job_id}.mp4"
-        result = moviegen.generate(
-            video_paths=paths,
-            song_path=song_path,
-            options=options,
-            work_dir=MOVIE_DIR,
-            out_path=out_path,
-            video_encode_args=_video_encode_args(CRF),
-            hwaccel_decode=_use_nvenc(),
-            progress=_movie_progress,
-        )
-        with _movie_lock:
-            _movie["result"] = {
-                "path": str(out_path),
-                "filename": f"{options.get('name') or 'movie'}.mp4",
-                **result,
-            }
-        _movie_progress("done", 1.0, 1.0, "Done")
+        with open(stderr_log, "wb") as errf:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", _MOVIEGEN_PY, "render"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf,
+                text=True, bufsize=1,
+            )
+            proc.stdin.write(json.dumps(spec))
+            proc.stdin.close()
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue  # ignore any non-JSON noise on stdout
+                kind = msg.get("t")
+                if kind == "progress":
+                    _movie_progress(msg.get("status", ""), msg.get("overall", 0.0),
+                                    msg.get("stage_progress", 0.0), msg.get("detail", ""))
+                elif kind == "result":
+                    result = msg.get("result")
+                elif kind == "error":
+                    error = msg.get("error")
+            returncode = proc.wait()
+
+        if result is not None:
+            with _movie_lock:
+                _movie["result"] = {
+                    "path": str(out_path),
+                    "filename": f"{options.get('name') or 'movie'}.mp4",
+                    **result,
+                }
+            _movie_progress("done", 1.0, 1.0, "Done")
+        else:
+            # No result line: the child raised (error set) or was killed before it
+            # could report (OOM/segfault). Prefer its own message, then the kill
+            # signal, then the tail of its stderr.
+            if error is None:
+                if returncode is not None and returncode < 0:
+                    sig = -returncode
+                    hint = " — likely out of memory" if sig == 9 else ""
+                    error = f"montage worker killed by signal {sig}{hint}"
+                else:
+                    try:
+                        tail = stderr_log.read_text(encoding="utf-8", errors="replace")[-400:].strip()
+                    except OSError:
+                        tail = ""
+                    error = tail or f"montage worker exited with code {returncode}"
+            with _movie_lock:
+                _movie["status"] = "error"
+                _movie["error"] = str(error)[:400]
+                _movie["detail"] = "Generation failed"
     except Exception as exc:  # pragma: no cover - defensive
         with _movie_lock:
             _movie["status"] = "error"
@@ -1635,6 +1748,398 @@ def api_media_by_ids() -> Response:
     if not isinstance(ids, list):
         return jsonify(items=[])
     return jsonify(items=db.media_by_ids(DB_FILE, ids))
+
+
+# --------------------------------------------------------------------------- #
+# Prompt Studio (Phase 0: corpus vocabulary mining + structured composer).
+# Pure, offline — no model calls. Embeddings / LLM arrive in later phases behind
+# their own optional endpoints, gated like WHISPER_SERVER_URL.
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/prompts/vocabulary")
+def api_prompts_vocabulary() -> Response:
+    """Composer chip palettes + a browsable prompt list, mined from metadata.json.
+    Cheap enough (~hundreds of prompts) to recompute per request."""
+    prompts = [str(it.get("prompt") or "") for it in _metadata_index().values()]
+    return jsonify(promptstudio.mine_vocabulary(prompts))
+
+
+@app.post("/api/prompts/parse")
+def api_prompts_parse() -> Response:
+    """Split a prompt into the eight authoring slots (powers 'Remix'). With ``llm: true``
+    and an LLM endpoint configured, uses the model for a cleaner split (it can break up a
+    run-on clause that the regex parser can't), falling back to the heuristic on any error."""
+    payload = request.get_json(silent=True) or {}
+    text = str(payload.get("text") or "")
+    if payload.get("llm") and _llm_url() and text.strip():
+        try:
+            comps = promptstudio.decompose(_llm_url(), _llm_model(), text)
+            if any(comps.values()):
+                return jsonify(components=comps, via="llm")
+        except Exception:
+            pass  # fall through to the heuristic parser
+    return jsonify(components=promptstudio.parse_components(text), via="heuristic")
+
+
+@app.post("/api/prompts/compose")
+def api_prompts_compose() -> Response:
+    """Assemble the two Grok-Imagine prompts from slot values: the detailed ``image`` (base
+    frame) prompt and the short ``motion`` (animate) prompt. Powers the live preview."""
+    components = (request.get_json(silent=True) or {}).get("components")
+    if not isinstance(components, dict):
+        components = {}
+    return jsonify(
+        image=promptstudio.compose_image(components),
+        motion=promptstudio.compose_motion(components),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Prompt Studio Phase 1: local embeddings — semantic "more like this" + auto
+# theme clusters. Vectors live in the durable PROMPT_DB_FILE; the build runs in a
+# background thread (its own job slot) and only embeds prompts not already stored.
+# --------------------------------------------------------------------------- #
+
+_embed_lock = threading.Lock()
+_embed = {"running": False, "done": 0, "total": 0, "error": None}
+
+
+def _corpus_prompts() -> list[str]:
+    return [str(it.get("prompt") or "") for it in _metadata_index().values()]
+
+
+def _prompt_media_ids() -> dict:
+    """Map prompt_hash -> representative media ids, so a neighbor/cluster prompt
+    resolves to something with a thumbnail. First id per prompt wins."""
+    out: dict = {}
+    for item in _metadata_index().values():
+        p = str(item.get("prompt") or "")
+        if not p.strip():
+            continue
+        out.setdefault(promptstudio.prompt_hash(p), []).append(str(item.get("id")))
+    return out
+
+
+def _embed_worker() -> None:
+    base, model = _embed_url(), _embed_model()
+
+    def progress(done: int, total: int) -> None:
+        with _embed_lock:
+            _embed["done"], _embed["total"] = done, total
+
+    try:
+        promptstudio.build_embeddings(PROMPT_DB_FILE, _corpus_prompts(), base, model, progress=progress)
+        err = None
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+        err = str(exc)[:300]
+    with _embed_lock:
+        _embed["running"] = False
+        _embed["error"] = err
+
+
+@app.post("/api/prompts/embed")
+def api_prompts_embed() -> Response:
+    """Kick (or no-op if already running) the incremental embedding build."""
+    if not _embed_url():
+        return jsonify(ok=False, error="No embeddings endpoint configured."), 400
+    with _embed_lock:
+        if _embed["running"]:
+            return jsonify(ok=True, running=True)
+        _embed.update(running=True, done=0, total=0, error=None)
+    threading.Thread(target=_embed_worker, daemon=True).start()
+    return jsonify(ok=True, running=True)
+
+
+@app.get("/api/prompts/status")
+def api_prompts_status() -> Response:
+    """Embedding coverage + build job state — drives the Studio's build button."""
+    model = _embed_model()
+    try:
+        st = promptstudio.embed_status(PROMPT_DB_FILE, _corpus_prompts(), model)
+    except Exception:
+        st = {"total_unique": 0, "embedded": 0, "missing": 0, "model": model}
+    with _embed_lock:
+        job = dict(_embed)
+    return jsonify(
+        embed_configured=bool(_embed_url()),
+        llm_configured=bool(_llm_url()),
+        running=job["running"], done=job["done"], total=job["total"], error=job["error"],
+        **st,
+    )
+
+
+@app.get("/api/prompts/similar")
+def api_prompts_similar() -> Response:
+    """Prompts most semantically similar to ?text= or to the prompt of ?id=, returned
+    as representative media records (one per neighbouring prompt) for the grid."""
+    base, model = _embed_url(), _embed_model()
+    if not base:
+        return jsonify(ok=False, error="No embeddings endpoint configured.", results=[]), 400
+    if not DB_FILE.exists():
+        rebuild_db()
+    text = request.args.get("text") or ""
+    exclude = None
+    if not text and request.args.get("id"):
+        item = _metadata_index().get(str(request.args.get("id")))
+        if item:
+            text = str(item.get("prompt") or "")
+            exclude = promptstudio.prompt_hash(text)
+    if not text.strip():
+        return jsonify(ok=True, query="", results=[])
+    try:
+        qvec = promptstudio.embed_query(base, model, text)
+        hashes, texts, matrix = promptstudio.load_vectors(PROMPT_DB_FILE, model)
+        neighbors = promptstudio.nearest(qvec, hashes, texts, matrix,
+                                         k=_int_arg("k", 24), exclude_hash=exclude)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], results=[]), 502
+    pmap = _prompt_media_ids()
+    pairs = [(nb, (pmap.get(nb["prompt_hash"]) or [None])[0]) for nb in neighbors]
+    pairs = [(nb, mid) for nb, mid in pairs if mid]
+    records = {str(r["id"]): r for r in db.media_by_ids(DB_FILE, [mid for _, mid in pairs])}
+    results = []
+    for nb, mid in pairs:
+        rec = records.get(str(mid))
+        if rec:
+            results.append({**rec, "_score": nb["score"]})
+    return jsonify(ok=True, query=text[:300], results=results)
+
+
+@app.get("/api/prompts/themes")
+def api_prompts_themes() -> Response:
+    """Auto-discovered theme/persona clusters of the prompt corpus (k-means over the
+    embeddings), each with a distinctive label and a cover thumbnail."""
+    base, model = _embed_url(), _embed_model()
+    if not base:
+        return jsonify(ok=False, error="No embeddings endpoint configured.", themes=[]), 400
+    if not DB_FILE.exists():
+        rebuild_db()
+    k_arg = request.args.get("k")
+    k = int(k_arg) if (k_arg and k_arg.isdigit()) else None
+    try:
+        hashes, texts, matrix = promptstudio.load_vectors(PROMPT_DB_FILE, model)
+        clusters = promptstudio.cluster_prompts(hashes, texts, matrix, k=k)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], themes=[]), 502
+    pmap = _prompt_media_ids()
+    for c in clusters:
+        c["_cover_id"] = (pmap.get(c["rep_hash"]) or [None])[0]
+    cover_ids = [c["_cover_id"] for c in clusters if c["_cover_id"]]
+    records = {str(r["id"]): r for r in db.media_by_ids(DB_FILE, cover_ids)}
+    themes = []
+    for c in clusters:
+        rec = records.get(str(c["_cover_id"])) if c["_cover_id"] else None
+        themes.append({
+            "label": c["label"],
+            "tags": c["tags"],
+            "size": c["size"],
+            "rep_prompt": c["rep_prompt"][:400],
+            "rep_id": c["_cover_id"],
+            "cover": (rec or {}).get("thumb"),
+            "media_type": (rec or {}).get("media_type"),
+        })
+    total = int(matrix.shape[0]) if getattr(matrix, "shape", None) else 0
+    return jsonify(ok=True, themes=themes, total=total)
+
+
+def _style_examples(k: int = 4) -> list[str]:
+    """A few of the operator's own prompts, used as few-shot style anchors for the LLM.
+    Prefers recent, moderate-length prompts that contain a quoted line, so the model sees real
+    spoken dialogue to imitate (the strongest anti-garble anchor) before falling back to plain."""
+    items = sorted(_metadata_index().values(),
+                   key=lambda it: str(it.get("created_at") or ""), reverse=True)
+    with_dialogue: list[str] = []
+    plain: list[str] = []
+    for it in items:
+        p = str(it.get("prompt") or "").strip()
+        if not (60 <= len(p) <= 500):
+            continue
+        (with_dialogue if ('"' in p or "“" in p) else plain).append(p)
+    out = with_dialogue[:k]
+    if len(out) < k:
+        out += plain[: k - len(out)]
+    return out
+
+
+@app.post("/api/prompts/generate")
+def api_prompts_generate() -> Response:
+    """LLM prompt variations / remix / polish (Phase 2). Needs LLM_SERVER_URL."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", variations=[]), 400
+    payload = request.get_json(silent=True) or {}
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify(ok=False, error="No prompt provided.", variations=[]), 400
+    mode = str(payload.get("mode") or "variations")
+    if mode not in ("variations", "remix", "polish"):
+        mode = "variations"
+    try:
+        n = int(payload.get("n", 4))
+    except (TypeError, ValueError):
+        n = 4
+    n = max(1, min(8, n))
+    instruction = str(payload.get("instruction") or "")[:300]
+    persona = str(payload.get("persona") or "")[:4000]
+    try:
+        variations = promptstudio.generate(
+            base, model, prompt=prompt, mode=mode, n=n,
+            instruction=instruction, examples=_style_examples(), persona=persona,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], variations=[]), 502
+    return jsonify(ok=True, variations=variations, model=model)
+
+
+@app.post("/api/prompts/scene")
+def api_prompts_scene() -> Response:
+    """Script a continuous multi-clip scene from a base. Grok chains ~6s/10s clips, so the
+    target length is divided by the chosen increment to size the beat count."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", beats=[]), 400
+    payload = request.get_json(silent=True) or {}
+    base_prompt = str(payload.get("base") or "").strip()
+    if not base_prompt:
+        return jsonify(ok=False, error="No base scene provided.", beats=[]), 400
+    try:
+        length = int(payload.get("length_seconds", 60))
+    except (TypeError, ValueError):
+        length = 60
+    length = max(6, min(600, length))
+    increment = 10 if int(payload.get("increment", 10) or 10) == 10 else 6
+    beats = max(1, min(24, -(-length // increment)))  # ceil(length / increment), capped
+    instruction = str(payload.get("instruction") or "")[:300]
+    persona = str(payload.get("persona") or "")[:4000]
+    anchor = str(payload.get("anchor") or "")[:200]
+    detail = "detailed" if str(payload.get("detail") or "").lower() == "detailed" else "concise"
+    arc = bool(payload.get("arc"))
+    try:
+        out = promptstudio.generate_scene(
+            base, model, base_prompt=base_prompt, beats=beats,
+            increment=increment, instruction=instruction, examples=_style_examples(), persona=persona,
+            anchor=anchor, detail=detail, arc=arc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], beats=[]), 502
+    return jsonify(ok=True, beats=out, clips=beats, increment=increment, length_seconds=length, model=model)
+
+
+@app.get("/api/prompts/scenes")
+def api_prompts_scenes_get() -> Response:
+    """Saved Scene Builder scenes ([] if none/unreadable). Stored on the data volume so they
+    persist across container recreation and are shared by every device."""
+    data: list = []
+    if SCENES_FILE.exists():
+        try:
+            loaded = json.loads(SCENES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    return jsonify(scenes=data)
+
+
+@app.post("/api/prompts/scenes")
+def api_prompts_scenes_post() -> Response:
+    """Replace the whole saved-scenes list (the client owns it and sends it in full). Validate,
+    normalise, atomic write."""
+    incoming = (request.get_json(silent=True) or {}).get("scenes")
+    if not isinstance(incoming, list):
+        return jsonify(ok=False, error="Expected a 'scenes' array."), 400
+    clean = []
+    for entry in incoming[:200]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()[:120]
+        beats = entry.get("beats")
+        if not name or not isinstance(beats, list):
+            continue
+        try:
+            length = int(entry.get("length_seconds") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        clean.append({
+            "id": str(entry.get("id") or "")[:64] or name,
+            "name": name,
+            "base": str(entry.get("base", ""))[:4000],
+            "instruction": str(entry.get("instruction", ""))[:300],
+            "anchor": str(entry.get("anchor", ""))[:200],
+            "detail": "detailed" if str(entry.get("detail", "")).lower() == "detailed" else "concise",
+            "arc": bool(entry.get("arc")),
+            "length_seconds": length,
+            "increment": 6 if int(entry.get("increment") or 10) == 6 else 10,
+            "beats": [str(b)[:1000] for b in beats][:64],
+            "created_at": str(entry.get("created_at", ""))[:32],
+        })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = SCENES_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(SCENES_FILE)
+    return jsonify(ok=True, count=len(clean))
+
+
+@app.post("/api/prompts/freeform")
+def api_prompts_freeform() -> Response:
+    """Direct, unconstrained generation in the active persona's voice — no beat/JSON scaffolding."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", items=[]), 400
+    payload = request.get_json(silent=True) or {}
+    instruction = str(payload.get("instruction") or "").strip()[:1000]
+    if not instruction:
+        return jsonify(ok=False, error="No instruction provided.", items=[]), 400
+    persona = str(payload.get("persona") or "")[:4000]
+    prefix = str(payload.get("prefix") or "")[:200]
+    try:
+        n = int(payload.get("n", 0))
+    except (TypeError, ValueError):
+        n = 0
+    n = max(0, min(30, n))
+    try:
+        items = promptstudio.generate_freeform(base, model, instruction=instruction, persona=persona, n=n, prefix=prefix)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], items=[]), 502
+    return jsonify(ok=True, items=items, model=model)
+
+
+@app.get("/api/prompts/responses")
+def api_prompts_responses_get() -> Response:
+    """Saved Prompt Studio responses ([] if none/unreadable). On the data volume, shared across devices."""
+    data: list = []
+    if RESPONSES_FILE.exists():
+        try:
+            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    return jsonify(responses=data)
+
+
+@app.post("/api/prompts/responses")
+def api_prompts_responses_post() -> Response:
+    """Replace the whole saved-responses list (client owns it). Validate, normalise, atomic write."""
+    incoming = (request.get_json(silent=True) or {}).get("responses")
+    if not isinstance(incoming, list):
+        return jsonify(ok=False, error="Expected a 'responses' array."), 400
+    clean = []
+    for entry in incoming[:2000]:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text", "")).strip()[:2000]
+        if not text:
+            continue
+        clean.append({
+            "id": str(entry.get("id") or "")[:64] or str(len(clean)),
+            "text": text,
+            "created_at": str(entry.get("created_at", ""))[:32],
+        })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = RESPONSES_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(RESPONSES_FILE)
+    return jsonify(ok=True, count=len(clean))
 
 
 @app.get("/api/library")

@@ -16,4 +16,10 @@ services:
       - PORT=8080
       # - BASIC_AUTH_USER=admin
       # - BASIC_AUTH_PASS=change-me
+      # Optional: Prompt Studio AI engine (Ollama / OpenAI-compatible /v1 base).
+      # Enables semantic prompt search, auto theme clusters, and AI prompt variations.
+      # - EMBED_SERVER_URL=http://192.168.1.10:11434/v1
+      # - EMBED_MODEL=nomic-embed-text
+      # - LLM_SERVER_URL=http://192.168.1.10:11434/v1
+      # - LLM_MODEL=dolphin3
     restart: unless-stopped

@@ -30,10 +30,11 @@
     <div class="mb-5">
       <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Resolution</div>
       <div class="flex flex-wrap gap-1.5">
-        {#each facets.resolutions as r (r.height)}
+        {#each facets.resolutions as r (`${r.height}-${r.orientation}`)}
+          {@const key = `${r.height}-${r.orientation}`}
           <button type="button"
-            class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {$filters.resolutions.includes(r.height) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-            onclick={() => toggleResolution(r.height)}>{r.height}p <span class="opacity-70">{r.count}</span></button>
+            class="rounded-full border px-2.5 py-1 text-xs font-semibold capitalize transition {$filters.resolutions.includes(key) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+            onclick={() => toggleResolution(key)}>{r.height}p {r.orientation} <span class="opacity-70">{r.count}</span></button>
         {/each}
       </div>
     </div>

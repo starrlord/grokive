@@ -27,4 +27,11 @@ services:
       # - TRUST_PROXY=true
       # Optional: whisper-asr-webservice endpoint to enable subtitle generation:
       # - WHISPER_SERVER_URL=http://192.168.1.10:9000/asr
+      # Optional: Prompt Studio AI engine — point at an Ollama / OpenAI-compatible
+      # server's /v1 base. Enables semantic prompt search, auto theme clusters, and AI
+      # prompt variations. Unset = the offline composer still works.
+      # - EMBED_SERVER_URL=http://192.168.1.10:11434/v1   # embeddings (more-like-this + themes)
+      # - EMBED_MODEL=nomic-embed-text
+      # - LLM_SERVER_URL=http://192.168.1.10:11434/v1     # chat (prompt variations / remix)
+      # - LLM_MODEL=dolphin3
     restart: unless-stopped

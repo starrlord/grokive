@@ -1,6 +1,6 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, setSelectMode } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -8,7 +8,6 @@
     targetHeight = 240,
     gap = 10,
     selectMode = false,
-    selection = new Set(),
     onopen = () => {},
     ontoggleselect = () => {}
   } = $props();
@@ -17,20 +16,65 @@
   const rows = $derived(width ? justify(items, width, targetHeight, gap) : []);
   let confirming = $state(null); // item pending delete confirmation
 
-  // Drag-to-paint selection (mouse only). Press the left button on a card and drag
-  // across others to select (or deselect) the whole run. The first card sets the
-  // direction: pressing an unselected card paints "select", a selected one "deselect".
-  // Touch/pen fall through to the click handler (tap = toggle) so scrolling still works.
+  // Selection has three gestures, all funnelling through the same id-keyed store:
+  //   • Mouse: press + drag to paint a run (the first card sets select vs. deselect);
+  //     Shift-click extends a range from the last-touched card.
+  //   • Touch/pen: tap toggles one card; long-press extends a range from the anchor
+  //     (so phones get bulk selection without a drag, which would fight scrolling).
+  // `anchorId` is the last card the user singled out — the pivot for both ranges.
   let painting = false;
   let paintOn = false;            // true = selecting, false = deselecting
-  let clickSuppressedFor = null;  // id whose synthetic click must be ignored (already painted)
+  let clickSuppressedFor = null;  // id whose synthetic click must be ignored (already handled)
+  let anchorId = null;            // range pivot (last tapped/painted card)
+
+  // Mouse drag past the viewport edge auto-scrolls and keeps painting (below).
+  let lastPointer = { x: 0, y: 0 };
+  let autoScrollRAF = null;
+  // Touch long-press arming.
+  let pressId = null, pressX = 0, pressY = 0, longPressTimer = null;
+
+  function selectRange(fromId, toId) {
+    const a = items.findIndex((x) => x.id === fromId);
+    const b = items.findIndex((x) => x.id === toId);
+    if (a < 0 || b < 0) return;
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    // One batched store update (not per-item) so a big range is O(n), not O(n²).
+    addSelection(items.slice(lo, hi + 1).map((x) => x.id));
+  }
+
   function paintDown(e, it) {
-    if (!selectMode || e.pointerType !== 'mouse' || e.button !== 0) return;
-    paintOn = !selection.has(it.id);
-    setSelection(it.id, paintOn);
-    painting = true;
-    clickSuppressedFor = it.id;
-    e.preventDefault();           // suppress native image-drag and text selection
+    if (!selectMode) return;
+    clickSuppressedFor = null;    // clear any stale flag from a press that ended elsewhere
+    if (e.pointerType === 'mouse') {
+      if (e.button !== 0) return;
+      if (e.shiftKey && anchorId != null) {       // range-extend, no paint
+        selectRange(anchorId, it.id);
+        clickSuppressedFor = it.id;
+        e.preventDefault();
+        return;
+      }
+      paintOn = !selectionMembers.has(it.id);
+      setSelection(it.id, paintOn);
+      anchorId = it.id;
+      painting = true;
+      lastPointer = { x: e.clientX, y: e.clientY };
+      clickSuppressedFor = it.id;
+      e.preventDefault();         // suppress native image-drag and text selection
+    } else {
+      // Touch/pen: DON'T preventDefault — a vertical drag must still scroll. Arm a
+      // long-press; a quick tap falls through to cellClick (toggle).
+      pressId = it.id;
+      pressX = e.clientX;
+      pressY = e.clientY;
+      clearTimeout(longPressTimer);
+      longPressTimer = setTimeout(() => {
+        longPressTimer = null;
+        if (anchorId != null && anchorId !== it.id) selectRange(anchorId, it.id);
+        else { setSelection(it.id, true); anchorId = it.id; }
+        clickSuppressedFor = it.id;   // the click that follows must not toggle it back
+        navigator.vibrate?.(15);
+      }, 450);
+    }
   }
   function paintEnter(it) {
     if (selectMode && painting) setSelection(it.id, paintOn);
@@ -39,23 +83,69 @@
     if (!selectMode) { onopen(it, items); return; }
     const suppressed = clickSuppressedFor === it.id;
     clickSuppressedFor = null;
-    if (suppressed) return;       // mouse already handled this card on pointerdown
+    if (suppressed) return;       // already handled on pointerdown / long-press
     ontoggleselect(it);           // touch/pen tap or keyboard activation
+    anchorId = it.id;
   }
   // The hover selection circle. Outside select mode it flips into select mode and
   // selects this card; inside it just toggles.
   function selectCircle(it) {
     if (selectMode) {
-      setSelection(it.id, !selection.has(it.id));
+      setSelection(it.id, !selectionMembers.has(it.id));
     } else {
       setSelectMode(true);
       setSelection(it.id, true);
     }
+    anchorId = it.id;
+  }
+
+  // --- Edge auto-scroll while drag-painting (mouse) -------------------------
+  // Drag toward the top/bottom edge and the window scrolls so you can paint a run
+  // longer than the viewport. The pointer is stationary while content moves under
+  // it, so pointerenter won't fire — we hit-test elementFromPoint each frame.
+  const EDGE = 90;     // px hot-zone
+  const MAX_V = 26;    // px/frame at the very edge
+  function edgeVelocity(y) {
+    if (y < EDGE) return -Math.ceil(((EDGE - y) / EDGE) * MAX_V);
+    const dist = window.innerHeight - y;
+    if (dist < EDGE) return Math.ceil(((EDGE - dist) / EDGE) * MAX_V);
+    return 0;
+  }
+  function autoTick() {
+    autoScrollRAF = null;
+    if (!painting) return;
+    const v = edgeVelocity(lastPointer.y);
+    if (v === 0) return;          // left the hot-zone; a pointermove restarts us
+    window.scrollBy(0, v);
+    const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
+    const id = el?.closest?.('[data-id]')?.dataset.id;
+    if (id != null) setSelection(id, paintOn);
+    autoScrollRAF = requestAnimationFrame(autoTick);
+  }
+  function endPaint() {
+    painting = false;
+    if (autoScrollRAF != null) { cancelAnimationFrame(autoScrollRAF); autoScrollRAF = null; }
+  }
+  function onWinPointerMove(e) {
+    if (painting) {
+      lastPointer = { x: e.clientX, y: e.clientY };
+      if (autoScrollRAF == null && edgeVelocity(e.clientY) !== 0) autoScrollRAF = requestAnimationFrame(autoTick);
+      return;
+    }
+    // A moving finger means "scroll", not "long-press select" — disarm.
+    if (longPressTimer != null && (Math.abs(e.clientX - pressX) > 10 || Math.abs(e.clientY - pressY) > 10)) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+  function onWinPointerUp() {
+    endPaint();
+    if (longPressTimer != null) { clearTimeout(longPressTimer); longPressTimer = null; }
   }
 
 </script>
 
-<svelte:window onpointerup={() => (painting = false)} onpointercancel={() => (painting = false)} />
+<svelte:window onpointerup={onWinPointerUp} onpointercancel={onWinPointerUp} onpointermove={onWinPointerMove} />
 
 <div class="w-full" bind:clientWidth={width} style="--g:{gap}px">
   {#each rows as row (row.cells[0]?.item.id)}
@@ -67,15 +157,19 @@
       {#each row.cells as cell (cell.item.id)}
         {@const it = cell.item}
         {@const fav = $favorites.has(it.id)}
-        {@const sel = selection.has(it.id)}
+        {@const sel = selectionMembers.has(it.id)}
         {@const isMontage = it.model === 'Beat Montage'}
-        <!-- The real click target is the Open/select button below. -->
+        <!-- The real click target is the Open/select button below. data-id lets the
+             auto-scroll hit-test (elementFromPoint) map a point back to a card. -->
         <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
+             data-id={it.id}
              class:select-none={selectMode}
              style="width:{cell.w}px; height:{cell.h}px">
           {#if it.thumb}
+            <!-- Hover-zoom is disabled in select mode: dragging across cards would
+                 otherwise fire a 300ms scale animation per card and jank the drag. -->
             <img src={it.thumb} alt="" loading="lazy" decoding="async" draggable="false"
-                 class="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.04]" />
+                 class="absolute inset-0 h-full w-full object-cover {selectMode ? '' : 'transition-transform duration-300 group-hover:scale-[1.04]'}" />
           {:else}
             <div class="grid h-full w-full place-items-center text-xs text-muted">no thumbnail</div>
           {/if}
@@ -118,8 +212,11 @@
                corner don't accidentally enter select mode. -->
           <!-- pointer-coarse:* keeps the circle visible & tappable on touch (no hover),
                so phone users can enter select mode and reach every bulk action. -->
+          <!-- The visible circle stays 28px, but a transparent ::after pad extends the
+               hit target to ~44px (8px out on every side) so taps near the circle select
+               instead of falling through to the full-card Open button beneath it. -->
           <button type="button"
-            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-[var(--media-control-ink)] text-sm transition pointer-coarse:opacity-100 pointer-coarse:pointer-events-auto
+            class="absolute left-2 top-2 z-[4] grid h-7 w-7 place-items-center rounded-full border-2 border-[var(--media-control-ink)] text-sm transition after:absolute after:-inset-2 after:content-[''] pointer-coarse:opacity-100 pointer-coarse:pointer-events-auto
                    {sel ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'bg-[var(--selection-control-bg)] text-[var(--media-control-ink-muted)]'}
                    {selectMode ? '' : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'}"
             aria-label={sel ? 'Deselect' : 'Select'} aria-pressed={sel}
@@ -170,6 +267,12 @@
 
   .card-frame {
     container-type: inline-size;
+  }
+
+  /* In select mode, long-press is the range gesture — stop iOS Safari from popping
+     its image save/callout menu and hijacking it. */
+  .card-frame.select-none {
+    -webkit-touch-callout: none;
   }
 
   .card-meta {

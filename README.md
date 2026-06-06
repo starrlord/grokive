@@ -37,6 +37,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
 - **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with GPU-accelerated rendering and one-click **Add to Collection**.
+- **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional self-hosted LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish** (in your style, with fresh dialogue) — all on your own hardware.
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
@@ -55,7 +56,8 @@ Long jobs stream their progress into an on-page **Log** overlay.
 
 All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
-`playlists.json`, `collections.json`, `settings.json`,
+`playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
+scenes), `prompt_studio.db` (durable prompt embeddings),
 media, thumbnails, subtitle `.srt`/`.vtt` sidecars, and the built gallery) is written
 under one volume: the container's `/data` (set via the `GROK_DATA_DIR` env var), so it
 survives container updates. `index.db` is purely derived from `metadata.json` and
@@ -108,6 +110,10 @@ building on the server needed.
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | _(unset)_ | Legacy HTTP Basic auth (used instead of the login screen when set). |
 | `SESSION_SECRET` | _(derived)_ | Optional override for the session-cookie signing key (otherwise derived from the admin credentials). |
 | `WHISPER_SERVER_URL` | _(unset)_ | Whisper ASR endpoint (e.g. `http://host:9000/asr`). Enables the **Generate Subtitles** button. Overrides the value saved in **Config**. |
+| `EMBED_SERVER_URL` | _(unset)_ | Embeddings endpoint for **Prompt Studio** (Ollama / OpenAI-compatible `/v1` base, e.g. `http://host:11434/v1`). Enables semantic prompt search and theme clusters. Overrides **Config**. |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding model name (only used when `EMBED_SERVER_URL` is set). |
+| `LLM_SERVER_URL` | _(unset)_ | Chat endpoint for **Prompt Studio** AI Variations / Remix / Polish (Ollama / OpenAI-compatible `/v1` base). Overrides **Config**. |
+| `LLM_MODEL` | `dolphin3` | Chat model name (only used when `LLM_SERVER_URL` is set). |
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
@@ -330,6 +336,85 @@ per-shot zoom (push-in / on-beat punch) uses a CPU-only filter, so those shots r
 the CPU while the final encode still uses NVENC when available. Like exports, the job runs server-side before the
 result is ready, so the [reverse-proxy timeout guidance above](#reverse-proxy-timeouts-for-large-exports)
 applies. One montage renders at a time.
+
+## Prompt Studio
+
+A **Studio** tab for building Grok Imagine prompts out of your own archive. It follows how Grok
+actually works — a **two-stage** flow — and the composer works fully offline; an optional
+self-hosted model unlocks the semantic and AI features.
+
+### Two-stage composer
+
+Grok makes a detailed still first (text-to-image), then animates it with a *short* motion prompt
+(image-to-video). The composer mirrors that and emits **two** prompts:
+
+- **① Image** (Subject · Wardrobe · Setting · Lighting) — the detailed base frame. Copy → make the still.
+- **② Motion** (Action · Camera · **Voice/Accent** · Dialogue · Continuity) — short: what moves, what
+  she says, and how. Copy → animate the still. Dialogue is woven in as `she says in a {voice}: "…"`,
+  with accent/delivery presets (Southern drawl, slurred, Midwestern, raspy, breathy, …).
+
+Focus any field to reveal **suggestion chips** mined from the phrases you actually use; both prompts
+update live. **Browse & Remix** your past prompts to load one back, split across the fields.
+
+### Scene Builder
+
+Grok builds longer video by chaining ~6 s/10 s clips (*Extend from Frame*). The **Scene** tab scripts a
+whole continuous scene for one character: pick a **length** (30 s–3 min) and **clip length** (6 s/10 s),
+and it works out how many clips you need and writes that many **beats** — each a short prompt with the
+on-screen action *and* the spoken line, keeping the same character, outfit, and setting and flowing from
+the previous one. Dial it in with **Concise/Detailed** beats, a **Build-an-arc** toggle, and a **Keep in
+every beat** anchor (a constant action guaranteed at the start of every beat, for continuity). Copy them
+in order into *Extend from Frame*. **Save** and name a scene — its base, direction, beats, and settings —
+to reload later, stored under `/data` so it's durable and shared across devices. (Needs an LLM endpoint —
+see below.)
+
+### Freeform
+
+The **Freeform** tab is a direct line to the model in your active persona's voice — no beat or format
+rules, it just answers. Type a request ("give me 10 in-character lines for the scene…"), choose how many,
+and get a numbered list back. An optional **Start each with…** field forces every result to begin with an
+exact phrase you choose (prepended deterministically, not left to the model). (Needs an LLM endpoint.)
+
+### AI features (optional, self-hosted)
+
+These mirror the Whisper pattern: point the app at a local **[Ollama](https://ollama.com/)** (or any
+OpenAI-compatible) server, and nothing leaves your network — the features run on *your* hardware
+against *your* content.
+
+1. Run Ollama with an embedding model and a chat model. `ollama pull nomic-embed-text`
+   for embeddings; for chat, set `LLM_MODEL` to your model. A small 8B (e.g. `dolphin3`) works but
+   writes incoherent dialogue — a **12B Mistral-Nemo creative/RP finetune** (e.g.
+   `hf.co/bartowski/MN-12B-Mag-Mell-R1-GGUF:Q4_K_M`) is far more coherent for in-character lines.
+2. Set `EMBED_SERVER_URL` / `LLM_SERVER_URL` (env vars or **Config**) to the server's `/v1` base
+   (e.g. `http://<host>:11434/v1`).
+3. In **Studio**, click **Build prompt index** once. It embeds your unique prompts (a few seconds),
+   stored durably in `prompt_studio.db`.
+
+With those configured you get:
+
+- **Semantic search (≈)** — find the prompts closest in *meaning* to any prompt, returned as thumbnails.
+- **Themes** — auto-discovered persona/scenario clusters of your corpus, each labelled and with a cover.
+- **Variations / Remix / Polish** (per stage) — generate prompts in your own style: *Variations*
+  (alternate takes, freshly worded with brand-new on-theme dialogue), *Remix* (same subject, a new
+  setting — with an optional "twist" steer), and *Polish* (one enriched version). **Use** loads a
+  result into the composer; **Copy** grabs it. Clicking a past prompt to **Remix** it also uses the
+  model to split run-on prompts cleanly into fields (quoted dialogue is preserved verbatim).
+- **Scene Builder** — the **Scene** tab described above: a continuous multi-clip scene scripted as
+  numbered beats for the *Extend from Frame* workflow, which you can **save and name** to reload later.
+- **Persona cards** — save multiple named character/voice definitions ("Ship's AI", "noir detective", "android narrator", …) and
+  switch the active one with a click. The active card (who they are, tone, vocabulary, rules) is applied
+  to every generation above (Variations / Remix / Polish / Scene Builder), so output speaks in that
+  voice. Saved on your device; describe the *voice*, not the output format. New installs ship with an
+  example "Noir Detective" card and a matching example base scene so the whole loop is self-explanatory —
+  both removable.
+- **Freeform** — the **Freeform** tab: a direct, unconstrained request to the model in the active
+  persona's voice (numbered list), with an optional **Start each with…** exact prefix.
+- **Saved responses** — hit **★ Save** on any result (Scene beats, Freeform items, Variations) to keep
+  it in a server-side library you can search, copy, and reuse from the **Saved** tab on any device.
+
+Embeddings live in `prompt_studio.db` keyed by prompt text, so they survive an index rebuild and
+only new prompts are ever re-embedded. Saved scenes and responses live in `scenes.json` /
+`saved_responses.json` under `/data`.
 
 ## Subtitles (Whisper)
 

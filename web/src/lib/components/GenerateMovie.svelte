@@ -54,7 +54,7 @@
   const job = $derived(owned ? $movieJob : null);
   // The clips this panel renders from. Seeded from the live selection (videoIds) on
   // a fresh open, but captured once a render starts (and restored from the job's
-  // provenance on reconnect) so "Make another" re-renders the same clips even after
+  // provenance on reconnect) so the result's source count stays correct even after
   // the live selection is cleared or the panel was reopened from the chip.
   let sessionIds = $state([]);
   const activeIds = $derived(sessionIds.length ? sessionIds : videoIds);
@@ -87,8 +87,8 @@
     await refreshMovieStatus();
     if (get(movieChip)) {
       owned = true;
-      // Remember the job's source clips so "Make another" works even though the
-      // live selection that started it is long gone.
+      // Remember the job's source clips so the result's source count stays correct
+      // even though the live selection that started it is long gone.
       const ids = get(movieJob).source_ids;
       if (ids?.length) sessionIds = ids;
       if (get(movieJob).running) ensureMoviePolling();
@@ -96,7 +96,7 @@
   });
 
   // Closing never discards the job — the floating chip keeps it reachable until the
-  // result is acknowledged (commit / Make another / dismiss).
+  // result is acknowledged (Add to Collection / dismiss).
   function close() {
     onclose();
   }
@@ -117,7 +117,7 @@
     if (!canGenerate) return;
     starting = true;
     startError = '';
-    // Lock in the clips we're rendering so "Make another" reuses them.
+    // Lock in the clips we're rendering so the result's source count stays correct.
     const ids = [...activeIds];
     sessionIds = ids;
     try {
@@ -161,6 +161,7 @@
       acknowledgeMovie(job?.job_id); // dealt with — clear the floating chip
       await loadCollections(); // surface the new "Beat Montage" collection
       toast('Added to “Beat Montage” collection', { type: 'success' });
+      close(); // the montage is filed away — dismiss the preview
     } catch (e) {
       toast(e.message || 'Could not add to collection.', { type: 'error' });
     } finally {
@@ -168,12 +169,6 @@
     }
   }
 
-  function reset() {
-    acknowledgeMovie(job?.job_id); // discard this result; clear the chip
-    owned = false;
-    committed = false;
-    committing = false;
-  }
   function onkey(e) {
     // Closing mid-render is fine — generation continues server-side and reopening
     // the panel reconnects to the live job (see onMount), so don't trap the user.
@@ -230,7 +225,6 @@
               disabled={committing || committed} onclick={addToCollection}>
               {#if committed}✓ In “Beat Montage”{:else if committing}Adding…{:else}+ Add to Collection{/if}
             </button>
-            <button type="button" class="rounded-lg border border-line px-4 py-2.5 font-semibold" onclick={reset}>Make another</button>
           </div>
         </div>
       {:else if running}

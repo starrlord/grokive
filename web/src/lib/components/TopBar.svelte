@@ -24,7 +24,8 @@
     { id: 'collections', label: 'Collections' },
     { id: 'favorites', label: 'Favorites' },
     { id: 'archive', label: 'Archive' },
-    { id: 'canvases', label: 'Canvases' }
+    { id: 'canvases', label: 'Canvases' },
+    { id: 'studio', label: 'Studio' }
   ];
 
   let q = $state($filters.query);

@@ -331,11 +331,26 @@ def query_media(
         if canvas:
             where.append("m.canvas_id = ?")
             params.append(canvas)
-        res_list = [int(r) for r in resolutions if str(r).strip().lstrip("-").isdigit()]
-        if res_list:
-            # Match on the shorter side (portrait-safe), same value the badge shows.
-            where.append(f"MIN(m.media_w, m.media_h) IN ({','.join('?' for _ in res_list)})")
-            params.extend(res_list)
+        # Resolution buckets are "<shorter-side>-<orientation>", e.g. "720-landscape".
+        orient_sql = {
+            "landscape": "m.media_w > m.media_h",
+            "portrait": "m.media_w < m.media_h",
+            "square": "m.media_w = m.media_h",
+        }
+        res_buckets = []
+        for r in resolutions:
+            h_str, sep, orient = str(r).strip().lower().rpartition("-")
+            if sep and h_str.isdigit() and orient in orient_sql:
+                res_buckets.append((int(h_str), orient))
+        if res_buckets:
+            # Match the shorter side AND orientation so each tier splits into its own
+            # landscape / portrait / square bucket.
+            clause = " OR ".join(
+                f"(MIN(m.media_w, m.media_h) = ? AND {orient_sql[o]})" for _, o in res_buckets
+            )
+            where.append(f"({clause})")
+            for h, _ in res_buckets:
+                params.append(h)
         if media_type in ("image", "video"):
             where.append("m.media_type = ?")
             params.append(media_type)
@@ -513,10 +528,13 @@ def facets(
         res_where = (where_sql + " AND" if where_sql else " WHERE") + \
             " m.media_w IS NOT NULL AND m.media_h IS NOT NULL"
         resolutions = [
-            {"height": r["h"], "count": r["n"]}
+            {"height": r["h"], "orientation": r["orient"], "count": r["n"]}
             for r in conn.execute(
-                f"SELECT MIN(m.media_w, m.media_h) AS h, COUNT(*) n FROM media m{joins}{res_where} "
-                f"GROUP BY h ORDER BY h DESC",
+                f"SELECT MIN(m.media_w, m.media_h) AS h, "
+                f"CASE WHEN m.media_w > m.media_h THEN 'landscape' "
+                f"WHEN m.media_w < m.media_h THEN 'portrait' ELSE 'square' END AS orient, "
+                f"COUNT(*) n FROM media m{joins}{res_where} "
+                f"GROUP BY h, orient ORDER BY h DESC, orient",
                 params,
             )
         ]

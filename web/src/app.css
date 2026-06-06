@@ -512,6 +512,15 @@ html, body { margin: 0; height: 100%; max-width: 100%; }
    keeps the sticky top bar working — it doesn't turn the page into a scroll
    container the way `overflow: hidden` would. */
 html, body { overflow-x: clip; }
+/* iOS Safari auto-zooms the page when you focus a form control whose font is
+   smaller than 16px. That's a *visual* zoom-pan, so the overflow-x guard above
+   can't undo it — the viewport ends up magnified and freely scrollable
+   ("unbound"), which is what searching on iPhone triggers (the search box and
+   selects are 14px / text-sm). Floor interactive controls at 16px on touch to
+   suppress it. Unlayered, so it beats Tailwind's layered text-sm utility. */
+@media (pointer: coarse) {
+  input, select, textarea { font-size: 16px; }
+}
 body {
   background: var(--bg);
   color: var(--ink);

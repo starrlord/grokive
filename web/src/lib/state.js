@@ -1,8 +1,10 @@
 import { writable, derived, get } from 'svelte/store';
+import { SvelteSet } from 'svelte/reactivity';
 import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
-  getSettings, deleteMedia, movieStatus, dismissMovie
+  getSettings, deleteMedia, movieStatus, dismissMovie,
+  fetchSavedResponses, saveSavedResponses
 } from './api.js';
 import { toast } from './toast.js';
 
@@ -59,7 +61,7 @@ export const filters = writable({
   query: '',
   tags: [],
   models: [],
-  resolutions: [], // selected shorter-side heights, e.g. [720, 1080]
+  resolutions: [], // selected "<shorter-side>-<orientation>" buckets, e.g. ['720-landscape', '720-portrait']
   canvas: null,
   mediaType: 'all',
   period: 'all', // all | hour1 | hour4 | hour8 | today | yesterday | last7 | last14 | last30 | month | year
@@ -94,12 +96,12 @@ export function toggleModel(model) {
     models: f.models.includes(model) ? f.models.filter((m) => m !== model) : [...f.models, model]
   }));
 }
-export function toggleResolution(height) {
+export function toggleResolution(key) {
   filters.update((f) => ({
     ...f,
-    resolutions: f.resolutions.includes(height)
-      ? f.resolutions.filter((h) => h !== height)
-      : [...f.resolutions, height]
+    resolutions: f.resolutions.includes(key)
+      ? f.resolutions.filter((k) => k !== key)
+      : [...f.resolutions, key]
   }));
 }
 export function setMediaType(mediaType) {
@@ -293,6 +295,19 @@ export function clearSelection() {
   selection.set([]);
 }
 
+// Fine-grained membership mirror of `selection`, kept in sync with the array above.
+// The grid reads THIS for "is this card selected?" instead of a freshly-rebuilt Set:
+// `SvelteSet.has(id)` is a per-key reactive dependency, so painting one card only
+// re-renders that card — a new Set's changed identity would invalidate every cell on
+// every paint, which is what made drag-select sluggish on long, already-loaded lists.
+// `selection` stays the source of truth (it carries export order); we only diff here.
+export const selectionMembers = new SvelteSet();
+selection.subscribe((ids) => {
+  const next = new Set(ids);
+  for (const id of selectionMembers) if (!next.has(id)) selectionMembers.delete(id);
+  for (const id of ids) selectionMembers.add(id); // add() no-ops on existing keys
+});
+
 // --- Playlists --------------------------------------------------------------
 export const playlists = writable([]);
 const rid = () => 'pl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
@@ -398,4 +413,29 @@ export const settings = writable({
 });
 export async function loadSettings() {
   try { settings.set(await getSettings()); } catch {}
+}
+
+// --- Saved Prompt Studio responses (starred outputs, server-persisted) ------
+export const savedResponses = writable([]);
+export async function loadSavedResponses() {
+  savedResponses.set(await fetchSavedResponses());
+}
+function persistSavedResponses() {
+  saveSavedResponses(get(savedResponses));
+}
+export function addSavedResponse(text) {
+  const t = String(text || '').trim();
+  if (!t) return;
+  let added = false;
+  savedResponses.update((r) => {
+    if (r.some((x) => x.text === t)) return r; // dedupe exact text
+    added = true;
+    return [{ id: 'rs-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, created_at: new Date().toISOString().slice(0, 10) }, ...r];
+  });
+  if (added) { persistSavedResponses(); toast('Saved', { type: 'success' }); }
+  else toast('Already saved', { type: 'info' });
+}
+export function removeSavedResponse(id) {
+  savedResponses.update((r) => r.filter((x) => x.id !== id));
+  persistSavedResponses();
 }

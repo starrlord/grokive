@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { updatePlaylist, removePlaylist } from '$lib/state.js';
   import { mediaByIds, exportSelection } from '$lib/api.js';
+  import { copyText } from '$lib/clipboard.js';
   import { toast } from '$lib/toast.js';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
@@ -63,6 +64,12 @@
     ids = a;
   }
   function remove(id) { ids = ids.filter((x) => x !== id); }
+  async function copyPrompt(id) {
+    const text = media[id]?.prompt;
+    if (!text) return;
+    const ok = await copyText(text);
+    toast(ok ? 'Prompt copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
+  }
 
   function onDrop(targetId) {
     if (!dragId || dragId === targetId) return;
@@ -121,6 +128,7 @@
             title={expanded[id] ? 'Collapse' : 'Expand full prompt'}
             onclick={() => toggleExpand(id)}><span class="prompt-roll block break-words" use:reveal={expanded[id] || false}>{it?.prompt || it?.local_path?.split('/').pop() || id}</span></button>
           <div class="flex shrink-0 items-center gap-1.5">
+            <button class="grid h-7 w-7 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-md border border-line text-muted transition hover:border-[var(--accent)] hover:bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] hover:text-ink disabled:opacity-35 disabled:hover:border-line disabled:hover:bg-transparent disabled:hover:text-muted" disabled={!it?.prompt} onclick={() => copyPrompt(id)} aria-label="Copy prompt" title="Copy prompt">⧉</button>
             <div class="flex overflow-hidden rounded-md border border-line">
               <button class="grid h-7 w-7 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 text-xs transition hover:bg-[var(--surface-solid)] disabled:opacity-35 disabled:hover:bg-transparent" disabled={idx === 0} onclick={() => move(id, -1)} aria-label="Move up">▲</button>
               <span class="w-px self-stretch bg-line" aria-hidden="true"></span>

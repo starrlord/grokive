@@ -9,7 +9,7 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, updateCollection, removeFromCollection, ensureMoviePolling
+    collections, updateCollection, removeFromCollection, ensureMoviePolling, movieChip
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -23,6 +23,8 @@
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
   import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
+  import ScrollToTop from '$lib/components/ScrollToTop.svelte';
+  import PromptStudio from '$lib/components/PromptStudio.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
 
   const PAGE_SIZE = 120;
@@ -80,7 +82,6 @@
   const currentGridItems = $derived(activeCollection ? collectionItems.filter((it) => !$deleted.has(it.id)) : displayItems);
   const selectableIds = $derived(currentGridItems.map((it) => it.id));
   const byId = $derived(new Map([...items, ...collectionItems].map((it) => [it.id, it])));
-  const selectionSet = $derived(new Set($selection));
   const videoSelection = $derived($selection.filter((id) => byId.get(id)?.media_type === 'video'));
   // Inputs for the Montage panel: videos only, and never other montages (a montage
   // can't be a source clip). videoSelection itself keeps montages — they're still
@@ -129,6 +130,8 @@
     const next = JSON.stringify($filters);
     if (next !== sig) {
       sig = next;
+      // Studio is an authoring tool, not a media view — no fetch to make.
+      if ($filters.view === 'studio') return;
       if (!activeCollection) load(true);
       if (!activeCollection || $filters.view !== 'collections') refreshFacets();
     }
@@ -303,9 +306,13 @@
 <TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} />
 
 <div class="flex">
-  <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
-    <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
-  </aside>
+  <!-- Studio is its own full-width workspace; the media-browsing sidebar (filters,
+       playlists) doesn't apply there, so hide it for that view. -->
+  {#if $filters.view !== 'studio'}
+    <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
+      <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
+    </aside>
+  {/if}
 
   <main class="min-w-0 flex-1 p-3 sm:p-4" style="padding-bottom: {$selectMode ? '5rem' : 'max(1rem, env(safe-area-inset-bottom))'}">
     {#if $filters.view === 'collections' && !activeCollection}
@@ -331,7 +338,7 @@
         <EditorialList items={currentGridItems} onopen={openLightbox} />
       {:else}
         <JustifiedGrid items={currentGridItems} {targetHeight} {gap}
-          selectMode={$selectMode} selection={selectionSet}
+          selectMode={$selectMode}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)} />
       {/if}
       <div bind:this={sentinel} class="h-10"></div>
@@ -359,7 +366,7 @@
         <EditorialList items={displayItems} onopen={openLightbox} />
       {:else}
         <JustifiedGrid items={displayItems} {targetHeight} {gap}
-          selectMode={$selectMode} selection={selectionSet}
+          selectMode={$selectMode}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)} />
       {/if}
 
@@ -385,6 +392,8 @@
           </article>
         {/each}
       </div>
+    {:else if $filters.view === 'studio'}
+      <PromptStudio />
     {:else}
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <p class="text-sm text-muted">{displayTotal.toLocaleString()} {$filters.view === 'favorites' ? 'favorites' : $filters.view === 'archive' ? 'archived' : $filters.view === 'all' ? 'items' : 'recent items'}</p>
@@ -408,7 +417,7 @@
         <EditorialList items={displayItems} onopen={openLightbox} />
       {:else}
         <JustifiedGrid items={displayItems} {targetHeight} {gap}
-          selectMode={$selectMode} selection={selectionSet}
+          selectMode={$selectMode}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)} />
       {/if}
 
@@ -449,6 +458,10 @@
 <!-- Always-on background-task indicator for the montage render: persists across
      views/select-mode until the result is committed or dismissed; click reopens. -->
 <MontageStatusChip onopen={() => { movieVideoIds = montageVideoIds; showMovie = true; }} />
+
+<!-- Back-to-top: appears after scrolling down a long grid. Lifted above the bottom
+     SelectBar (select mode) and the montage chip so it never sits under either. -->
+<ScrollToTop lift={$selectMode || !!$movieChip} />
 
 {#if showFilters}
   <FiltersModal {facets} onclose={() => (showFilters = false)} />

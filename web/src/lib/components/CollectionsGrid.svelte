@@ -5,6 +5,15 @@
   let { onopen = () => {}, onplay = () => {}, onmovie = () => {} } = $props();
   let confirming = $state(null);
 
+  // Pin the auto-generated "Beat Montage" collection to the top, wherever it sits in
+  // the stored order (new collections prepend, which would otherwise push it down).
+  // Same id/name check the server uses (server.py _commit_montage). Array.sort is
+  // stable, so every other collection keeps its existing relative order.
+  const isMontage = (c) => c.id === 'beat-montage' || c.name?.toLowerCase() === 'beat montage';
+  const sorted = $derived(
+    [...$collections].sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0))
+  );
+
   const countLabel = (c) => {
     const total = c.item_count ?? c.ids?.length ?? 0;
     const videos = c.video_count ?? 0;
@@ -22,7 +31,7 @@
   </div>
 {:else}
   <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-    {#each $collections as c (c.id)}
+    {#each sorted as c (c.id)}
       <article class="group overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
         <button type="button" class="relative block aspect-[4/3] w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => onopen(c)}>
           {#if c.covers?.length > 1}
