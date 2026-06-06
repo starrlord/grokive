@@ -2,6 +2,8 @@
 
 # Grokive
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Download your Grok Imagine favorites and Agent canvases, then browse them in a modern, responsive web app — chain clips into a playlist and export them as one seamless video, auto-generate subtitles for every clip, and burn them straight into the merged file.
 
 Grokive is a free, self-hosted archiver that keeps your Grok Imagine library entirely on hardware you control. You sign in once by pasting a cURL request copied from your browser session; from there the tool pulls your saved media down to local disk. Browsing happens in a **SvelteKit single-page web app** (run via Docker or `python server.py`) backed by a SQLite read-model, with full-text prompt search, favorites, archive, collections, playlists, subtitle generation, themes, and an installable PWA. A small **CLI** handles the downloading and index builds.
@@ -15,6 +17,28 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 | [![The searchable tag-cloud modal](screenshots/web/tags.jpg)](screenshots/web/tags.jpg) | [![The playlist editor with drag-to-reorder, play, and export](screenshots/web/playlist.jpg)](screenshots/web/playlist.jpg) |
 | **Config** | **Login** |
 | [![The Config panel: appearance, Grok account cURL, and Whisper subtitles](screenshots/web/config.jpg)](screenshots/web/config.jpg) | [![The themed login screen](screenshots/web/login.jpg)](screenshots/web/login.jpg) |
+| **Prompt Studio** | **Beat Montage** |
+| [![The Prompt Studio two-stage composer with suggestion chips](screenshots/web/studio.jpg)](screenshots/web/studio.jpg) | [![The Song Beat Montage panel with style, cut-tightness, and aspect controls](screenshots/web/montage.jpg)](screenshots/web/montage.jpg) |
+
+## Contents
+
+- [Features](#features)
+- [Run as a Docker container](#run-as-a-docker-container-unraid--self-hosted)
+  - [docker compose](#docker-compose)
+  - [Unraid](#unraid)
+  - [Environment variables](#environment-variables)
+  - [GPU video encoding (NVENC)](#gpu-video-encoding-nvidia-nvenc)
+- [Security](#security)
+- [Web App](#web-app-modern-ui)
+- [Playlists and export](#playlists-and-export)
+- [Song Beat Montage](#song-beat-montage)
+- [Prompt Studio](#prompt-studio)
+- [Subtitles (Whisper)](#subtitles-whisper)
+- [Capture your Grok auth request](#capture-your-grok-auth-request)
+- [Running from source](#running-from-source-without-docker)
+- [Privacy](#privacy)
+- [License](#license)
+- [Disclaimer](#disclaimer)
 
 ## Features
 
@@ -42,7 +66,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
 - **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
-- **Themes** (Violet default, Classic, Light) and **layouts** (Grid, Editorial) — switchable in Config.
+- **Ten themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
 - Self-hosted and local-first: everything stays on your own hardware — no analytics, no external services, no account required.
 
 ## Run As A Docker Container (Unraid / self-hosted)
@@ -57,7 +81,8 @@ Long jobs stream their progress into an on-page **Log** overlay.
 All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
 `playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
-scenes), `prompt_studio.db` (durable prompt embeddings),
+scenes), `saved_responses.json` (starred prompts), `personas.json` (Prompt Studio persona
+cards), `prompt_studio.db` (durable prompt embeddings),
 media, thumbnails, subtitle `.srt`/`.vtt` sidecars, and the built gallery) is written
 under one volume: the container's `/data` (set via the `GROK_DATA_DIR` env var), so it
 survives container updates. `index.db` is purely derived from `metadata.json` and
@@ -206,8 +231,9 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
-- **Themes:** Violet (default), Classic, and Light (Config → Appearance). The ☾/☀ button
-  quick-toggles light.
+- **Themes:** ten palettes — Violet (default), Obsidian Aurora, Cobalt Mirage, Neon Nocturne,
+  Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light (Config →
+  Appearance), each previewed as a gradient swatch. The ☾/☀ button quick-toggles light.
 - **Search & filters:** full-text prompt/tag/model search in the top bar; a searchable
   **tag-cloud** modal (*Browse all tags*); media-type and model filters; one-click reset
   (the "Grokive" wordmark or the *Reset filters* chip).
@@ -404,17 +430,19 @@ With those configured you get:
 - **Persona cards** — save multiple named character/voice definitions ("Ship's AI", "noir detective", "android narrator", …) and
   switch the active one with a click. The active card (who they are, tone, vocabulary, rules) is applied
   to every generation above (Variations / Remix / Polish / Scene Builder), so output speaks in that
-  voice. Saved on your device; describe the *voice*, not the output format. New installs ship with an
+  voice. Saved server-side and synced across devices (only the active selection stays per-device);
+  describe the *voice*, not the output format. New installs ship with an
   example "Noir Detective" card and a matching example base scene so the whole loop is self-explanatory —
   both removable.
 - **Freeform** — the **Freeform** tab: a direct, unconstrained request to the model in the active
   persona's voice (numbered list), with an optional **Start each with…** exact prefix.
 - **Saved responses** — hit **★ Save** on any result (Scene beats, Freeform items, Variations) to keep
-  it in a server-side library you can search, copy, and reuse from the **Saved** tab on any device.
+  it in a server-side library you can search, copy, and reuse from the **Saved** tab on any device. You
+  can also **add a prompt by hand** there (⌘/Ctrl + Enter) to stash one without generating it.
 
 Embeddings live in `prompt_studio.db` keyed by prompt text, so they survive an index rebuild and
-only new prompts are ever re-embedded. Saved scenes and responses live in `scenes.json` /
-`saved_responses.json` under `/data`.
+only new prompts are ever re-embedded. Saved scenes, responses, and persona cards live in
+`scenes.json` / `saved_responses.json` / `personas.json` under `/data`.
 
 ## Subtitles (Whisper)
 
@@ -554,6 +582,12 @@ run `grokive.py download` / `index` and `server.py`.
 ## Privacy
 
 Everything runs on hardware you control. The app keeps your media, prompts, cookies, and metadata on local disk and never ships them to a third party — the only outbound traffic is the calls to Grok it makes on your behalf, signed with the cURL session you supply. The lone exception is optional subtitle generation, which reaches out to a Whisper server only when you choose to configure one (and that can be a box on your own LAN).
+
+## License
+
+[MIT](LICENSE) © 2026 Joshua Starr. Free to use, modify, and self-host; provided **as-is**, without
+warranty. Issues and pull requests are welcome — note that Grokive depends on Grok's private endpoints,
+which can change without notice (see *Disclaimer*).
 
 ## Disclaimer
 
