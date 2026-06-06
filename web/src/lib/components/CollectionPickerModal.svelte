@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
   import {
@@ -11,6 +12,10 @@
   let q = $state('');
   let name = $state('');
   let archiveAfter = $state(true);
+
+  // The collections list is a shared, server-owned store loaded once at app start. Refetch on every
+  // open so a rename/add made on another device (e.g. on mobile) shows here instead of a stale label.
+  onMount(loadCollections);
 
   const selected = $derived((ids || []).map(String).filter(Boolean));
   const shown = $derived(($collections || []).filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));

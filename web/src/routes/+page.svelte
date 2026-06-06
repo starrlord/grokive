@@ -162,6 +162,19 @@
     await refreshFacets();
   });
 
+  // Server-owned lists (collections, playlists) are fetched once at startup and held in stores, so a
+  // change made on another device while this tab is backgrounded (e.g. a collection renamed on mobile)
+  // would otherwise stay stale until a full reload. Re-pull them when the tab regains focus/visibility.
+  let lastSharedRefresh = 0;
+  function refreshSharedLists() {
+    const now = Date.now();
+    if (now - lastSharedRefresh < 4000) return; // throttle rapid focus/blur flaps
+    lastSharedRefresh = now;
+    loadCollections();
+    loadPlaylists();
+  }
+  const onVisible = () => { if (document.visibilityState === 'visible') refreshSharedLists(); };
+
   let collReq = 0;
   let collSig = $state('');
   $effect(() => {
@@ -469,7 +482,8 @@
 
 <!-- Mobile navigation drawer: the desktop sidebar (filters + playlists + models)
      slides in from the left. lg:hidden — desktop shows the static <aside> instead. -->
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && menuOpen) menuOpen = false; }} />
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && menuOpen) menuOpen = false; }} onfocus={refreshSharedLists} />
+<svelte:document onvisibilitychange={onVisible} />
 {#if menuOpen}
   <div use:portal class="fixed inset-0 z-50 lg:hidden">
     <div class="absolute inset-0 bg-[var(--overlay)] backdrop-blur-sm" role="presentation"
