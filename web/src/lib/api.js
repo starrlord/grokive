@@ -228,6 +228,12 @@ export async function fetchSavedResponses() {
 }
 export const saveSavedResponses = (responses) => saveJSON('/api/prompts/responses', { responses });
 
+// Persona cards (durable, server-side, shared across devices).
+export async function fetchPersonas() {
+  try { return (await getJSON('/api/prompts/personas')).personas || []; } catch { return []; }
+}
+export const savePersonas = (personas) => saveJSON('/api/prompts/personas', { personas });
+
 // --- Auth ------------------------------------------------------------------
 export async function authStatus() {
   try {

@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     fetchPromptVocabulary, composePrompts, parsePrompt,
-    promptEmbedStatus, startPromptEmbed, fetchPromptThemes, similarPrompts, generatePrompts
+    promptEmbedStatus, startPromptEmbed, fetchPromptThemes, similarPrompts, generatePrompts,
+    fetchPersonas, savePersonas
   } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { toast } from '$lib/toast.js';
@@ -39,11 +40,11 @@
   let remixTwist = $state('');
 
   // Persona cards: named character/voice definitions. The ACTIVE card's text is prepended to every
-  // AI generation (Variations / Remix / Polish / Scene) so output speaks in that voice. Stored on the
-  // device; migrates the old single `ga.persona` into a card on first load.
+  // AI generation (Variations / Remix / Polish / Scene) so output speaks in that voice. Cards persist
+  // SERVER-SIDE (shared across devices); only the active selection stays per-device. On first load with
+  // no server cards, the device's old localStorage cards are migrated (or the example is seeded) and saved.
   const pid = () => 'pc-' + Math.random().toString(36).slice(2, 9);
-  // Seeded for brand-new users (no stored cards) so the system is self-explanatory. Deletable —
-  // once the user edits/deletes, the stored array wins and this never comes back.
+  // Seeded for brand-new users (no cards anywhere) so the system is self-explanatory. Deletable.
   const EXAMPLE_CARD = {
     id: 'pc-example',
     name: 'Example — Noir Detective',
@@ -55,12 +56,12 @@ Rules you MUST follow:
 - Be specific and concrete: real places, real objects, plausible actions and dialogue.
 - Keep it grounded — no fantasy, no impossible feats.`
   };
-  function loadCards() {
+  function loadLocalCards() {
     try {
       const raw = localStorage.getItem('ga.personaCards');
-      if (raw) { const a = JSON.parse(raw); if (Array.isArray(a)) return a; }
+      if (raw) { const a = JSON.parse(raw); if (Array.isArray(a) && a.length) return a; }
       const old = localStorage.getItem('ga.persona') || '';
-      if (old.trim()) return [{ id: pid(), name: 'My persona', text: old }];
+      if (old.trim()) return [{ id: pid(), name: 'My persona', text: old, anchor: '' }];
     } catch {}
     return [EXAMPLE_CARD];
   }
@@ -68,16 +69,34 @@ Rules you MUST follow:
     try { const v = JSON.parse(localStorage.getItem('ga.personaActive')); if (v && cards.some((c) => c.id === v)) return v; } catch {}
     return cards[0]?.id ?? null;
   }
-  let personaCards = $state(loadCards());
-  let activePersonaId = $state(loadActiveId(personaCards));
+  let personaCards = $state([]);
+  let activePersonaId = $state(null);
   let personaOpen = $state(false);
+  let personaLoaded = $state(false);
+  let personaSaveTimer;
   const activeIdx = $derived(personaCards.findIndex((c) => c.id === activePersonaId));
   const activeCard = $derived(activeIdx >= 0 ? personaCards[activeIdx] : null);
   const persona = $derived(activeCard?.text || '');
+
+  async function initPersonas() {
+    let cards = await fetchPersonas();
+    if (!cards.length) {
+      cards = loadLocalCards();        // migrate the device's old cards, or seed the example
+      if (cards.length) savePersonas(cards);
+    }
+    personaCards = cards;
+    activePersonaId = loadActiveId(cards);
+    personaLoaded = true;
+  }
+  // Persist cards to the server (debounced) once loaded; the active selection stays per-device.
   $effect(() => {
-    const cards = JSON.stringify(personaCards);
-    const act = JSON.stringify(activePersonaId);
-    try { localStorage.setItem('ga.personaCards', cards); localStorage.setItem('ga.personaActive', act); } catch {}
+    JSON.stringify(personaCards); // deep-track edits / add / delete
+    if (!personaLoaded) return;
+    clearTimeout(personaSaveTimer);
+    personaSaveTimer = setTimeout(() => savePersonas(personaCards), 600);
+  });
+  $effect(() => {
+    try { localStorage.setItem('ga.personaActive', JSON.stringify(activePersonaId)); } catch {}
   });
   function newCard() {
     const card = { id: pid(), name: 'New persona', text: '', anchor: '' };
@@ -141,6 +160,7 @@ Rules you MUST follow:
     vocab = await fetchPromptVocabulary();
     loading = false;
     loadSavedResponses();
+    initPersonas();
     await refreshEmbed();
     if (embed.configured && embed.embedded > 0) loadThemes();
   });

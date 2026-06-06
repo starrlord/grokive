@@ -67,6 +67,7 @@ PLAYLISTS_FILE = DATA_DIR / "playlists.json"
 COLLECTIONS_FILE = DATA_DIR / "collections.json"
 SCENES_FILE = DATA_DIR / "scenes.json"  # saved Prompt Studio Scene Builder scenes
 RESPONSES_FILE = DATA_DIR / "saved_responses.json"  # Prompt Studio responses the user starred
+PERSONAS_FILE = DATA_DIR / "personas.json"  # Prompt Studio persona / voice cards
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
@@ -2139,6 +2140,48 @@ def api_prompts_responses_post() -> Response:
     tmp = RESPONSES_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(RESPONSES_FILE)
+    return jsonify(ok=True, count=len(clean))
+
+
+@app.get("/api/prompts/personas")
+def api_prompts_personas_get() -> Response:
+    """Saved Prompt Studio persona cards ([] if none/unreadable). On the data volume so they
+    persist and are shared across every device."""
+    data: list = []
+    if PERSONAS_FILE.exists():
+        try:
+            loaded = json.loads(PERSONAS_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    return jsonify(personas=data)
+
+
+@app.post("/api/prompts/personas")
+def api_prompts_personas_post() -> Response:
+    """Replace the whole persona-card list (client owns it). Validate, normalise, atomic write."""
+    incoming = (request.get_json(silent=True) or {}).get("personas")
+    if not isinstance(incoming, list):
+        return jsonify(ok=False, error="Expected a 'personas' array."), 400
+    clean = []
+    for entry in incoming[:200]:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()[:80]
+        text = str(entry.get("text", ""))[:8000]
+        if not name and not text.strip():
+            continue
+        clean.append({
+            "id": str(entry.get("id") or "")[:64] or str(len(clean)),
+            "name": name,
+            "text": text,
+            "anchor": str(entry.get("anchor", "")).strip()[:200],
+        })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PERSONAS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(PERSONAS_FILE)
     return jsonify(ok=True, count=len(clean))
 
 

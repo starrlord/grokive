@@ -434,6 +434,7 @@ export function addSavedResponse(text) {
   });
   if (added) { persistSavedResponses(); toast('Saved', { type: 'success' }); }
   else toast('Already saved', { type: 'info' });
+  return added;
 }
 export function removeSavedResponse(id) {
   savedResponses.update((r) => r.filter((x) => x.id !== id));
