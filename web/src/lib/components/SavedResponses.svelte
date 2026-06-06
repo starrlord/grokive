@@ -22,6 +22,41 @@
   function onKey(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); add(); }
   }
+
+  // Long responses are clamped to a few lines and roll open on click — the same reveal the
+  // Playlist Editor uses for prompts. Short ones render in full with no expand affordance.
+  let expanded = $state({}); // id -> bool
+  function toggleExpand(id) { expanded = { ...expanded, [id]: !expanded[id] }; }
+  const needsClamp = (t) => {
+    const s = String(t || '');
+    return s.length > 180 || (s.match(/\n/g)?.length || 0) >= 3;
+  };
+
+  // CSS can't transition height:auto, so animate max-height between the collapsed floor and the
+  // measured scrollHeight, then release to `none` when open so it can reflow freely.
+  const RESP_COLLAPSED = 66; // px ≈ 3 lines at text-sm / leading-relaxed
+  function reveal(node, open) {
+    node.style.overflow = 'hidden';
+    node.style.maxHeight = open ? 'none' : RESP_COLLAPSED + 'px';
+    let cur = !!open;
+    return {
+      update(next) {
+        next = !!next;
+        if (next === cur) return;
+        cur = next;
+        node.style.maxHeight = node.offsetHeight + 'px'; // pin current height
+        void node.offsetHeight;                          // force reflow
+        requestAnimationFrame(() => {
+          node.style.maxHeight = (next ? node.scrollHeight : RESP_COLLAPSED) + 'px';
+        });
+        const done = () => {
+          if (cur) node.style.maxHeight = 'none';
+          node.removeEventListener('transitionend', done);
+        };
+        node.addEventListener('transitionend', done);
+      }
+    };
+  }
 </script>
 
 <div class="mx-auto w-full max-w-3xl">
@@ -48,7 +83,17 @@
     <ul class="space-y-2">
       {#each shown as r (r.id)}
         <li class="flex items-start gap-3 rounded-lg border border-line bg-[var(--surface-2)] p-3">
-          <p class="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{r.text}</p>
+          {#if needsClamp(r.text)}
+            <div class="min-w-0 flex-1">
+              <button type="button" class="block w-full cursor-pointer text-left" aria-expanded={expanded[r.id] || false}
+                title={expanded[r.id] ? 'Collapse' : 'Expand full prompt'} onclick={() => toggleExpand(r.id)}>
+                <span class="resp-roll block whitespace-pre-wrap break-words text-sm leading-relaxed text-ink" use:reveal={expanded[r.id] || false}>{r.text}</span>
+                <span class="mt-1 inline-block text-xs font-semibold text-[var(--accent)]">{expanded[r.id] ? 'Show less ⌃' : 'Show more ⌄'}</span>
+              </button>
+            </div>
+          {:else}
+            <p class="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{r.text}</p>
+          {/if}
           <div class="flex shrink-0 flex-col gap-1">
             <button type="button" onclick={() => copy(r.text)} class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
             <button type="button" onclick={() => removeSavedResponse(r.id)} class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold text-[var(--danger)] transition hover:border-[var(--danger)]">Delete</button>
@@ -58,3 +103,8 @@
     </ul>
   {/if}
 </div>
+
+<style>
+  /* reveal() animates max-height between the clamped floor and full height; this is the easing. */
+  .resp-roll { transition: max-height 220ms ease; }
+</style>
