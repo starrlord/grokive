@@ -12,6 +12,8 @@
     sharedAudioCtx = AC ? new AC() : null;
     return sharedAudioCtx;
   }
+  let desktopSoundEnabled = false;
+  let desktopVolume = 1;
 </script>
 
 <script>
@@ -55,6 +57,14 @@
   });
   const item = $derived(liveList[i] || null);
   let confirmingDelete = $state(false);
+  let autoplayVideos = $state(false);
+  $effect(() => {
+    list;
+    index;
+    autoplayVideos = autoAdvance;
+  });
+  const nextPlayableVideo = $derived(liveList.findIndex((it, idx) => idx >= i && it.media_type === 'video'));
+  const hasPlayableVideo = $derived(nextPlayableVideo !== -1);
   function doDelete() {
     confirmingDelete = false;
     if (item) removeMedia([item.id]);
@@ -88,7 +98,7 @@
   // iOS blocks autoplay of clips with sound unless the play is tied to a tap on
   // the player. So we start muted (which iOS *will* autoplay, controls auto-hide),
   // and the first tap anywhere unmutes — and the preference sticks across clips.
-  let wantSound = $state(false);
+  let wantSound = $state(!coarsePointer && desktopSoundEnabled);
   // This element's one-time tap into the shared audio graph. createMediaElementSource
   // is once-per-element, so we guard and create it on the first unmute.
   let mediaSourceNode = null;
@@ -107,6 +117,7 @@
     pokeCounter();
     if (wantSound) return;
     wantSound = true;
+    if (!coarsePointer) desktopSoundEnabled = true;
     if (videoEl) {
       // Unlock + route audio through the shared AudioContext while we're inside
       // this tap (the gesture), then unmute. From here every clip is audible via
@@ -124,9 +135,15 @@
   // stayed false and the advance $effect re-muted every subsequent clip: audio
   // read as unmuted at full volume but was silent until the slider was nudged
   // again (most visible on Firefox). Mirror any user-driven unmute back into
-  // wantSound so the sound preference sticks across clips.
+  // wantSound so the sound preference sticks across clips. Preserve volume on
+  // desktop too; iOS/touch stays on the existing muted-first unlock path.
   function onVolumeChange() {
-    if (videoEl && !videoEl.muted) wantSound = true;
+    if (!videoEl) return;
+    if (!coarsePointer) desktopVolume = videoEl.volume;
+    if (!videoEl.muted) {
+      wantSound = true;
+      if (!coarsePointer) desktopSoundEnabled = true;
+    }
   }
   onDestroy(() => {
     clearTimeout(counterTimer);
@@ -148,6 +165,19 @@
   function step(d) {
     const n = i + d;
     if (n >= 0 && n < liveList.length) i = n;
+  }
+  function nextVideoIndex(fromIndex) {
+    return liveList.findIndex((it, idx) => idx >= fromIndex && it.media_type === 'video');
+  }
+  function toggleAutoplayVideos() {
+    if (autoplayVideos) {
+      autoplayVideos = false;
+      return;
+    }
+    const next = nextVideoIndex(i);
+    if (next === -1) return;
+    autoplayVideos = true;
+    if (next !== i) i = next;
   }
 
   $effect(() => {
@@ -191,6 +221,7 @@
       // iOS only grants muted-autoplay when the `muted` *attribute* is present —
       // the JS property alone isn't honored by Safari's autoplay gate. defaultMuted
       // reflects that content attribute, so set it (and muted) before the src loads.
+      if (!coarsePointer) videoEl.volume = desktopVolume;
       videoEl.defaultMuted = !wantSound;
       videoEl.muted = !wantSound;
       videoEl.src = it.href;
@@ -218,7 +249,9 @@
   });
 
   function onended() {
-    if (autoAdvance && i < liveList.length - 1) step(1);
+    if (!autoplayVideos) return;
+    const next = nextVideoIndex(i + 1);
+    if (next !== -1) i = next;
   }
   // iPhone Safari doesn't implement the Fullscreen API on elements (only iPad /
   // desktop / Android do), so element fullscreen silently fails there. Detect it
@@ -276,6 +309,12 @@
         title="Favorite" aria-label={$favorites.has(item.id) ? 'Unfavorite' : 'Favorite'} aria-pressed={$favorites.has(item.id)} onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
         title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => (showInfo = !showInfo)}>ⓘ</button>
+      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {autoplayVideos ? 'text-[var(--accent)]' : ''}"
+        title={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
+        aria-label={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
+        aria-pressed={autoplayVideos}
+        disabled={!autoplayVideos && !hasPlayableVideo}
+        onclick={toggleAutoplayVideos}>▶</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
         title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
         <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
