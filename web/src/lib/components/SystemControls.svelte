@@ -143,8 +143,8 @@
 </script>
 
 <div class="system-controls flex flex-wrap items-center gap-1.5">
-  <!-- Status pill + Subtitles are hidden on phones to keep the top bar tidy (sync
-       progress still surfaces via the disabled Sync button + a toast on finish). -->
+  <!-- Status pill is hidden on phones to keep the top bar tidy; progress still
+       surfaces via the disabled Sync button + a toast on finish. -->
   <button class="status-btn hidden max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold md:inline-flex {statusTone}" onclick={() => (showLog = !showLog)} title="View job log">
     <span class="status-dot" aria-hidden="true"></span>
     <span class="truncate">{logLabel}</span>
@@ -152,13 +152,16 @@
   <span class="mx-0.5 hidden h-6 w-px self-center bg-line md:block" aria-hidden="true"></span>
   <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
   {#if $settings.whisper_configured}
-    <button class="secondary-btn hidden rounded-lg border border-line px-3 py-1.5 text-sm font-semibold md:inline-block disabled:opacity-50" onclick={doSubs} disabled={status.running}>Subtitles</button>
+    <button class="subtitle-btn grid h-9 w-9 place-items-center rounded-lg border text-[0.6875rem] font-black tracking-tight disabled:opacity-50" onclick={doSubs} disabled={status.running} title="Generate subtitles" aria-label="Generate subtitles">
+      CC
+    </button>
   {/if}
   <button class="grid h-9 w-9 place-items-center rounded-lg border border-line" title="Config" onclick={() => (showConfig = true)}>⚙</button>
 </div>
 
 <style>
   .secondary-btn,
+  .subtitle-btn,
   .status-btn {
     background: color-mix(in srgb, var(--surface-2) 72%, transparent);
     box-shadow: inset 0 1px 0 var(--surface-highlight);
@@ -167,6 +170,8 @@
 
   .secondary-btn:hover:not(:disabled),
   .secondary-btn:focus-visible,
+  .subtitle-btn:hover:not(:disabled),
+  .subtitle-btn:focus-visible,
   .status-btn:hover,
   .status-btn:focus-visible {
     background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
@@ -175,6 +180,11 @@
     box-shadow:
       inset 0 1px 0 var(--surface-highlight),
       0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
+  }
+
+  .subtitle-btn {
+    border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+    color: color-mix(in srgb, var(--accent) 84%, var(--ink) 16%);
   }
 
   .status-btn {

@@ -196,6 +196,29 @@ export async function generatePrompts(body) {
   return d; // { variations: string[], model }
 }
 
+// Auto-tag — suggest a folder + tags for one saved prompt via the local LLM. Pass the labels
+// already in use so the model reuses them instead of inventing near-duplicates.
+export async function autotagPrompt(text, { folders = [], tags = [] } = {}) {
+  const res = await fetch('/api/prompts/autotag', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, folders, tags })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Auto-tag failed.');
+  return d; // { folder, tags: string[], model }
+}
+
+// Audit labels — suggest corrections for prompts that already have folders/tags.
+export async function auditPromptLabels(text, { folder = '', current_tags = [], folders = [], tags = [] } = {}) {
+  const res = await fetch('/api/prompts/audit-labels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, folder, current_tags, folders, tags })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Label audit failed.');
+  return d; // { folder, tags: string[], remove_tags: string[], reason, model }
+}
+
 // Scene Builder — script a continuous multi-clip scene (length ÷ 6s/10s increment → beats).
 export async function generateScene(body) {
   const res = await fetch('/api/prompts/scene', {
@@ -215,6 +238,12 @@ export async function generateFreeform(body) {
   if (!res.ok) throw new Error(d.error || 'Generation failed.');
   return d; // { items: string[], model }
 }
+
+// Freeform presets — saved request + required repeated text/prefix.
+export async function fetchFreeformPresets() {
+  try { return (await getJSON('/api/prompts/freeform-presets')).presets || []; } catch { return []; }
+}
+export const saveFreeformPresets = (presets) => saveJSON('/api/prompts/freeform-presets', { presets });
 
 // Saved scenes (durable, server-side, shared across devices).
 export async function fetchScenes() {

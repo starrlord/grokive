@@ -24,8 +24,7 @@
     { id: 'collections', label: 'Collections' },
     { id: 'favorites', label: 'Favorites' },
     { id: 'archive', label: 'Archive' },
-    { id: 'canvases', label: 'Canvases' },
-    { id: 'studio', label: 'Studio' }
+    { id: 'canvases', label: 'Canvases' }
   ];
 
   let q = $state($filters.query);
@@ -71,6 +70,16 @@
     {/each}
   </nav>
 
+  <button type="button"
+    class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
+    aria-label="Open Prompt Studio"
+    aria-current={$filters.view === 'studio' ? 'page' : undefined}
+    title="Open Prompt Studio"
+    onclick={() => setView('studio')}>
+    <span aria-hidden="true">✦</span>
+    <span aria-hidden="true" class="topbar-workspace-label"></span>
+  </button>
+
   <div class="topbar-tools flex flex-wrap items-center gap-1.5">
     <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
       title="Time period" value={$filters.period} onchange={(e) => setPeriod(e.target.value)}>
@@ -107,7 +116,7 @@
       grid-template-columns: auto 1fr auto;
       grid-template-areas:
         "menu  brand   system"
-        "views views   views"
+        "views views   workspace"
         "tools tools   tools"
         "search search search";
       column-gap: 0.5rem;
@@ -118,6 +127,7 @@
     .topbar-brand { grid-area: brand; }
     .topbar-system { grid-area: system; justify-self: end; min-width: 0; }
     .topbar-views { grid-area: views; width: 100%; min-width: 0; }
+    .topbar-workspace { grid-area: workspace; justify-self: end; }
     .topbar-tools {
       grid-area: tools;
       width: 100%;
@@ -150,13 +160,41 @@
     color: var(--on-accent);
   }
 
+  .topbar-workspace {
+    background: color-mix(in srgb, var(--surface-2) 68%, transparent);
+    box-shadow: inset 0 1px 0 var(--surface-highlight);
+  }
+
+  .topbar-workspace:hover,
+  .topbar-workspace:focus-visible {
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+
+  .topbar-workspace-active:hover,
+  .topbar-workspace-active:focus-visible {
+    background: color-mix(in srgb, var(--accent) 88%, var(--ink) 12%);
+    color: var(--on-accent);
+  }
+
+  .topbar-workspace-label::before {
+    content: 'Studio';
+  }
+
+  @media (min-width: 640px) {
+    .topbar-workspace-label::before {
+      content: 'Prompt Studio';
+    }
+  }
+
   @media (min-width: 768px) and (max-width: 1279px) {
     .topbar {
       display: grid;
       grid-template-columns: auto auto minmax(12rem, 1fr) auto;
       grid-template-areas:
         "menu brand search system"
-        "views views views views"
+        "views views views workspace"
         "tools tools tools tools";
       column-gap: 0.75rem;
       row-gap: 0.5rem;
@@ -175,6 +213,10 @@
       justify-self: stretch;
       width: 100%;
       min-width: 0;
+    }
+    .topbar-workspace {
+      grid-area: workspace;
+      justify-self: end;
     }
     .topbar-views :global(button) {
       padding-left: 0.625rem;
@@ -205,7 +247,7 @@
       grid-template-columns: auto minmax(16rem, 1fr) auto;
       grid-template-areas:
         "brand search system"
-        "views views tools";
+        "views workspace tools";
       column-gap: 0.75rem;
       row-gap: 0.5rem;
       align-items: center;
@@ -221,6 +263,10 @@
       grid-area: views;
       min-width: 0;
       width: 100%;
+    }
+    .topbar-workspace {
+      grid-area: workspace;
+      justify-self: start;
     }
     .topbar-tools {
       grid-area: tools;

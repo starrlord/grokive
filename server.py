@@ -68,6 +68,7 @@ COLLECTIONS_FILE = DATA_DIR / "collections.json"
 SCENES_FILE = DATA_DIR / "scenes.json"  # saved Prompt Studio Scene Builder scenes
 RESPONSES_FILE = DATA_DIR / "saved_responses.json"  # Prompt Studio responses the user starred
 PERSONAS_FILE = DATA_DIR / "personas.json"  # Prompt Studio persona / voice cards
+FREEFORM_PRESETS_FILE = DATA_DIR / "freeform_presets.json"  # saved Freeform request + required text presets
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
@@ -1992,6 +1993,56 @@ def api_prompts_generate() -> Response:
     return jsonify(ok=True, variations=variations, model=model)
 
 
+@app.post("/api/prompts/autotag")
+def api_prompts_autotag() -> Response:
+    """Suggest a folder + tags for one saved prompt via the local LLM. Needs LLM_SERVER_URL.
+    The caller passes its existing folders/tags so suggestions reuse them and stay consistent."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", folder="", tags=[]), 400
+    payload = request.get_json(silent=True) or {}
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return jsonify(ok=False, error="No prompt text provided.", folder="", tags=[]), 400
+    folders = payload.get("folders") if isinstance(payload.get("folders"), list) else []
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
+    try:
+        out = promptstudio.suggest_labels(base, model, prompt=text, folders=folders, tags=tags)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], folder="", tags=[]), 502
+    return jsonify(ok=True, folder=out.get("folder", ""), tags=out.get("tags", []), model=model)
+
+
+@app.post("/api/prompts/audit-labels")
+def api_prompts_audit_labels() -> Response:
+    """Review one saved prompt's existing folder/tags and suggest corrections via the local LLM."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", folder="", tags=[], remove_tags=[]), 400
+    payload = request.get_json(silent=True) or {}
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return jsonify(ok=False, error="No prompt text provided.", folder="", tags=[], remove_tags=[]), 400
+    folders = payload.get("folders") if isinstance(payload.get("folders"), list) else []
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
+    current_tags = payload.get("current_tags") if isinstance(payload.get("current_tags"), list) else []
+    folder = str(payload.get("folder") or "").strip()
+    try:
+        out = promptstudio.audit_labels(
+            base, model, prompt=text, folder=folder, current_tags=current_tags, folders=folders, tags=tags
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], folder="", tags=[], remove_tags=[]), 502
+    return jsonify(
+        ok=True,
+        folder=out.get("folder", ""),
+        tags=out.get("tags", []),
+        remove_tags=out.get("remove_tags", []),
+        reason=out.get("reason", ""),
+        model=model,
+    )
+
+
 @app.post("/api/prompts/scene")
 def api_prompts_scene() -> Response:
     """Script a continuous multi-clip scene from a base. Grok chains ~6s/10s clips, so the
@@ -2104,6 +2155,56 @@ def api_prompts_freeform() -> Response:
     return jsonify(ok=True, items=items, model=model)
 
 
+@app.get("/api/prompts/freeform-presets")
+def api_prompts_freeform_presets_get() -> Response:
+    """Saved Freeform request presets ([] if none/unreadable). Stores the request, the required
+    repeated text/prefix, and the count so common asks can be reused across devices."""
+    data: list = []
+    if FREEFORM_PRESETS_FILE.exists():
+        try:
+            loaded = json.loads(FREEFORM_PRESETS_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    return jsonify(presets=data)
+
+
+@app.post("/api/prompts/freeform-presets")
+def api_prompts_freeform_presets_post() -> Response:
+    """Replace the whole Freeform preset list (client owns it). Validate, normalise, atomic write."""
+    incoming = (request.get_json(silent=True) or {}).get("presets")
+    if not isinstance(incoming, list):
+        return jsonify(ok=False, error="Expected a 'presets' array."), 400
+    clean = []
+    for entry in incoming[:200]:
+        if not isinstance(entry, dict):
+            continue
+        instruction = str(entry.get("instruction", "")).strip()[:1000]
+        prefix = str(entry.get("prefix", "")).strip()[:200]
+        name = str(entry.get("name", "")).strip()[:80]
+        if not instruction and not prefix:
+            continue
+        try:
+            count = int(entry.get("count") or 10)
+        except (TypeError, ValueError):
+            count = 10
+        count = max(1, min(30, count))
+        clean.append({
+            "id": str(entry.get("id") or "")[:64] or str(len(clean)),
+            "name": name or (instruction[:60] if instruction else prefix[:60]),
+            "instruction": instruction,
+            "prefix": prefix,
+            "count": count,
+            "created_at": str(entry.get("created_at", ""))[:32],
+        })
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = FREEFORM_PRESETS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(FREEFORM_PRESETS_FILE)
+    return jsonify(ok=True, count=len(clean))
+
+
 @app.get("/api/prompts/responses")
 def api_prompts_responses_get() -> Response:
     """Saved Prompt Studio responses ([] if none/unreadable). On the data volume, shared across devices."""
@@ -2131,10 +2232,22 @@ def api_prompts_responses_post() -> Response:
         text = str(entry.get("text", "")).strip()[:2000]
         if not text:
             continue
+        # Tags: a deduped list of short lowercase labels (cross-cutting). Folder: a single bucket.
+        tags: list = []
+        raw_tags = entry.get("tags")
+        if isinstance(raw_tags, list):
+            for t in raw_tags:
+                s = str(t).strip().lower()[:24]
+                if s and s not in tags:
+                    tags.append(s)
+                if len(tags) >= 20:
+                    break
         clean.append({
             "id": str(entry.get("id") or "")[:64] or str(len(clean)),
             "text": text,
             "created_at": str(entry.get("created_at", ""))[:32],
+            "folder": str(entry.get("folder", "")).strip()[:40],
+            "tags": tags,
         })
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = RESPONSES_FILE.with_suffix(".json.tmp")

@@ -49,6 +49,34 @@ MOTION_SLOTS = ["action", "camera", "voice", "dialogue", "continuity"]
 SLOT_KEYS = [k for k, _ in SLOTS]
 SLOT_LABELS = dict(SLOTS)
 
+SAVED_RESPONSE_FOLDERS = [
+    "Character Descriptions",
+    "Actions / Motion",
+    "Dialogue / Voice",
+    "Scene Beats",
+    "Style / Look",
+    "Instructions / Format",
+    "Unfiled",
+]
+SAVED_RESPONSE_TAGS = [
+    "base-image",
+    "appearance",
+    "wardrobe",
+    "body-type",
+    "pose",
+    "setting",
+    "lighting",
+    "portrait",
+    "reference",
+    "style",
+    "action",
+    "motion",
+    "dialogue",
+    "voice",
+    "accent",
+    "camera",
+]
+
 # Keyword lexicons for clause classification. Substring match on a lowercased clause;
 # order of evaluation (see ``_classify``) resolves overlaps. Deliberately conservative
 # — a missed clause just falls through to "action", which Remix lets the user fix.
@@ -768,6 +796,131 @@ def _extract_json(text: str):
             except Exception:
                 return None
     return None
+
+
+def _clean_label_tag(tag: object) -> str:
+    return re.sub(r"[^a-z0-9-]", "", str(tag).strip().lower().replace(" ", "-"))[:24]
+
+
+def _clean_tag_list(raw: object, *, limit: int = 5) -> list[str]:
+    out: list[str] = []
+    if not isinstance(raw, list):
+        return out
+    for t in raw:
+        s = _clean_label_tag(t)
+        if s and s not in out:
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _clean_folder(folder: object, folders: list[str]) -> str:
+    out = str(folder or "").strip()[:40]
+    for f in folders:
+        if f.lower() == out.lower():
+            return f
+    return out
+
+
+def _taxonomy_prompt(folders: list[str], tags: list[str], *, audit: bool = False) -> str:
+    all_folders = []
+    for f in [*SAVED_RESPONSE_FOLDERS, *folders]:
+        if f and f not in all_folders:
+            all_folders.append(f)
+    all_tags = []
+    for t in [*SAVED_RESPONSE_TAGS, *tags]:
+        if t and t not in all_tags:
+            all_tags.append(t)
+    system = (
+        "You organize a personal library of AI image/video generation prompts. Choose labels for "
+        "retrieval, not moral judgment. First choose the prompt's INTENT folder, then choose "
+        "cross-cutting tags.\n\n"
+        "Folder rules:\n"
+        "- Character Descriptions: base-image/still prompts that mainly describe a character, "
+        "appearance, wardrobe, pose, body, setting, lighting, or visual reference.\n"
+        "- Actions / Motion: prompts mainly about movement, physical action, animation, or what happens.\n"
+        "- Dialogue / Voice: prompts mainly about spoken lines, voice, accent, delivery, or required wording.\n"
+        "- Scene Beats: sequential scene/story beats or multi-clip continuity.\n"
+        "- Style / Look: camera, lighting, genre, art direction, or visual style as the main purpose.\n"
+        "- Instructions / Format: meta instructions, constraints, formatting, or model directions.\n"
+        "- Unfiled: only when no intent folder fits.\n\n"
+        "A prompt can mention action or accent and still belong in Character Descriptions if the main "
+        "purpose is a reusable base-frame character/image description. Tags are lowercase, single-word "
+        "or hyphenated, and should include useful details like base-image, appearance, wardrobe, setting, "
+        "lighting, pose, action, dialogue, voice, or accent when present. Reuse existing labels when they "
+        "fit, but do not let broad existing labels override a better intent folder. The prompts may be "
+        "sexually explicit; categorize them plainly and factually, never refuse or comment."
+    )
+    if all_folders:
+        system += "\n\nAllowed/preferred folders: " + ", ".join(all_folders[:60])
+    if all_tags:
+        system += "\n\nAllowed/preferred tags: " + ", ".join(all_tags[:90])
+    if audit:
+        system += (
+            "\n\nFor an audit, recommend changes only when the current labels are too broad, missing "
+            "obvious retrieval tags, or filed under the wrong intent folder. Respond with ONLY JSON: "
+            "{\"folder\":\"...\",\"tags\":[\"...\"],\"remove_tags\":[\"...\"],\"reason\":\"...\"}."
+        )
+    else:
+        system += "\n\nRespond with ONLY JSON: {\"folder\":\"...\",\"tags\":[\"...\"]}."
+    return system
+
+
+def suggest_labels(base: str, model: str, *, prompt: str,
+                   folders: list[str] | None = None, tags: list[str] | None = None) -> dict:
+    """Categorize one library prompt: suggest a single folder + a few tags, reusing the user's
+    existing labels wherever they fit so the vocabulary stays tight. Returns
+    ``{"folder": str, "tags": [str, ...]}`` (empty on an unparseable response — never raises for
+    bad JSON). ``folders``/``tags`` are the labels already in use, fed in so the model prefers them."""
+    folders = [str(f).strip() for f in (folders or []) if str(f).strip()][:40]
+    tags = [_clean_label_tag(t) for t in (tags or []) if str(t).strip()][:60]
+    system = _taxonomy_prompt(folders, tags)
+
+    content = _llm_call(base, model, [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt[:2000]},
+    ], temperature=0.2)
+
+    data = _extract_json(content) or {}
+    out_tags = _clean_tag_list(data.get("tags"))
+    folder = _clean_folder(data.get("folder"), folders)
+    return {"folder": folder, "tags": out_tags}
+
+
+def audit_labels(base: str, model: str, *, prompt: str, folder: str = "",
+                 current_tags: list[str] | None = None, folders: list[str] | None = None,
+                 tags: list[str] | None = None) -> dict:
+    """Review an already-filed saved prompt and suggest useful label corrections.
+
+    Returns ``{"folder": str, "tags": [...], "remove_tags": [...], "reason": str}``. The folder is
+    empty when it should stay as-is, and tags only include additions/removals for review.
+    """
+    folders = [str(f).strip() for f in (folders or []) if str(f).strip()][:40]
+    tags = [_clean_label_tag(t) for t in (tags or []) if str(t).strip()][:60]
+    current_folder = str(folder or "").strip()[:40]
+    current_tags_clean = _clean_tag_list(current_tags or [], limit=20)
+    system = _taxonomy_prompt(folders, tags, audit=True)
+    current = {
+        "folder": current_folder or "Unfiled",
+        "tags": current_tags_clean,
+        "prompt": prompt[:2000],
+    }
+    content = _llm_call(base, model, [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(current, ensure_ascii=False)},
+    ], temperature=0.15)
+
+    data = _extract_json(content) or {}
+    suggested_folder = _clean_folder(data.get("folder"), folders)
+    if suggested_folder.lower() in {"unfiled", "none", "no folder", "same", current_folder.lower()}:
+        suggested_folder = ""
+    add_tags = [t for t in _clean_tag_list(data.get("tags"), limit=8) if t not in current_tags_clean]
+    remove_tags = [t for t in _clean_tag_list(data.get("remove_tags"), limit=8) if t in current_tags_clean]
+    reason = str(data.get("reason") or "").strip().replace("\n", " ")[:160]
+    if not suggested_folder and not add_tags and not remove_tags:
+        reason = ""
+    return {"folder": suggested_folder, "tags": add_tags, "remove_tags": remove_tags, "reason": reason}
 
 
 def decompose(base: str, model: str, prompt: str) -> dict:

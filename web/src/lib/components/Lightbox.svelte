@@ -114,6 +114,16 @@
       videoEl.play?.().catch(() => {});
     }
   }
+  // Desktop shows the native control bar from the start, so users unmute with its
+  // volume/mute control — which sets `videoEl.muted = false` directly (it lives in
+  // the video's UA shadow DOM) and never runs enableSound. `wantSound` therefore
+  // stayed false and the advance $effect re-muted every subsequent clip: audio
+  // read as unmuted at full volume but was silent until the slider was nudged
+  // again (most visible on Firefox). Mirror any user-driven unmute back into
+  // wantSound so the sound preference sticks across clips.
+  function onVolumeChange() {
+    if (videoEl && !videoEl.muted) wantSound = true;
+  }
   onDestroy(() => {
     clearTimeout(counterTimer);
     try { mediaSourceNode?.disconnect(); } catch {}
@@ -218,7 +228,7 @@
              reactive effect that re-asserts `video.muted` on its own schedule,
              fighting the imperative muted/autoplay handshake below. We own `muted`
              entirely via the $effect (muted autoplay pre-unlock) + enableSound. -->
-        <video bind:this={videoEl} controls={showControls} autoplay playsinline onended={onended}
+        <video bind:this={videoEl} controls={showControls} autoplay playsinline onended={onended} onvolumechange={onVolumeChange}
                style={fitStyle(item)} class="lightbox-media rounded-lg bg-[var(--media-bg)]"></video>
       {:else}
         <img src={item.href} alt="" style={fitStyle(item)} class="lightbox-media rounded-lg" />

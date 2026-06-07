@@ -39,8 +39,8 @@
   let gen = $state({ running: false, mode: '', stage: '', items: [] });
   let remixTwist = $state('');
 
-  // Persona cards: named character/voice definitions. The ACTIVE card's text is prepended to every
-  // AI generation (Variations / Remix / Polish / Scene) so output speaks in that voice. Cards persist
+  // Persona cards: named character/voice definitions. Scene and Freeform use the active card from
+  // the editor panel; Compose has a separate opt-in selector that defaults to No Persona. Cards persist
   // SERVER-SIDE (shared across devices); only the active selection stays per-device. On first load with
   // no server cards, the device's old localStorage cards are migrated (or the example is seeded) and saved.
   const pid = () => 'pc-' + Math.random().toString(36).slice(2, 9);
@@ -71,6 +71,7 @@ Rules you MUST follow:
   }
   let personaCards = $state([]);
   let activePersonaId = $state(null);
+  let composePersonaId = $state('');
   let personaOpen = $state(false);
   let personaLoaded = $state(false);
   let personaSaveTimer;
@@ -78,6 +79,8 @@ Rules you MUST follow:
   const activeIdx = $derived(personaCards.findIndex((c) => c.id === activePersonaId));
   const activeCard = $derived(activeIdx >= 0 ? personaCards[activeIdx] : null);
   const persona = $derived(activeCard?.text || '');
+  const composePersonaCard = $derived(personaCards.find((c) => c.id === composePersonaId) || null);
+  const composePersona = $derived(composePersonaCard?.text || '');
 
   // The one-time localStorage→server migration decision, recorded per-device. Once set, an empty
   // server list means "the user has no personas" (not "seed/migrate again") — so deleting every
@@ -135,6 +138,7 @@ Rules you MUST follow:
     if (i < 0) return;
     personaCards.splice(i, 1);
     if (activePersonaId === id) activePersonaId = personaCards[0]?.id ?? null;
+    if (composePersonaId === id) composePersonaId = '';
   }
 
   // The eight composer fields + voice, grouped by Grok stage.
@@ -147,7 +151,7 @@ Rules you MUST follow:
   const STAGE_KEYS = { image: IMAGE_KEYS, motion: MOTION_KEYS };
   const FULL = new Set(['subject', 'lighting', 'action', 'dialogue', 'continuity']);
   const PLACEHOLDERS = {
-    subject: 'who or what — age, look, persona', wardrobe: 'what they’re wearing',
+    subject: 'who or what — age, look, identity', wardrobe: 'what they’re wearing',
     setting: 'where the scene takes place', lighting: 'lighting and film look',
     action: 'what moves — keep it short', camera: 'shot, angle, movement',
     voice: 'accent / delivery — e.g. slurred Southern drawl',
@@ -225,6 +229,12 @@ Rules you MUST follow:
   const openTheme = (t) => showResults(t.label, { id: t.rep_id });
   const moreLike = (text) => showResults('Similar prompts', { text });
   const clearResults = () => { results = null; };
+  function mediaRatio(it) {
+    const w = Number(it?.thumb_w || it?.media_w || 1);
+    const h = Number(it?.thumb_h || it?.media_h || 1);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return '1 / 1';
+    return `${w} / ${h}`;
+  }
 
   // Live preview of both prompts, debounced.
   $effect(() => {
@@ -266,7 +276,7 @@ Rules you MUST follow:
     if (!prompt.trim() || gen.running) return;
     gen = { running: true, mode, stage, items: [] };
     try {
-      const r = await generatePrompts({ prompt, mode, n: mode === 'polish' ? 1 : 4, instruction: mode === 'remix' ? remixTwist : '', persona });
+      const r = await generatePrompts({ prompt, mode, n: mode === 'polish' ? 1 : 4, instruction: mode === 'remix' ? remixTwist : '', persona: composePersona });
       gen = { running: false, mode, stage, items: r.variations || [] };
       if (!gen.items.length) toast('The model returned nothing usable — try again.', { type: 'error' });
     } catch (e) {
@@ -297,23 +307,30 @@ Rules you MUST follow:
         {#if vocab}<span class="opacity-70">· {vocab.unique_prompts.toLocaleString()} prompts mined</span>{/if}
       </p>
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex shrink-0 items-center gap-3">
       {#if remixBusy}<span class="text-xs font-semibold text-[var(--accent)]">Decomposing…</span>{/if}
-      <div class="flex rounded-lg border border-line p-0.5">
+      <div class="flex shrink-0 rounded-lg border border-line p-0.5">
         <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'compose' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'compose')}>Compose</button>
         <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'scene' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'scene')}>Scene</button>
         <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'freeform' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'freeform')}>Freeform</button>
         <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'saved' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'saved')}>Saved</button>
       </div>
-      {#if studioMode === 'compose'}
-        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold disabled:opacity-40" disabled={isEmpty} onclick={clearAll}>Clear</button>
-      {/if}
+      <!-- Always in the layout (just hidden off Compose) so the toggle never shifts/reflows when
+           switching modes — a button appearing/disappearing was moving the bar and even wrapping
+           the row, which made tabs like Saved hard to click. -->
+      <button type="button"
+        class="shrink-0 rounded-lg border border-line px-3 py-2 text-sm font-semibold disabled:opacity-40 {studioMode === 'compose' ? '' : 'invisible'}"
+        disabled={isEmpty || studioMode !== 'compose'} aria-hidden={studioMode !== 'compose'}
+        tabindex={studioMode === 'compose' ? 0 : -1} onclick={clearAll}>Clear</button>
     </div>
   </div>
 
-  {#if llmReady}
+  <!-- Persona editing is for Scene/Freeform; Compose has a separate opt-in selector. -->
+  {#if llmReady && (studioMode === 'scene' || studioMode === 'freeform')}
     <div class="mb-4 rounded-card border border-line bg-[var(--surface-2)]/40">
-      <button type="button" class="flex w-full items-center justify-between px-3 py-2 text-left" onclick={() => (personaOpen = !personaOpen)}>
+      <button type="button" class="flex w-full items-center justify-between px-3 py-2 text-left"
+        title="Persona applies only to Scene and Freeform. Compose uses its own No Persona dropdown."
+        onclick={() => (personaOpen = !personaOpen)}>
         <span class="flex min-w-0 items-center gap-2 text-sm font-bold text-ink">
           Persona
           {#if activeCard && activeCard.text.trim()}<span class="max-w-[12rem] truncate rounded-full bg-[var(--accent)] px-2 py-0.5 text-[0.625rem] font-bold text-[var(--on-accent)]">{activeCard.name || 'on'}</span>{:else}<span class="text-xs font-normal text-muted">optional</span>{/if}
@@ -326,6 +343,7 @@ Rules you MUST follow:
           <div class="mb-3 flex flex-wrap items-center gap-1.5">
             {#each personaCards as card (card.id)}
               <button type="button" onclick={() => (activePersonaId = card.id)}
+                title={`Use ${card.name || 'Untitled'} for Scene and Freeform`}
                 class="max-w-[12rem] truncate rounded-full border px-3 py-1 text-xs font-semibold transition {activePersonaId === card.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}">{card.name || 'Untitled'}</button>
             {/each}
             <button type="button" onclick={newCard} class="rounded-full border border-dashed border-line px-3 py-1 text-xs font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">+ New</button>
@@ -340,9 +358,9 @@ Rules you MUST follow:
             <input bind:value={personaCards[activeIdx].anchor} maxlength="200" placeholder="Keep in every beat (optional) — e.g. rain falling around her"
               class="mb-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-1.5 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
             <textarea rows="6" bind:value={personaCards[activeIdx].text}
-              placeholder="Paste a character / voice definition — who they are, tone, vocabulary, rules. Describe the VOICE and content, not the output format. Applied to Variations / Remix / Polish and the Scene Builder."
+              placeholder="Paste a character / voice definition — who they are, tone, vocabulary, rules. Describe the VOICE and content, not the output format. Applied to Scene and Freeform."
               class="w-full resize-y rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]"></textarea>
-            <p class="mt-2 text-xs text-muted">Saved on this device · the active card is applied to every generation.</p>
+            <p class="mt-2 text-xs text-muted">Saved on this device · applied only to Scene and Freeform.</p>
           {:else}
             <p class="py-4 text-center text-sm text-muted">No persona cards yet — <button type="button" onclick={newCard} class="font-semibold text-[var(--accent)] hover:underline">create one</button> to write generated lines in a specific voice.</p>
           {/if}
@@ -358,7 +376,7 @@ Rules you MUST follow:
   {:else if studioMode === 'freeform'}
     <Freeform {persona} {llmReady} />
   {:else if studioMode === 'saved'}
-    <SavedResponses />
+    <SavedResponses {llmReady} />
   {:else}
     {#snippet fieldGrid(keys)}
       <div class="grid grid-cols-1 gap-x-3 gap-y-3 sm:grid-cols-2">
@@ -399,12 +417,15 @@ Rules you MUST follow:
         </p>
         <div class="mt-2 flex flex-wrap items-center gap-2">
           {#if llmReady}
-            <button type="button" class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('variations', stage)}>Variations</button>
+            <button type="button" title="Generate several alternate versions of this prompt while keeping the same core idea."
+              class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('variations', stage)}>Variations</button>
             {#if stage === 'motion'}
               <input bind:value={remixTwist} placeholder="Remix → new setting (optional)" class="min-w-[8rem] flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-2.5 py-1.5 text-xs outline-none placeholder:text-muted focus:border-[var(--accent)]" />
-              <button type="button" class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('remix', stage)}>Remix</button>
+              <button type="button" title="Rewrite this motion prompt around the optional remix direction."
+                class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('remix', stage)}>Remix</button>
             {/if}
-            <button type="button" class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('polish', stage)}>Polish</button>
+            <button type="button" title="Tighten and improve wording without changing the prompt's intent."
+              class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('polish', stage)}>Polish</button>
           {/if}
           <button type="button" class="ml-auto rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-bold text-[var(--on-accent)] disabled:opacity-40" disabled={!previews[stage].trim()} onclick={() => copyText_(previews[stage])}>Copy</button>
         </div>
@@ -435,6 +456,20 @@ Rules you MUST follow:
       </div>
     {/snippet}
 
+    {#if llmReady}
+      <div class="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-[var(--surface-2)]/40 px-3 py-2">
+        <label for="compose-persona" class="text-xs font-bold uppercase tracking-wider text-muted">Persona</label>
+        <select id="compose-persona" bind:value={composePersonaId}
+          title="Only applies to Compose AI actions: Variations, Remix, and Polish."
+          class="min-w-[12rem] max-w-full rounded-md border border-line bg-[var(--surface)] px-2.5 py-1.5 text-sm font-semibold text-ink outline-none transition hover:border-[var(--accent)] focus:border-[var(--accent)]">
+          <option value="">No Persona</option>
+          {#each personaCards as card (card.id)}
+            <option value={card.id}>{card.name || 'Untitled'}</option>
+          {/each}
+        </select>
+      </div>
+    {/if}
+
     <div class="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
       <!-- Composer: two stages -->
       <section class="min-w-0 space-y-3">
@@ -457,8 +492,11 @@ Rules you MUST follow:
         </div>
       </section>
 
-      <!-- Browse / Remix rail -->
-      <aside class="min-w-0 lg:max-h-[calc(100dvh-7rem)] lg:overflow-y-auto lg:pr-1">
+      <!-- Browse / Remix rail. Sticky + self-start so it pins just under the sticky TopBar and
+           scrolls on its OWN axis: without self-start the grid stretches it to the tall composer's
+           height and its internal scroll is unreachable, so theme results past the first rows (each
+           card is a "Remix this prompt" button) looked cut off. -->
+      <aside class="min-w-0 lg:sticky lg:top-16 lg:self-start lg:max-h-[calc(100dvh-5rem)] lg:overflow-y-auto lg:pr-1">
         {#if results}
           <div class="mb-3 flex items-center gap-2">
             <button type="button" onclick={clearResults} class="rounded-lg border border-line px-2.5 py-1 text-xs font-semibold transition hover:border-[var(--accent)]">← Back</button>
@@ -471,13 +509,14 @@ Rules you MUST follow:
           {:else}
             <div class="grid grid-cols-2 gap-2">
               {#each results.items as it (it.id)}
-                <button type="button" onclick={() => remix(it.prompt || '')} title="Remix this prompt"
-                  class="group flex flex-col overflow-hidden rounded-lg border border-line bg-[var(--surface-2)] text-left transition hover:border-[var(--accent)]">
-                  <div class="relative aspect-square w-full shrink-0 overflow-hidden bg-[var(--media-bg)]">
-                    {#if it.thumb}<img src={it.thumb} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-105" />{/if}
+                <button type="button" onclick={() => remix(it.prompt || '')} title="Load this gallery prompt into Compose for remixing"
+                  class="group flex flex-col rounded-lg border border-line bg-[var(--surface-2)] text-left transition hover:border-[var(--accent)]">
+                  <div class="relative w-full shrink-0 overflow-hidden rounded-t-lg bg-[var(--media-bg)]" style={`aspect-ratio: ${mediaRatio(it)}`}>
+                    {#if it.thumb}<img src={it.thumb} alt="" loading="lazy" class="h-full w-full object-contain transition group-hover:scale-[1.02]" />{/if}
                     {#if it._score != null}<span class="absolute right-1 top-1 rounded bg-black/55 px-1 text-[0.625rem] font-semibold text-white">{it._score.toFixed(2)}</span>{/if}
                   </div>
-                  <p class="line-clamp-2 px-1.5 py-1 text-[0.6875rem] leading-snug text-ink">{it.prompt || ''}</p>
+                  <p class="px-1.5 py-1 text-[0.6875rem] leading-snug text-ink">{it.prompt || ''}</p>
+                  <span class="mx-1.5 mb-1 inline-flex self-start rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition group-hover:border-[var(--accent)] group-hover:text-[var(--accent)]">Load</span>
                 </button>
               {/each}
             </div>
@@ -497,10 +536,11 @@ Rules you MUST follow:
             <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Themes</div>
             <div class="mb-4 space-y-1">
               {#each themes.slice(0, 8) as t (t.label + t.size)}
-                <button type="button" onclick={() => openTheme(t)} title={t.rep_prompt}
+                <button type="button" onclick={() => openTheme(t)} title={`View matching gallery prompts: ${t.rep_prompt}`}
                   class="flex w-full items-center gap-2 rounded-lg border border-line px-1.5 py-1 text-left text-xs transition hover:border-[var(--accent)]">
                   {#if t.cover}<img src={t.cover} alt="" class="h-6 w-6 shrink-0 rounded-full object-cover" />{:else}<span class="h-6 w-6 shrink-0 rounded-full bg-[var(--surface-2)]"></span>{/if}
                   <span class="min-w-0 flex-1 truncate capitalize">{t.label}</span>
+                  <span class="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted">View</span>
                   <span class="shrink-0 text-muted">{t.size}</span>
                 </button>
               {/each}
@@ -519,10 +559,13 @@ Rules you MUST follow:
             <ul class="space-y-1.5">
               {#each shownPrompts as p (p.text)}
                 <li class="flex items-start gap-1.5">
-                  <button type="button" onclick={() => remix(p.text)}
+                  <button type="button" onclick={() => remix(p.text)} title="Load this prompt into Compose"
                     class="group min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] p-2 text-left transition hover:border-[var(--accent)]">
                     <span class="line-clamp-2 text-xs leading-relaxed text-ink">{p.text}</span>
-                    {#if p.count > 1}<span class="mt-0.5 block text-[0.625rem] text-muted">×{p.count}</span>{/if}
+                    <span class="mt-1 flex items-center justify-between gap-2">
+                      {#if p.count > 1}<span class="text-[0.625rem] text-muted">×{p.count}</span>{:else}<span></span>{/if}
+                      <span class="rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition group-hover:border-[var(--accent)] group-hover:text-[var(--accent)]">Load</span>
+                    </span>
                   </button>
                   {#if embed.configured && embed.embedded > 0}
                     <button type="button" onclick={() => moreLike(p.text)} title="Find similar prompts" aria-label="Find similar prompts"

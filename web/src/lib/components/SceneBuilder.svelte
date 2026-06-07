@@ -142,16 +142,19 @@
 
     <div class="mt-3 flex flex-wrap items-end gap-x-5 gap-y-3">
       <div>
-        <div class="mb-1 text-[0.625rem] font-bold uppercase tracking-wider text-muted">Beat detail</div>
+        <div class="mb-1 text-[0.625rem] font-bold uppercase tracking-wider text-muted"
+          title="Concise gives each beat short, direct motion instructions. Detailed adds richer action, camera, dialogue, and continuity.">Beat detail</div>
         <div class="flex rounded-full border border-line p-0.5">
           {#each [['concise', 'Concise'], ['detailed', 'Detailed']] as [v, label] (v)}
             <button type="button" onclick={() => (detail = v)}
+              title={v === 'concise' ? 'Short, direct beat prompts for quick chaining.' : 'Richer beat prompts with more action, camera, dialogue, and continuity.'}
               class="rounded-full px-3 py-1 text-sm font-semibold transition {detail === v ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}">{label}</button>
           {/each}
         </div>
       </div>
-      <label class="flex cursor-pointer items-center gap-2 pb-1 text-sm font-semibold">
-        <input type="checkbox" bind:checked={arc} class="h-4 w-4 accent-[var(--accent)]" />
+      <label class="flex cursor-pointer items-center gap-2 pb-1 text-sm font-semibold"
+        title="Shape the generated beats as a progression: setup, escalation, peak, and resolution instead of unrelated clips.">
+        <input type="checkbox" bind:checked={arc} aria-label="Build an arc" class="h-4 w-4 accent-[var(--accent)]" />
         Build an arc
       </label>
     </div>

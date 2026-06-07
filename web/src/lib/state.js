@@ -423,18 +423,28 @@ export async function loadSavedResponses() {
 function persistSavedResponses() {
   saveSavedResponses(get(savedResponses));
 }
-export function addSavedResponse(text) {
+export function addSavedResponse(text, { folder = '' } = {}) {
   const t = String(text || '').trim();
   if (!t) return;
   let added = false;
   savedResponses.update((r) => {
     if (r.some((x) => x.text === t)) return r; // dedupe exact text
     added = true;
-    return [{ id: 'rs-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, created_at: new Date().toISOString().slice(0, 10) }, ...r];
+    return [{ id: 'rs-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text: t, created_at: new Date().toISOString().slice(0, 10), folder: String(folder || ''), tags: [] }, ...r];
   });
   if (added) { persistSavedResponses(); toast('Saved', { type: 'success' }); }
   else toast('Already saved', { type: 'info' });
   return added;
+}
+// Merge a partial patch ({ folder } / { tags }) into one saved response and persist.
+export function updateSavedResponse(id, patch) {
+  savedResponses.update((r) => r.map((x) => (x.id === id ? { ...x, ...patch } : x)));
+  persistSavedResponses();
+}
+// Replace the whole list in a new order (drag-to-reorder) and persist.
+export function setSavedResponses(list) {
+  savedResponses.set(list);
+  persistSavedResponses();
 }
 export function removeSavedResponse(id) {
   savedResponses.update((r) => r.filter((x) => x.id !== id));
