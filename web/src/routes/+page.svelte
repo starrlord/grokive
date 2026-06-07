@@ -220,6 +220,9 @@
   function openLightbox(item, list) {
     lb = { list, index: list.findIndex((x) => x.id === item.id), autoAdvance: false, title: '' };
   }
+  function openRelatedLightbox(list, index = 0, title = '') {
+    lb = { list, index, autoAdvance: false, title };
+  }
   function openCanvas(c) {
     activeCanvasName = c.name || 'Canvas';
     filters.update((f) => ({ ...f, view: 'canvases', canvas: c.id }));
@@ -449,7 +452,8 @@
 {/if}
 
 {#if lb}
-  <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} title={lb.title} onclose={() => (lb = null)} />
+  <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} title={lb.title}
+    onopenrelated={openRelatedLightbox} onclose={() => (lb = null)} />
 {/if}
 
 {#if editing}

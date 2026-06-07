@@ -54,6 +54,11 @@ export async function mediaByIds(ids) {
   return (await res.json()).items || [];
 }
 
+export async function mediaRelated(id) {
+  if (!id) return { base: null, generated: [] };
+  return getJSON(`/api/media/related?id=${encodeURIComponent(id)}`).catch(() => ({ base: null, generated: [] }));
+}
+
 export async function fetchLibrary() {
   try { return await getJSON('/api/library'); } catch { return { favorites: [], stashed: [] }; }
 }

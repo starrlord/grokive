@@ -37,6 +37,7 @@ GROK_CANVAS_GET_ENDPOINT = "https://grok.com/rest/media/canvas/get"
 GROK_POST_GET_ENDPOINT = "https://grok.com/rest/media/post/get"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mpeg", ".mpg"}
+KNOWN_MEDIA_HOSTS = {"assets.grok.com", "imagine-public.x.ai"}
 MIME_EXT = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -53,6 +54,8 @@ ID_KEYS = {"id", "generation_id", "media_id", "asset_id", "uuid"}
 DATE_KEYS = {"created_at", "createdAt", "createTime", "createdTime", "timestamp", "time", "date"}
 NEXT_KEYS = {"next", "next_cursor", "nextCursor", "cursor", "pagination_token", "continuation"}
 MODEL_KEYS = {"model", "modelName", "modelId"}
+MIME_KEYS = {"mime_type", "mimeType", "contentType", "content_type"}
+MEDIA_TYPE_KEYS = {"media_type", "mediaType", "type"}
 
 
 @dataclass
@@ -444,11 +447,15 @@ def extract_grok_media_items(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         raw = data
     elif isinstance(data, dict):
-        for key in ("mediaPosts", "items", "posts", "results", "data", "media", "list", "generations"):
-            value = data.get(key)
-            if isinstance(value, list):
-                raw = value
-                break
+        post = data.get("post")
+        if isinstance(post, dict):
+            raw = [post]
+        else:
+            for key in ("mediaPosts", "items", "posts", "results", "data", "media", "list", "generations"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    raw = value
+                    break
     if not raw:
         return []
 
@@ -456,21 +463,50 @@ def extract_grok_media_items(data: Any) -> list[dict[str, Any]]:
     for post in raw:
         if not isinstance(post, dict):
             continue
-        for item in grok_post_and_children(post):
-            record = harvest_grok_item(item, post if item is not post else None)
+        for item, parent in grok_post_and_children(post):
+            record = harvest_grok_item(item, parent)
             if record:
                 out[record["id"]] = record
     return list(out.values())
 
 
-def grok_post_and_children(post: dict[str, Any]) -> list[dict[str, Any]]:
-    items = [post]
-    for key in ("childPosts", "children", "mediaList", "media"):
-        value = post.get(key)
-        if isinstance(value, list):
-            items.extend(child for child in value if isinstance(child, dict))
-        elif isinstance(value, dict):
-            items.append(value)
+def grok_post_and_children(post: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    items: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    seen_objects: set[int] = set()
+    seen_ids: set[str] = set()
+
+    def visit(node: dict[str, Any], parent: dict[str, Any] | None) -> None:
+        object_id = id(node)
+        if object_id in seen_objects:
+            return
+        seen_objects.add(object_id)
+
+        node_id = first_value(node, ID_KEYS)
+        if node_id:
+            node_id = str(node_id)
+            if node_id in seen_ids:
+                return
+            seen_ids.add(node_id)
+
+        items.append((node, parent))
+
+        for key in ("childPosts", "children", "mediaList", "media", "images", "videos", "inputMediaItems"):
+            value = node.get(key)
+            if isinstance(value, list):
+                for child in value:
+                    if isinstance(child, dict):
+                        visit(child, node)
+            elif isinstance(value, dict):
+                visit(value, node)
+
+        # Grok stores the base image for generated videos here. It is an ancestor
+        # of the current post, so do not make its parent_id point at the video.
+        for key in ("originalPost", "parentPost", "sourcePost"):
+            value = node.get(key)
+            if isinstance(value, dict):
+                visit(value, None)
+
+    visit(post, None)
     return items
 
 
@@ -505,7 +541,15 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         or (parent or {}).get("createdAt")
     )
     model = item.get("modelName") or item.get("model") or item.get("modelId") or (parent or {}).get("modelName")
-    parent_id = (parent or {}).get("id") or (parent or {}).get("postId") or normalize_prompt(str(prompt))
+    original_post_id = item.get("originalPostId") or item.get("original_post_id")
+    parent_item_id = (parent or {}).get("id") or (parent or {}).get("postId")
+    parent_original_id = (parent or {}).get("originalPostId") or (parent or {}).get("original_post_id")
+    if original_post_id and str(original_post_id) != item_id:
+        parent_id = original_post_id
+    elif parent_item_id and str(parent_item_id) != item_id and str(parent_original_id) != item_id:
+        parent_id = parent_item_id
+    else:
+        parent_id = normalize_prompt(str(prompt))
     res = item.get("resolution") or (parent or {}).get("resolution") or {}
     width = res.get("width") if isinstance(res, dict) else None
     height = res.get("height") if isinstance(res, dict) else None
@@ -517,6 +561,8 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         "model": model,
         "parent_id": parent_id,
         "source_url": url,
+        "mime_type": first_value(item, MIME_KEYS),
+        "media_type": first_value(item, MEDIA_TYPE_KEYS),
         "width": width,
         "height": height,
     }
@@ -546,7 +592,11 @@ def media_urls_in(node: dict[str, Any]) -> list[str]:
 def is_media_url(value: str) -> bool:
     parsed = urlparse(value)
     ext = Path(parsed.path).suffix.lower()
-    return parsed.scheme in {"http", "https"} and ext in IMAGE_EXTS.union(VIDEO_EXTS)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if ext in IMAGE_EXTS.union(VIDEO_EXTS):
+        return True
+    return parsed.netloc.lower() in KNOWN_MEDIA_HOSTS
 
 
 def merge_ancestors(nodes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -583,9 +633,20 @@ def media_type_for(url: str) -> str:
 
 def resolve_media_type(raw: dict[str, Any]) -> str:
     """Prefer an explicit mimeType (canvas assets have extension-less URLs)."""
-    mime = raw.get("mime_type")
+    mime = first_value(raw, MIME_KEYS)
     if isinstance(mime, str) and mime:
-        return "video" if mime.startswith("video") else "image"
+        mime = mime.lower()
+        if mime.startswith("video"):
+            return "video"
+        if mime.startswith("image"):
+            return "image"
+    media_type = first_value(raw, MEDIA_TYPE_KEYS)
+    if isinstance(media_type, str) and media_type:
+        media_type = media_type.lower()
+        if "video" in media_type:
+            return "video"
+        if "image" in media_type:
+            return "image"
     return media_type_for(str(raw.get("source_url", "")))
 
 
@@ -767,7 +828,7 @@ def main() -> None:
         default=None,
         help=(
             "Download specific Grok Imagine posts by id or /imagine/post/<id> URL "
-            "(the root media plus its child posts)."
+            "(root media, original/base media, and child posts)."
         ),
     )
     parser.add_argument(
@@ -853,8 +914,8 @@ def archive_posts(
     by_id: dict[str, dict[str, Any]],
     args: argparse.Namespace,
 ) -> int:
-    """Download specific posts by id/URL: the root media plus every child post,
-    reusing the same per-post extraction the favorites list uses."""
+    """Download specific posts by id/URL, reusing the same per-post extraction
+    the favorites list uses."""
     requested = [normalize_post_id(v) for v in args.grok_posts]
     print(f"fetching {len(requested)} post(s)")
     saved_count = 0

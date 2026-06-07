@@ -418,6 +418,50 @@ def media_by_ids(db_path: str | Path, ids: list[str]) -> list[dict[str, Any]]:
         conn.close()
 
 
+def _media_dict(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d = dict(row)
+    d["has_subtitles"] = bool(d["has_subtitles"])
+    d["tags"] = [
+        r[0] for r in conn.execute("SELECT tag FROM media_tags WHERE media_id = ? ORDER BY tag", (d["id"],))
+    ]
+    return d
+
+
+def media_related(db_path: str | Path, media_id: str, limit: int = 100) -> dict[str, Any]:
+    """Local media related through downloader parent_id links.
+
+    Videos generated from a base image store parent_id=<image id>. Return the
+    local base image for a video, and local generated videos for an image.
+    """
+    conn = _connect(db_path)
+    try:
+        current = _media_dict(conn, conn.execute("SELECT * FROM media WHERE id = ?", (str(media_id),)).fetchone())
+        if not current:
+            return {"base": None, "generated": []}
+
+        base = None
+        if current.get("media_type") == "video" and current.get("parent_id"):
+            base = _media_dict(
+                conn,
+                conn.execute("SELECT * FROM media WHERE id = ?", (str(current["parent_id"]),)).fetchone(),
+            )
+
+        generated: list[dict[str, Any]] = []
+        if current.get("media_type") == "image":
+            rows = conn.execute(
+                "SELECT * FROM media WHERE parent_id = ? AND media_type = 'video' "
+                "ORDER BY created_at DESC LIMIT ?",
+                (str(media_id), max(1, min(500, int(limit)))),
+            ).fetchall()
+            generated = [d for row in rows if (d := _media_dict(conn, row))]
+
+        return {"base": base, "generated": generated}
+    finally:
+        conn.close()
+
+
 def delete_media(db_path: str | Path, ids: list[str]) -> int:
     """Remove media rows (and their tags / FTS entries) for the given ids. Returns
     the number of media rows deleted. The DB is derived, so this just keeps the

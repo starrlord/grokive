@@ -18,6 +18,7 @@
   import { onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
   import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
+  import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -40,7 +41,7 @@
     return `${gb.toFixed(gb < 10 ? 1 : 0).replace(/\.0$/, '')} GB`;
   }
 
-  let { list = [], index = 0, autoAdvance = false, title = '', onclose = () => {} } = $props();
+  let { list = [], index = 0, autoAdvance = false, title = '', onclose = () => {}, onopenrelated = () => {} } = $props();
   let i = $state(index);
   $effect(() => { i = index; });
 
@@ -61,6 +62,9 @@
   let videoEl = $state(null);
   let stageEl = $state(null);
   let showInfo = $state(false);
+  let relatedFor = $state('');
+  let related = $state({ base: null, generated: [] });
+  let relatedLoading = $state(false);
   // The bottom counter (title · "3 / 47") sits exactly where iOS draws captions
   // and its native control bar, so leaving it up permanently covers both. Reveal
   // it on each clip change and on pointer activity, then fade it out while the
@@ -144,6 +148,33 @@
   function step(d) {
     const n = i + d;
     if (n >= 0 && n < liveList.length) i = n;
+  }
+
+  $effect(() => {
+    const it = item;
+    if (!showInfo || !it) return;
+    const id = it.id;
+    relatedFor = id;
+    related = { base: null, generated: [] };
+    relatedLoading = true;
+    mediaRelated(id)
+      .then((data) => {
+        if (relatedFor !== id) return;
+        related = { base: data?.base || null, generated: data?.generated || [] };
+      })
+      .catch(() => {
+        if (relatedFor === id) related = { base: null, generated: [] };
+      })
+      .finally(() => {
+        if (relatedFor === id) relatedLoading = false;
+      });
+  });
+
+  function openRelated(relatedList, nextTitle) {
+    const clean = (relatedList || []).filter(Boolean);
+    if (!clean.length) return;
+    showInfo = false;
+    onopenrelated(clean, 0, nextTitle);
   }
 
   // Persistent <video>: update src in place so native/container fullscreen
@@ -288,6 +319,25 @@
             (item.href || '').split('/').pop()
           ].filter(Boolean).join('  ·  ')}
         </p>
+        {#if related.base || related.generated.length}
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <span class="text-xs font-bold uppercase tracking-wide text-muted">Related</span>
+            {#if related.base}
+              <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold hover:border-[var(--accent)]"
+                title="Open the base image this video was generated from"
+                onclick={() => openRelated([related.base], 'Base image')}>Base image</button>
+            {/if}
+            {#if related.generated.length}
+              <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold hover:border-[var(--accent)]"
+                title="Open videos generated from this image"
+                onclick={() => openRelated(related.generated, `${related.generated.length} generated video${related.generated.length === 1 ? '' : 's'}`)}>
+                {related.generated.length} generated video{related.generated.length === 1 ? '' : 's'}
+              </button>
+            {/if}
+          </div>
+        {:else if relatedLoading}
+          <p class="mb-3 text-xs text-muted">Checking related media…</p>
+        {/if}
         <div class="flex flex-wrap gap-2">
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
             onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥ Favorited' : '♡ Favorite'}</button>

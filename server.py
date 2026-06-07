@@ -1752,6 +1752,17 @@ def api_media_by_ids() -> Response:
     return jsonify(items=db.media_by_ids(DB_FILE, ids))
 
 
+@app.get("/api/media/related")
+def api_media_related() -> Response:
+    """Local parent/child media links for the lightbox info panel."""
+    if not DB_FILE.exists():
+        rebuild_db()
+    media_id = str(request.args.get("id") or "").strip()
+    if not media_id:
+        return jsonify(base=None, generated=[])
+    return jsonify(db.media_related(DB_FILE, media_id))
+
+
 # --------------------------------------------------------------------------- #
 # Prompt Studio (Phase 0: corpus vocabulary mining + structured composer).
 # Pure, offline — no model calls. Embeddings / LLM arrive in later phases behind
