@@ -201,6 +201,18 @@ export async function generatePrompts(body) {
   return d; // { variations: string[], model }
 }
 
+// Enhance one saved prompt into a more descriptive prompt; optionally rewrite only quoted dialogue.
+export async function enhancePrompt(prompt, { dialogue_level = 'normal', dialogue_only = false } = {}) {
+  const res = await fetch('/api/prompts/enhance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, dialogue_level, dialogue_only })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Enhance failed.');
+  return d; // { prompt, dialogue_level, dialogue_only, model }
+}
+
 // Auto-tag — suggest a folder + tags for one saved prompt via the local LLM. Pass the labels
 // already in use so the model reuses them instead of inventing near-duplicates.
 export async function autotagPrompt(text, { folders = [], tags = [] } = {}) {

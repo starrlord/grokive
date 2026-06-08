@@ -2004,6 +2004,30 @@ def api_prompts_generate() -> Response:
     return jsonify(ok=True, variations=variations, model=model)
 
 
+@app.post("/api/prompts/enhance")
+def api_prompts_enhance() -> Response:
+    """Enhance one saved prompt into a richer prompt. Needs LLM_SERVER_URL."""
+    base, model = _llm_url(), _llm_model()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", prompt=""), 400
+    payload = request.get_json(silent=True) or {}
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify(ok=False, error="No prompt provided.", prompt=""), 400
+    dialogue_level = str(payload.get("dialogue_level") or "normal").strip().lower()
+    if dialogue_level not in ("normal", "dirtier", "filthier"):
+        dialogue_level = "normal"
+    dialogue_only = bool(payload.get("dialogue_only"))
+    try:
+        enhanced = promptstudio.enhance_prompt(
+            base, model, prompt=prompt, dialogue_level=dialogue_level, examples=_style_examples(),
+            dialogue_only=dialogue_only,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], prompt=""), 502
+    return jsonify(ok=True, prompt=enhanced, dialogue_level=dialogue_level, dialogue_only=dialogue_only, model=model)
+
+
 @app.post("/api/prompts/autotag")
 def api_prompts_autotag() -> Response:
     """Suggest a folder + tags for one saved prompt via the local LLM. Needs LLM_SERVER_URL.

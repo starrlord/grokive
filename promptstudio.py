@@ -140,6 +140,39 @@ _FILLER = {
 _STOP = set(STOPWORDS) | _FILLER
 
 _QUOTE = re.compile(r"[\"“”‘’']{1}([^\"“”]{3,}?)[\"“”'’]")
+_QUOTE_PAIRS = {'"': '"', "“": "”", "'": "'", "‘": "’"}
+
+
+def _dialogue_spans(text: str) -> list[dict]:
+    """Return quoted spans with delimiters so dialogue-only enhancement can preserve the prompt."""
+    s = str(text or "")
+    spans: list[dict] = []
+    i = 0
+    while i < len(s):
+        opener = s[i]
+        closer = _QUOTE_PAIRS.get(opener)
+        if not closer:
+            i += 1
+            continue
+        # Avoid treating contractions or possessives as single-quote dialogue.
+        if opener == "'" and i > 0 and s[i - 1].isalnum():
+            i += 1
+            continue
+        j = i + 1
+        while j < len(s):
+            if s[j] == closer:
+                if closer == "'" and j + 1 < len(s) and s[j + 1].isalnum():
+                    j += 1
+                    continue
+                content = s[i + 1:j].strip()
+                if content:
+                    spans.append({"start": i, "end": j + 1, "open": opener, "close": closer, "text": content})
+                i = j + 1
+                break
+            j += 1
+        else:
+            i += 1
+    return spans
 
 
 def _classify(clause: str) -> str:
@@ -781,6 +814,83 @@ def generate(base: str, model: str, *, prompt: str, mode: str = "variations",
         single = _clean_single(content)
         return [single] if single else []
     return _clean_lines(content, n)
+
+
+def enhance_prompt(base: str, model: str, *, prompt: str, dialogue_level: str = "normal",
+                   examples: list[str] | None = None, dialogue_only: bool = False) -> str:
+    """Rewrite one prompt into a compact Grok Imagine-friendly prompt.
+
+    ``dialogue_level`` controls only quoted speech. The visual scene should always stay aligned with
+    the source prompt, while the user can deliberately make the dialogue more raunchy when desired.
+    """
+    examples = [e for e in (examples or []) if e][:4]
+    level = str(dialogue_level or "normal").strip().lower()
+    if level not in {"normal", "dirtier", "filthier"}:
+        level = "normal"
+
+    system = _SYSTEM + _REALISM
+    if examples:
+        system += "\n\nMatch the user's prompt-library style:\n" + "\n".join(f"- {e}" for e in examples)
+
+    dialogue_rules = {
+        "normal": (
+            "Keep any dialogue natural and direct. If the prompt already has quoted dialogue, replace "
+            "it with fresher wording that preserves the same emotional beat. Do not add dialogue when none exists."
+        ),
+        "dirtier": (
+            "Make any dialogue more suggestive, provocative, profane where useful, and sexually charged while "
+            "keeping the same speaker, situation, and adult intent. Use new wording, not a close paraphrase. "
+            "If no dialogue exists, you may add one concise quoted line only when it fits naturally."
+        ),
+        "filthier": (
+            "Make any dialogue much more explicit, raunchy, blunt, and sexually charged while keeping the same "
+            "speaker, situation, and adult intent. Invent new, unique sentences that fit the scene instead of "
+            "closely rephrasing the original. If no dialogue exists, add one concise quoted line when it fits naturally."
+        ),
+    }
+    if dialogue_only:
+        spans = _dialogue_spans(prompt)
+        if not spans:
+            raise ValueError("No quoted dialogue found.")
+        lines = [s["text"] for s in spans]
+        task = (
+            "Rewrite ONLY these quoted dialogue blocks for an AI image/video prompt. A block may contain "
+            "one sentence or multiple sentences. Keep the same speaker, situation, attitude, and scene meaning, "
+            "but invent new and unique sentence wording instead of closely paraphrasing. Push the dialogue according to "
+            f"this intensity rule: {dialogue_rules[level]} Return ONLY a JSON array of strings, with "
+            "exactly the same number of items and the same order. Do not include surrounding quote marks. "
+            "Keep each replacement usable as spoken dialogue in a short Grok Imagine clip: concise, direct, "
+            "and no rambling monologues.\n\n"
+            f"{json.dumps(lines, ensure_ascii=False)}"
+        )
+        content = _llm_call(base, model, [
+            {"role": "system", "content": system},
+            {"role": "user", "content": task},
+        ], temperature=0.65 if level == "normal" else 0.78)
+        rewritten = [_clean_single(x)[:800] for x in _extract_str_array(content, len(lines))]
+        if not rewritten:
+            raise ValueError("The model returned no usable dialogue.")
+        while len(rewritten) < len(spans):
+            rewritten.append(lines[len(rewritten)])
+        out = str(prompt)
+        for span, repl in reversed(list(zip(spans, rewritten[:len(spans)]))):
+            out = out[:span["start"]] + span["open"] + repl + span["close"] + out[span["end"]:]
+        return out[:2000]
+
+    task = (
+        "Rewrite this for Grok Imagine as a compact, high-signal creative brief. Keep the same core "
+        "subject, adult intent when present, setting, characters, and scene meaning. Do not add new "
+        "characters or unrelated acts. Use one vivid subject phrase, one primary action, one setting or "
+        "mood cue, one camera/framing cue, one lighting/style cue, optional sound or quoted dialogue, "
+        "and one stability rule. Prefer short, concrete language over keyword stuffing or a long prompt. "
+        "Keep it as ONE prompt under 85 words. "
+        f"{dialogue_rules[level]} Return only the enhanced prompt.\n\n{prompt[:2000]}"
+    )
+    content = _llm_call(base, model, [
+        {"role": "system", "content": system},
+        {"role": "user", "content": task},
+    ], temperature=0.68 if level == "normal" else 0.78)
+    return _clean_single(content)[:900]
 
 
 def _extract_json(text: str):

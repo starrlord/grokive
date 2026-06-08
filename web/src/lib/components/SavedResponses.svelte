@@ -4,7 +4,7 @@
     savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses
   } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
-  import { auditPromptLabels, autotagPrompt } from '$lib/api.js';
+  import { auditPromptLabels, autotagPrompt, enhancePrompt } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
 
   let { llmReady = false } = $props(); // local LLM configured -> show auto-tag affordances
@@ -15,7 +15,13 @@
   // of cross-cutting TAGS. Drag-to-reorder works in a plain folder view (no tag/search filter active).
   const ALL = '__all';
   const UNFILED = '__unfiled';
+  const ENHANCED_FOLDER = 'Enhanced';
   const LAST_FOLDER_KEY = 'ga.savedResponses.activeFolder';
+  const DIALOGUE_LEVELS = [
+    { key: 'normal', label: 'Natural' },
+    { key: 'dirtier', label: 'Suggestive' },
+    { key: 'filthier', label: 'Unfiltered' }
+  ];
   let q = $state('');
   let draft = $state('');
   let activeFolder = $state(ALL);
@@ -140,6 +146,12 @@
 
   function toggleTagFilter(t) {
     activeTags = activeTags.includes(t) ? activeTags.filter((x) => x !== t) : [...activeTags, t];
+  }
+  function showRelatedTag(t) {
+    q = '';
+    activeFolder = ALL;
+    activeTags = [t];
+    try { localStorage.setItem(LAST_FOLDER_KEY, ALL); } catch {}
   }
 
   // Inline folder creation — mirrors the `+ tag` editor and persona cards (no native prompt).
@@ -324,6 +336,74 @@
     auditRunning = false;
   }
 
+  // --- Enhance prompt (local LLM expands detail, then user saves a reviewed copy) --------------
+  let enhance = $state({
+    open: false,
+    loading: false,
+    source: '',
+    text: '',
+    level: '',
+    dialogueOnly: false,
+    model: ''
+  });
+  const canSaveEnhanced = $derived(Boolean(enhance.text.trim()));
+
+  async function runEnhance(level = enhance.level || 'normal', source = enhance.source, dialogueOnly = enhance.dialogueOnly) {
+    if (!source.trim()) return;
+    enhance = { ...enhance, open: true, loading: true, level, source, dialogueOnly };
+    try {
+      const res = await enhancePrompt(source, { dialogue_level: level, dialogue_only: dialogueOnly });
+      enhance = {
+        ...enhance,
+        loading: false,
+        level: res.dialogue_level || level,
+        dialogueOnly: Boolean(res.dialogue_only),
+        text: res.prompt || '',
+        model: res.model || ''
+      };
+      if (!enhance.text.trim()) toast('The model returned nothing usable — try again.', { type: 'error' });
+    } catch (e) {
+      enhance = { ...enhance, loading: false };
+      toast(e.message || 'Enhance failed', { type: 'error' });
+    }
+  }
+  function openEnhanceSource(source) {
+    if (!source.trim()) return;
+    enhance = { open: true, loading: false, source, text: '', level: '', dialogueOnly: false, model: '' };
+  }
+  function openEnhance(r) {
+    openEnhanceSource(textOf(r));
+  }
+  function openDraftEnhance() {
+    openEnhanceSource(draft);
+  }
+  function closeEnhance() {
+    if (enhance.loading) return;
+    enhance = { open: false, loading: false, source: '', text: '', level: '', dialogueOnly: false, model: '' };
+  }
+  function chooseEnhanceLevel(level) {
+    if (enhance.loading) return;
+    runEnhance(level);
+  }
+  function toggleDialogueOnly() {
+    if (enhance.loading) return;
+    const next = !enhance.dialogueOnly;
+    enhance = { ...enhance, dialogueOnly: next, text: '', model: '' };
+  }
+  async function copyEnhanced() {
+    if (!enhance.text.trim()) return;
+    const ok = await copyText(enhance.text);
+    toast(ok ? 'Enhanced prompt copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
+  }
+  function saveEnhanced() {
+    if (!canSaveEnhanced) return;
+    if (addSavedResponse(enhance.text, { folder: ENHANCED_FOLDER })) {
+      activeFolder = ENHANCED_FOLDER;
+      try { localStorage.setItem(LAST_FOLDER_KEY, ENHANCED_FOLDER); } catch {}
+      closeEnhance();
+    }
+  }
+
   // Two-step delete: first click arms "Sure?", second confirms. Auto-disarms after a few seconds.
   // Inline (no modal) — deletes here are low-stakes (the text is re-addable) and per-row.
   let confirmDeleteId = $state(null);
@@ -503,8 +583,16 @@
         <span class="text-[0.6875rem] text-muted">
           ⌘/Ctrl + Enter to save{#if activeFolder !== ALL && activeFolder !== UNFILED} · to <strong class="font-semibold text-ink">{activeFolder}</strong>{/if}
         </span>
-        <button type="button" onclick={add} disabled={!draft.trim()}
-          class="rounded-md border border-line px-3 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">+ Add prompt</button>
+        <div class="flex shrink-0 items-center gap-2">
+          {#if llmReady}
+            <button type="button" onclick={openDraftEnhance} disabled={!draft.trim() || enhance.loading}
+              class="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">
+              <span aria-hidden="true">✧</span> AI Enhance
+            </button>
+          {/if}
+          <button type="button" onclick={add} disabled={!draft.trim()}
+            class="rounded-md border border-line px-3 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">+ Add prompt</button>
+        </div>
       </div>
     </div>
 
@@ -603,6 +691,10 @@
 
               <div class="flex shrink-0 flex-row items-center gap-1">
                 {#if llmReady}
+                  <button type="button" onclick={() => openEnhance(r)} disabled={enhance.loading} title="Enhance prompt"
+                    class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
+                    <span aria-hidden="true">✧</span>Enhance
+                  </button>
                   <button type="button" onclick={() => autotag(r)} disabled={suggest[id]?.loading} title="Suggest tags & folder"
                     class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
                     <span aria-hidden="true">✦</span>{suggest[id]?.loading ? '...' : 'AI'}
@@ -623,9 +715,14 @@
               <!-- Tags + folder picker -->
               <div class="mt-2 flex flex-wrap items-center gap-1.5">
                 {#each tagsOf(r) as t (t)}
-                  <span class="inline-flex items-center gap-1 rounded-full border border-line bg-[var(--surface)] px-2 py-0.5 text-[0.6875rem] text-muted">
-                    #{t}
-                    <button type="button" onclick={() => removeTag(r, t)} aria-label={`Remove tag ${t}`} class="leading-none transition hover:text-[var(--danger)]">×</button>
+                  <span class="inline-flex items-center overflow-hidden rounded-full border text-[0.6875rem] {activeTags.includes(t) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line bg-[var(--surface)] text-muted'}">
+                    <button type="button" onclick={() => showRelatedTag(t)}
+                      title={`Show prompts tagged #${t}`}
+                      class="px-2 py-0.5 text-left transition hover:brightness-110">
+                      #{t}
+                    </button>
+                    <button type="button" onclick={() => removeTag(r, t)} aria-label={`Remove tag ${t}`}
+                      class="border-l px-1.5 py-0.5 leading-none transition hover:text-[var(--danger)] {activeTags.includes(t) ? 'border-white/25' : 'border-line'}">×</button>
                   </span>
                 {/each}
                 {#if tagEditId === id}
@@ -694,6 +791,80 @@
     {/if}
   </div>
 </div>
+
+{#if enhance.open}
+  <div class="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-3 backdrop-blur-sm">
+    <div role="dialog" aria-modal="true" aria-labelledby="enhance-title"
+      class="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col rounded-xl border border-line bg-[var(--surface-solid)] shadow-2xl">
+      <header class="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <div class="min-w-0">
+          <h3 id="enhance-title" class="text-sm font-extrabold text-ink">Enhanced prompt</h3>
+          <p class="mt-0.5 text-xs text-muted">
+            Save as a new prompt in <span class="font-semibold text-ink">{ENHANCED_FOLDER}</span>{#if enhance.model} · {enhance.model}{/if}
+          </p>
+        </div>
+        <button type="button" onclick={closeEnhance} disabled={enhance.loading} aria-label="Close"
+          class="rounded-md border border-line px-2 py-1 text-xs font-bold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">×</button>
+      </header>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <span class="text-[0.6875rem] font-bold uppercase tracking-wider text-muted">Dialogue</span>
+          <div class="flex rounded-lg border border-line p-0.5">
+            {#each DIALOGUE_LEVELS as option (option.key)}
+              <button type="button" onclick={() => chooseEnhanceLevel(option.key)} disabled={enhance.loading}
+                class="rounded-md px-2.5 py-1 text-xs font-semibold transition disabled:opacity-40 {enhance.level === option.key ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}">
+                {option.label}
+              </button>
+            {/each}
+          </div>
+          <button type="button" onclick={toggleDialogueOnly} disabled={enhance.loading}
+            class="rounded-md border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-40 {enhance.dialogueOnly ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-ink' : 'border-line text-muted hover:border-[var(--accent)] hover:text-ink'}">
+            Dialogue only
+          </button>
+          <button type="button" onclick={() => runEnhance()} disabled={enhance.loading || !enhance.level}
+            class="ml-auto rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)] disabled:opacity-40">
+            {enhance.loading ? 'Enhancing...' : 'Regenerate'}
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <div class="min-w-0">
+            <div class="mb-1.5 text-[0.625rem] font-bold uppercase tracking-wider text-muted">Original</div>
+            <div class="max-h-72 overflow-y-auto rounded-lg border border-line bg-[var(--surface)]/60 p-3 text-sm leading-relaxed text-muted">
+              <p class="whitespace-pre-wrap break-words">{enhance.source}</p>
+            </div>
+          </div>
+          <div class="min-w-0">
+            <div class="mb-1.5 flex items-center justify-between gap-2">
+              <span class="text-[0.625rem] font-bold uppercase tracking-wider text-muted">Enhanced</span>
+              <span class="text-[0.625rem] text-muted">{enhance.text.length} chars</span>
+            </div>
+            {#if enhance.loading}
+              <div class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-line bg-[var(--surface)]/45 text-sm font-semibold text-[var(--accent)]">
+                Enhancing...
+              </div>
+            {:else if !enhance.text}
+              <div class="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-line bg-[var(--surface)]/45 px-4 text-center text-sm font-semibold text-muted">
+                Choose Natural, Suggestive, or Unfiltered to enhance this prompt.
+              </div>
+            {:else}
+              <textarea bind:value={enhance.text} rows="10" maxlength="2000" use:focusOnMount
+                class="min-h-48 w-full resize-y rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm leading-relaxed text-ink outline-none focus:border-[var(--accent)]"></textarea>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <footer class="flex flex-wrap items-center justify-end gap-2 border-t border-line px-4 py-3">
+        <button type="button" onclick={copyEnhanced} disabled={enhance.loading || !enhance.text.trim()}
+          class="rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)] disabled:opacity-40">Copy</button>
+        <button type="button" onclick={saveEnhanced} disabled={enhance.loading || !canSaveEnhanced}
+          class="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--on-accent)] transition hover:brightness-110 disabled:opacity-40">Save as new</button>
+      </footer>
+    </div>
+  </div>
+{/if}
 
 <style>
   /* reveal() animates max-height between the clamped floor and full height; this is the easing. */
