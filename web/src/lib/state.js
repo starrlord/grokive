@@ -409,7 +409,23 @@ export const settings = writable({
   whisper_configured: false,
   whisper_server_url: '',
   whisper_env_locked: false,
-  burn_subtitles: false
+  burn_subtitles: false,
+  embed_configured: false,
+  embed_server_url: '',
+  embed_model: '',
+  embed_env_locked: false,
+  embed_model_env_locked: false,
+  embed_provider: 'local',
+  embed_api_key_configured: false,
+  embed_api_key_env_locked: false,
+  llm_configured: false,
+  llm_server_url: '',
+  llm_model: '',
+  llm_env_locked: false,
+  llm_model_env_locked: false,
+  llm_provider: 'local',
+  llm_api_key_configured: false,
+  llm_api_key_env_locked: false
 });
 export async function loadSettings() {
   try { settings.set(await getSettings()); } catch {}

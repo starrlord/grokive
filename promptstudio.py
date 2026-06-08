@@ -444,9 +444,26 @@ def connect(db_path) -> sqlite3.Connection:
     return conn
 
 
+# --- OpenAI-compatible endpoint clients ------------------------------------- #
+
+def _api_headers(api_key: str = "", extra_headers: dict | None = None) -> dict:
+    headers = {"Content-Type": "application/json"}
+    key = str(api_key or "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    for k, v in (extra_headers or {}).items():
+        name = str(k or "").strip()
+        value = str(v or "").strip()
+        if name and value:
+            headers[name] = value
+    return headers
+
+
 # --- Embeddings endpoint client (OpenAI-compatible /v1/embeddings) ---------- #
 
-def _embed_call(base: str, model: str, inputs: list[str], *, is_query: bool, timeout: float = 120.0) -> list[list[float]]:
+def _embed_call(base: str, model: str, inputs: list[str], *, is_query: bool,
+                timeout: float = 120.0, api_key: str = "",
+                extra_headers: dict | None = None) -> list[list[float]]:
     """POST ``{base}/embeddings`` and return one vector per input (input order).
 
     nomic-embed-text retrieves best with task prefixes, so documents and queries are
@@ -457,7 +474,7 @@ def _embed_call(base: str, model: str, inputs: list[str], *, is_query: bool, tim
     url = base.rstrip("/") + "/embeddings"
     body = json.dumps({"model": model, "input": inputs}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        url, data=body, headers=_api_headers(api_key, extra_headers), method="POST"
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -465,9 +482,13 @@ def _embed_call(base: str, model: str, inputs: list[str], *, is_query: bool, tim
     return [r["embedding"] for r in rows]
 
 
-def embed_query(base: str, model: str, text: str) -> list[float]:
+def embed_query(base: str, model: str, text: str, *, api_key: str = "",
+                extra_headers: dict | None = None) -> list[float]:
     """Embed a single query string (with the query-side task prefix)."""
-    vecs = _embed_call(base, model, [str(text or "")], is_query=True)
+    vecs = _embed_call(
+        base, model, [str(text or "")], is_query=True,
+        api_key=api_key, extra_headers=extra_headers,
+    )
     return vecs[0] if vecs else []
 
 
@@ -490,7 +511,8 @@ def embed_status(db_path, prompts: list[str], model: str) -> dict:
 
 
 def build_embeddings(db_path, prompts: list[str], base: str, model: str, *,
-                     batch: int = 32, progress=None, should_stop=None) -> dict:
+                     batch: int = 32, progress=None, should_stop=None,
+                     api_key: str = "", extra_headers: dict | None = None) -> dict:
     """Incrementally embed every unique prompt not yet stored for ``model``. Only the
     missing ones are sent, so re-runs are cheap. ``progress(done, total)`` is called
     per batch; ``should_stop()`` lets a caller cancel between batches."""
@@ -509,7 +531,10 @@ def build_embeddings(db_path, prompts: list[str], base: str, model: str, *,
             if should_stop and should_stop():
                 break
             chunk = todo[i:i + batch]
-            vecs = _embed_call(base, model, [t for _, t in chunk], is_query=False)
+            vecs = _embed_call(
+                base, model, [t for _, t in chunk], is_query=False,
+                api_key=api_key, extra_headers=extra_headers,
+            )
             rows = []
             for (h, t), v in zip(chunk, vecs):
                 arr = np.asarray(v, dtype=np.float32)
@@ -729,7 +754,8 @@ _LIST_MARK = re.compile(r"^\s*(\d+\s*[.)\-]|[-*•])\s*")
 
 
 def _llm_call(base: str, model: str, messages: list[dict], *, temperature: float = 0.9,
-              timeout: float = 180.0) -> str:
+              timeout: float = 180.0, api_key: str = "",
+              extra_headers: dict | None = None) -> str:
     """POST ``{base}/chat/completions`` and return the assistant message text."""
     url = base.rstrip("/") + "/chat/completions"
     body = json.dumps({
@@ -737,7 +763,7 @@ def _llm_call(base: str, model: str, messages: list[dict], *, temperature: float
         "temperature": temperature, "stream": False,
     }).encode("utf-8")
     req = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        url, data=body, headers=_api_headers(api_key, extra_headers), method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
@@ -774,7 +800,8 @@ def _clean_single(text: str) -> str:
 
 def generate(base: str, model: str, *, prompt: str, mode: str = "variations",
              n: int = 4, instruction: str = "", examples: list[str] | None = None,
-             persona: str = "") -> list[str]:
+             persona: str = "", api_key: str = "",
+             extra_headers: dict | None = None) -> list[str]:
     """Generate prompt ``variations`` / a ``remix`` (new setting) / a single ``polish``.
 
     ``examples`` are a few of the user's own prompts, injected as style anchors; ``persona`` is
@@ -808,7 +835,7 @@ def generate(base: str, model: str, *, prompt: str, mode: str = "variations",
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
-    ], temperature=temperature)
+    ], temperature=temperature, api_key=api_key, extra_headers=extra_headers)
 
     if mode == "polish":
         single = _clean_single(content)
@@ -817,7 +844,8 @@ def generate(base: str, model: str, *, prompt: str, mode: str = "variations",
 
 
 def enhance_prompt(base: str, model: str, *, prompt: str, dialogue_level: str = "normal",
-                   examples: list[str] | None = None, dialogue_only: bool = False) -> str:
+                   examples: list[str] | None = None, dialogue_only: bool = False,
+                   api_key: str = "", extra_headers: dict | None = None) -> str:
     """Rewrite one prompt into a compact Grok Imagine-friendly prompt.
 
     ``dialogue_level`` controls only quoted speech. The visual scene should always stay aligned with
@@ -866,7 +894,8 @@ def enhance_prompt(base: str, model: str, *, prompt: str, dialogue_level: str = 
         content = _llm_call(base, model, [
             {"role": "system", "content": system},
             {"role": "user", "content": task},
-        ], temperature=0.65 if level == "normal" else 0.78)
+        ], temperature=0.65 if level == "normal" else 0.78,
+            api_key=api_key, extra_headers=extra_headers)
         rewritten = [_clean_single(x)[:800] for x in _extract_str_array(content, len(lines))]
         if not rewritten:
             raise ValueError("The model returned no usable dialogue.")
@@ -889,7 +918,8 @@ def enhance_prompt(base: str, model: str, *, prompt: str, dialogue_level: str = 
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
-    ], temperature=0.68 if level == "normal" else 0.78)
+    ], temperature=0.68 if level == "normal" else 0.78,
+        api_key=api_key, extra_headers=extra_headers)
     return _clean_single(content)[:900]
 
 
@@ -978,7 +1008,8 @@ def _taxonomy_prompt(folders: list[str], tags: list[str], *, audit: bool = False
 
 
 def suggest_labels(base: str, model: str, *, prompt: str,
-                   folders: list[str] | None = None, tags: list[str] | None = None) -> dict:
+                   folders: list[str] | None = None, tags: list[str] | None = None,
+                   api_key: str = "", extra_headers: dict | None = None) -> dict:
     """Categorize one library prompt: suggest a single folder + a few tags, reusing the user's
     existing labels wherever they fit so the vocabulary stays tight. Returns
     ``{"folder": str, "tags": [str, ...]}`` (empty on an unparseable response — never raises for
@@ -990,7 +1021,7 @@ def suggest_labels(base: str, model: str, *, prompt: str,
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": prompt[:2000]},
-    ], temperature=0.2)
+    ], temperature=0.2, api_key=api_key, extra_headers=extra_headers)
 
     data = _extract_json(content) or {}
     out_tags = _clean_tag_list(data.get("tags"))
@@ -1000,7 +1031,8 @@ def suggest_labels(base: str, model: str, *, prompt: str,
 
 def audit_labels(base: str, model: str, *, prompt: str, folder: str = "",
                  current_tags: list[str] | None = None, folders: list[str] | None = None,
-                 tags: list[str] | None = None) -> dict:
+                 tags: list[str] | None = None, api_key: str = "",
+                 extra_headers: dict | None = None) -> dict:
     """Review an already-filed saved prompt and suggest useful label corrections.
 
     Returns ``{"folder": str, "tags": [...], "remove_tags": [...], "reason": str}``. The folder is
@@ -1019,7 +1051,7 @@ def audit_labels(base: str, model: str, *, prompt: str, folder: str = "",
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(current, ensure_ascii=False)},
-    ], temperature=0.15)
+    ], temperature=0.15, api_key=api_key, extra_headers=extra_headers)
 
     data = _extract_json(content) or {}
     suggested_folder = _clean_folder(data.get("folder"), folders)
@@ -1033,7 +1065,8 @@ def audit_labels(base: str, model: str, *, prompt: str, folder: str = "",
     return {"folder": suggested_folder, "tags": add_tags, "remove_tags": remove_tags, "reason": reason}
 
 
-def decompose(base: str, model: str, prompt: str) -> dict:
+def decompose(base: str, model: str, prompt: str, *, api_key: str = "",
+              extra_headers: dict | None = None) -> dict:
     """Split a prompt into the 8 authoring slots using the LLM — far better than the regex
     parser on run-on clauses (e.g. it sends 'detective'→subject, 'trench coat'→wardrobe, and
     'alley'→setting from a single clause). Returns slot -> string; never raises (an
@@ -1048,7 +1081,7 @@ def decompose(base: str, model: str, prompt: str) -> dict:
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": f"Prompt:\n{prompt}"},
-    ], temperature=0.2)
+    ], temperature=0.2, api_key=api_key, extra_headers=extra_headers)
     obj = _extract_json(content)
     out = {k: "" for k in SLOT_KEYS}
     if isinstance(obj, dict):
@@ -1108,7 +1141,8 @@ def _extract_str_array(text: str, n: int) -> list[str]:
 def generate_scene(base: str, model: str, *, base_prompt: str, beats: int,
                    increment: int, instruction: str = "", examples: list[str] | None = None,
                    persona: str = "", anchor: str = "", detail: str = "concise",
-                   arc: bool = False) -> list[str]:
+                   arc: bool = False, api_key: str = "",
+                   extra_headers: dict | None = None) -> list[str]:
     """Script a continuous multi-clip scene as ``beats`` motion+dialogue prompts.
 
     Grok builds long video by chaining ~6s/10s clips ('extend from frame'), each picking up from
@@ -1166,7 +1200,7 @@ def generate_scene(base: str, model: str, *, base_prompt: str, beats: int,
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
-    ], temperature=0.85, timeout=240.0)
+    ], temperature=0.85, timeout=240.0, api_key=api_key, extra_headers=extra_headers)
     out = [b for b in (_normalize_beat(x) for x in _extract_str_array(content, beats)) if len(b) > 8]
 
     # Guarantee the anchor at the start of every beat (deterministic — not left to the model).
@@ -1222,7 +1256,8 @@ def _apply_prefix(item: str, prefix: str) -> str:
 
 
 def generate_freeform(base: str, model: str, *, instruction: str, persona: str = "",
-                      n: int = 0, prefix: str = "") -> list[str]:
+                      n: int = 0, prefix: str = "", api_key: str = "",
+                      extra_headers: dict | None = None) -> list[str]:
     """A direct, unconstrained generation in the persona's voice — no beat/JSON/anchor scaffolding.
     Mirrors querying the model directly: the persona drives voice + explicitness, the user's own
     instruction drives the ask, and the numbered list it returns is split into items. ``prefix``, if
@@ -1244,6 +1279,6 @@ def generate_freeform(base: str, model: str, *, instruction: str, persona: str =
     content = _llm_call(base, model, [
         {"role": "system", "content": system},
         {"role": "user", "content": task},
-    ], temperature=0.9, timeout=300.0)
+    ], temperature=0.9, timeout=300.0, api_key=api_key, extra_headers=extra_headers)
     items = _split_numbered(content, n)
     return [_apply_prefix(it, prefix) for it in items] if prefix else items

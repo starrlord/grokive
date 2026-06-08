@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -111,8 +112,16 @@ EMBED_ENV = os.environ.get("EMBED_SERVER_URL", "").strip()
 EMBED_MODEL_ENV = os.environ.get("EMBED_MODEL", "").strip()
 LLM_ENV = os.environ.get("LLM_SERVER_URL", "").strip()
 LLM_MODEL_ENV = os.environ.get("LLM_MODEL", "").strip()
+EMBED_API_KEY_ENV = os.environ.get("EMBED_API_KEY", "").strip()
+LLM_API_KEY_ENV = os.environ.get("LLM_API_KEY", "").strip()
+OPENAI_API_KEY_ENV = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENROUTER_API_KEY_ENV = os.environ.get("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_HTTP_REFERER = os.environ.get("OPENROUTER_HTTP_REFERER", "").strip()
+OPENROUTER_APP_TITLE = os.environ.get("OPENROUTER_APP_TITLE", "").strip() or "Grokive"
 EMBED_MODEL_DEFAULT = "nomic-embed-text"
 LLM_MODEL_DEFAULT = "dolphin3"
+OPENAI_LLM_MODEL_DEFAULT = "gpt-5.4-mini"
+OPENROUTER_LLM_MODEL_DEFAULT = "openai/gpt-5.4-mini"
 
 
 def _auth_mode() -> str:
@@ -322,6 +331,126 @@ def _llm_url() -> str:
 
 def _llm_model() -> str:
     return LLM_MODEL_ENV or str(_load_settings().get("llm_model", "")).strip() or LLM_MODEL_DEFAULT
+
+
+def _provider_from_url(url: str) -> str:
+    host = urllib.parse.urlparse(str(url or "")).netloc.lower()
+    if "openrouter.ai" in host:
+        return "openrouter"
+    if "openai.com" in host:
+        return "openai"
+    return "custom" if url else "local"
+
+
+def _provider_key(url: str) -> str:
+    provider = _provider_from_url(url)
+    if provider == "openrouter":
+        return OPENROUTER_API_KEY_ENV
+    if provider == "openai":
+        return OPENAI_API_KEY_ENV
+    return ""
+
+
+def _provider_display(provider: str) -> str:
+    return {"openai": "OpenAI", "openrouter": "OpenRouter"}.get(provider, provider.title())
+
+
+def _llm_api_key() -> str:
+    url = _llm_url()
+    settings = _load_settings()
+    return (
+        LLM_API_KEY_ENV
+        or str(settings.get("llm_api_key", "")).strip()
+        or _provider_key(url)
+    )
+
+
+def _embed_api_key() -> str:
+    url = _embed_url()
+    settings = _load_settings()
+    return (
+        EMBED_API_KEY_ENV
+        or str(settings.get("embed_api_key", "")).strip()
+        or _provider_key(url)
+    )
+
+
+def _llm_api_key_env_locked() -> bool:
+    return bool(LLM_API_KEY_ENV or _provider_key(_llm_url()))
+
+
+def _embed_api_key_env_locked() -> bool:
+    return bool(EMBED_API_KEY_ENV or _provider_key(_embed_url()))
+
+
+def _provider_headers(url: str) -> dict:
+    if _provider_from_url(url) != "openrouter":
+        return {}
+    headers = {"X-Title": OPENROUTER_APP_TITLE}
+    if OPENROUTER_HTTP_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+    return headers
+
+
+def _model_list_url(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    return f"{base}/models"
+
+
+def _looks_like_embedding_model(model: dict) -> bool:
+    model_id = str(model.get("id") or "").lower()
+    architecture = model.get("architecture") if isinstance(model.get("architecture"), dict) else {}
+    modalities = [
+        *(architecture.get("input_modalities") or []),
+        *(architecture.get("output_modalities") or []),
+    ]
+    modality_text = " ".join(str(m).lower() for m in modalities)
+    return "embed" in model_id or "embedding" in modality_text
+
+
+def _looks_like_chat_model(model: dict) -> bool:
+    model_id = str(model.get("id") or "").lower()
+    if _looks_like_embedding_model(model):
+        return False
+    blocked = ("moderation", "whisper", "tts", "dall-e", "image", "audio", "realtime", "transcribe")
+    return not any(part in model_id for part in blocked)
+
+
+def _fetch_provider_models(provider: str, base_url: str, api_key: str, kind: str) -> list[dict]:
+    url = _model_list_url(base_url)
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    headers.update(_provider_headers(base_url))
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    data = json.loads(raw or "{}")
+    rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return []
+    models = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        if not model_id:
+            continue
+        if kind == "embed" and not _looks_like_embedding_model(row):
+            continue
+        if kind == "llm" and not _looks_like_chat_model(row):
+            continue
+        name = str(row.get("name") or row.get("owned_by") or "").strip()
+        models.append({"id": model_id, "name": name})
+    return sorted(models, key=lambda m: m["id"].lower())
+
+
+def _llm_extra_headers() -> dict:
+    return _provider_headers(_llm_url())
+
+
+def _embed_extra_headers() -> dict:
+    return _provider_headers(_embed_url())
 
 
 # --------------------------------------------------------------------------- #
@@ -629,10 +758,18 @@ def api_settings_get() -> Response:
         embed_model=_embed_model(),
         embed_configured=bool(_embed_url()),
         embed_env_locked=bool(EMBED_ENV),
+        embed_model_env_locked=bool(EMBED_MODEL_ENV),
+        embed_provider=str(settings.get("embed_provider") or _provider_from_url(_embed_url()) or "local"),
+        embed_api_key_configured=bool(_embed_api_key()),
+        embed_api_key_env_locked=_embed_api_key_env_locked(),
         llm_server_url=_llm_url(),
         llm_model=_llm_model(),
         llm_configured=bool(_llm_url()),
         llm_env_locked=bool(LLM_ENV),
+        llm_model_env_locked=bool(LLM_MODEL_ENV),
+        llm_provider=str(settings.get("llm_provider") or _provider_from_url(_llm_url()) or "local"),
+        llm_api_key_configured=bool(_llm_api_key()),
+        llm_api_key_env_locked=_llm_api_key_env_locked(),
     )
 
 
@@ -655,18 +792,59 @@ def api_settings_post() -> Response:
         settings["embed_server_url"] = str(payload.get("embed_server_url") or "").strip()[:500]
     if not EMBED_MODEL_ENV and "embed_model" in payload:
         settings["embed_model"] = str(payload.get("embed_model") or "").strip()[:120]
+    if "embed_provider" in payload:
+        settings["embed_provider"] = str(payload.get("embed_provider") or "").strip()[:40]
+    if not _embed_api_key_env_locked():
+        if str(payload.get("embed_api_key") or "").strip():
+            settings["embed_api_key"] = str(payload.get("embed_api_key") or "").strip()[:500]
+        elif payload.get("embed_api_key_clear"):
+            settings.pop("embed_api_key", None)
     if not LLM_ENV and "llm_server_url" in payload:
         settings["llm_server_url"] = str(payload.get("llm_server_url") or "").strip()[:500]
     if not LLM_MODEL_ENV and "llm_model" in payload:
         settings["llm_model"] = str(payload.get("llm_model") or "").strip()[:120]
+    if "llm_provider" in payload:
+        settings["llm_provider"] = str(payload.get("llm_provider") or "").strip()[:40]
+    if not _llm_api_key_env_locked():
+        if str(payload.get("llm_api_key") or "").strip():
+            settings["llm_api_key"] = str(payload.get("llm_api_key") or "").strip()[:500]
+        elif payload.get("llm_api_key_clear"):
+            settings.pop("llm_api_key", None)
     _save_settings(settings)
     return jsonify(
         ok=True,
         whisper_configured=bool(_whisper_url()),
         burn_subtitles=bool(settings.get("burn_subtitles")),
         embed_configured=bool(_embed_url()),
+        embed_api_key_configured=bool(_embed_api_key()),
         llm_configured=bool(_llm_url()),
+        llm_api_key_configured=bool(_llm_api_key()),
     )
+
+
+@app.post("/api/settings/models")
+def api_settings_models() -> Response:
+    payload = request.get_json(silent=True) or {}
+    kind = "embed" if str(payload.get("kind") or "").strip() == "embed" else "llm"
+    provider = str(payload.get("provider") or "").strip().lower()
+    if kind == "embed":
+        base_url = str(payload.get("url") or "").strip() or _embed_url()
+        api_key = str(payload.get("api_key") or "").strip() or _embed_api_key()
+    else:
+        base_url = str(payload.get("url") or "").strip() or _llm_url()
+        api_key = str(payload.get("api_key") or "").strip() or _llm_api_key()
+    effective_provider = provider or _provider_from_url(base_url)
+    if effective_provider == "local" or not base_url:
+        return jsonify(ok=False, error="Set a provider URL before loading models."), 400
+    if effective_provider in {"openai", "openrouter"} and not api_key:
+        return jsonify(ok=False, error=f"Add a {_provider_display(effective_provider)} API key before loading models."), 400
+    try:
+        models = _fetch_provider_models(effective_provider, base_url, api_key, kind)
+    except urllib.error.HTTPError as exc:
+        return jsonify(ok=False, error=f"Model list failed ({exc.code})."), 502
+    except Exception as exc:
+        return jsonify(ok=False, error=f"Model list failed: {exc}"), 502
+    return jsonify(ok=True, provider=effective_provider, kind=kind, models=models)
 
 
 @app.get("/api/config")
@@ -1786,7 +1964,10 @@ def api_prompts_parse() -> Response:
     text = str(payload.get("text") or "")
     if payload.get("llm") and _llm_url() and text.strip():
         try:
-            comps = promptstudio.decompose(_llm_url(), _llm_model(), text)
+            comps = promptstudio.decompose(
+                _llm_url(), _llm_model(), text,
+                api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
+            )
             if any(comps.values()):
                 return jsonify(components=comps, via="llm")
         except Exception:
@@ -1841,7 +2022,10 @@ def _embed_worker() -> None:
             _embed["done"], _embed["total"] = done, total
 
     try:
-        promptstudio.build_embeddings(PROMPT_DB_FILE, _corpus_prompts(), base, model, progress=progress)
+        promptstudio.build_embeddings(
+            PROMPT_DB_FILE, _corpus_prompts(), base, model, progress=progress,
+            api_key=_embed_api_key(), extra_headers=_embed_extra_headers(),
+        )
         err = None
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI
         err = str(exc)[:300]
@@ -1900,7 +2084,10 @@ def api_prompts_similar() -> Response:
     if not text.strip():
         return jsonify(ok=True, query="", results=[])
     try:
-        qvec = promptstudio.embed_query(base, model, text)
+        qvec = promptstudio.embed_query(
+            base, model, text,
+            api_key=_embed_api_key(), extra_headers=_embed_extra_headers(),
+        )
         hashes, texts, matrix = promptstudio.load_vectors(PROMPT_DB_FILE, model)
         neighbors = promptstudio.nearest(qvec, hashes, texts, matrix,
                                          k=_int_arg("k", 24), exclude_hash=exclude)
@@ -1998,6 +2185,7 @@ def api_prompts_generate() -> Response:
         variations = promptstudio.generate(
             base, model, prompt=prompt, mode=mode, n=n,
             instruction=instruction, examples=_style_examples(), persona=persona,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], variations=[]), 502
@@ -2022,6 +2210,7 @@ def api_prompts_enhance() -> Response:
         enhanced = promptstudio.enhance_prompt(
             base, model, prompt=prompt, dialogue_level=dialogue_level, examples=_style_examples(),
             dialogue_only=dialogue_only,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], prompt=""), 502
@@ -2042,7 +2231,10 @@ def api_prompts_autotag() -> Response:
     folders = payload.get("folders") if isinstance(payload.get("folders"), list) else []
     tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
     try:
-        out = promptstudio.suggest_labels(base, model, prompt=text, folders=folders, tags=tags)
+        out = promptstudio.suggest_labels(
+            base, model, prompt=text, folders=folders, tags=tags,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], folder="", tags=[]), 502
     return jsonify(ok=True, folder=out.get("folder", ""), tags=out.get("tags", []), model=model)
@@ -2064,7 +2256,8 @@ def api_prompts_audit_labels() -> Response:
     folder = str(payload.get("folder") or "").strip()
     try:
         out = promptstudio.audit_labels(
-            base, model, prompt=text, folder=folder, current_tags=current_tags, folders=folders, tags=tags
+            base, model, prompt=text, folder=folder, current_tags=current_tags, folders=folders, tags=tags,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], folder="", tags=[], remove_tags=[]), 502
@@ -2106,6 +2299,7 @@ def api_prompts_scene() -> Response:
             base, model, base_prompt=base_prompt, beats=beats,
             increment=increment, instruction=instruction, examples=_style_examples(), persona=persona,
             anchor=anchor, detail=detail, arc=arc,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
         )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], beats=[]), 502
@@ -2184,7 +2378,10 @@ def api_prompts_freeform() -> Response:
         n = 0
     n = max(0, min(30, n))
     try:
-        items = promptstudio.generate_freeform(base, model, instruction=instruction, persona=persona, n=n, prefix=prefix)
+        items = promptstudio.generate_freeform(
+            base, model, instruction=instruction, persona=persona, n=n, prefix=prefix,
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], items=[]), 502
     return jsonify(ok=True, items=items, model=model)

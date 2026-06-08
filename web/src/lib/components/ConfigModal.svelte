@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getConfig, postConfig, getSettings, postSettings, authStatus, logout } from '$lib/api.js';
+  import { getConfig, postConfig, getSettings, postSettings, fetchProviderModels, authStatus, logout } from '$lib/api.js';
   import { loadSettings, theme, setTheme, THEMES, mode } from '$lib/state.js';
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -10,6 +10,38 @@
     { id: 'cinematic', label: 'Grid' },
     { id: 'editorial', label: 'Editorial' }
   ];
+  const providers = [
+    { id: 'local', label: 'Local' },
+    { id: 'openai', label: 'OpenAI' },
+    { id: 'openrouter', label: 'OpenRouter' },
+    { id: 'custom', label: 'Custom' }
+  ];
+  const providerDefaults = {
+    local: {
+      llm_server_url: '',
+      llm_model: 'dolphin3',
+      embed_server_url: '',
+      embed_model: 'nomic-embed-text'
+    },
+    openai: {
+      llm_server_url: 'https://api.openai.com/v1',
+      llm_model: 'gpt-5.4-mini',
+      embed_server_url: 'https://api.openai.com/v1',
+      embed_model: 'text-embedding-3-small'
+    },
+    openrouter: {
+      llm_server_url: 'https://openrouter.ai/api/v1',
+      llm_model: 'openai/gpt-5.4-mini',
+      embed_server_url: 'https://openrouter.ai/api/v1',
+      embed_model: 'openai/text-embedding-3-small'
+    },
+    custom: {
+      llm_server_url: '',
+      llm_model: '',
+      embed_server_url: '',
+      embed_model: ''
+    }
+  };
 
   let { onclose = () => {} } = $props();
 
@@ -18,14 +50,43 @@
   let whisper = $state('');
   let envLocked = $state(false);
   let burn = $state(false);
+  let llmProvider = $state('local');
+  let llmUrl = $state('');
+  let llmModel = $state('');
+  let llmKey = $state('');
+  let llmKeyConfigured = $state(false);
+  let llmEnvLocked = $state(false);
+  let llmModelLocked = $state(false);
+  let llmKeyLocked = $state(false);
+  let llmClearKey = $state(false);
+  let llmModelOptions = $state([]);
+  let llmModelsLoading = $state(false);
+  let llmModelsNote = $state('');
+  let embedProvider = $state('local');
+  let embedUrl = $state('');
+  let embedModel = $state('');
+  let embedKey = $state('');
+  let embedKeyConfigured = $state(false);
+  let embedEnvLocked = $state(false);
+  let embedModelLocked = $state(false);
+  let embedKeyLocked = $state(false);
+  let embedClearKey = $state(false);
+  let embedModelOptions = $state([]);
+  let embedModelsLoading = $state(false);
+  let embedModelsNote = $state('');
   let msg = $state('');
   let msgClass = $state('');
   let authRequired = $state(false);
   // The 11-theme gallery lives behind a "Change" disclosure instead of dominating
   // the pane — Appearance shows the current theme, the picker opens in-place.
   let pickingTheme = $state(false);
+  let pickingPromptAi = $state(false);
+  let llmProviderDrafts = {};
+  let embedProviderDrafts = {};
 
   const current = $derived(THEMES.find((t) => t.id === $theme) || THEMES[0]);
+  const llmProviderLabel = $derived(providerLabel(llmProvider));
+  const embedProviderLabel = $derived(providerLabel(embedProvider));
 
   onMount(async () => {
     try {
@@ -37,9 +98,131 @@
       whisper = s.whisper_server_url || '';
       envLocked = !!s.whisper_env_locked;
       burn = !!s.burn_subtitles;
+      llmProvider = s.llm_provider || providerFromUrl(s.llm_server_url);
+      llmUrl = s.llm_server_url || '';
+      llmModel = s.llm_model || '';
+      llmKeyConfigured = !!s.llm_api_key_configured;
+      llmEnvLocked = !!s.llm_env_locked;
+      llmModelLocked = !!s.llm_model_env_locked;
+      llmKeyLocked = !!s.llm_api_key_env_locked;
+      rememberProviderDraft('llm');
+      embedProvider = s.embed_provider || providerFromUrl(s.embed_server_url);
+      embedUrl = s.embed_server_url || '';
+      embedModel = s.embed_model || '';
+      embedKeyConfigured = !!s.embed_api_key_configured;
+      embedEnvLocked = !!s.embed_env_locked;
+      embedModelLocked = !!s.embed_model_env_locked;
+      embedKeyLocked = !!s.embed_api_key_env_locked;
+      rememberProviderDraft('embed');
     } catch {}
     try { authRequired = !!(await authStatus()).auth_required; } catch {}
   });
+
+  function providerFromUrl(url = '') {
+    const lower = String(url || '').toLowerCase();
+    if (lower.includes('openrouter.ai')) return 'openrouter';
+    if (lower.includes('openai.com')) return 'openai';
+    if (lower) return 'custom';
+    return 'local';
+  }
+
+  function providerLabel(id) {
+    return providers.find((p) => p.id === id)?.label || 'Local';
+  }
+
+  function providerDefaultsFor(kind, provider) {
+    const defaults = providerDefaults[provider] || providerDefaults.custom;
+    return kind === 'llm'
+      ? { url: defaults.llm_server_url, model: defaults.llm_model }
+      : { url: defaults.embed_server_url, model: defaults.embed_model };
+  }
+
+  function rememberProviderDraft(kind) {
+    if (kind === 'llm') {
+      llmProviderDrafts = {
+        ...llmProviderDrafts,
+        [llmProvider]: { url: llmUrl, model: llmModel }
+      };
+      return;
+    }
+    embedProviderDrafts = {
+      ...embedProviderDrafts,
+      [embedProvider]: { url: embedUrl, model: embedModel }
+    };
+  }
+
+  function providerDraft(kind, provider) {
+    const drafts = kind === 'llm' ? llmProviderDrafts : embedProviderDrafts;
+    return drafts[provider] || providerDefaultsFor(kind, provider);
+  }
+
+  function applyProvider(kind, provider) {
+    if (kind === 'llm') {
+      if (provider === llmProvider) return;
+      rememberProviderDraft('llm');
+      const draft = providerDraft('llm', provider);
+      llmProvider = provider;
+      if (!llmEnvLocked) llmUrl = draft.url;
+      if (!llmModelLocked) llmModel = draft.model;
+      llmKey = '';
+      llmClearKey = false;
+      llmModelOptions = [];
+      llmModelsNote = '';
+      return;
+    }
+    if (provider === embedProvider) return;
+    rememberProviderDraft('embed');
+    const draft = providerDraft('embed', provider);
+    embedProvider = provider;
+    if (!embedEnvLocked) embedUrl = draft.url;
+    if (!embedModelLocked) embedModel = draft.model;
+    embedKey = '';
+    embedClearKey = false;
+    embedModelOptions = [];
+    embedModelsNote = '';
+  }
+
+  async function loadProviderModels(kind) {
+    const isEmbed = kind === 'embed';
+    const payload = {
+      kind,
+      provider: isEmbed ? embedProvider : llmProvider,
+      url: isEmbed ? embedUrl : llmUrl
+    };
+    const typedKey = isEmbed ? embedKey.trim() : llmKey.trim();
+    if (typedKey && !(isEmbed ? embedClearKey : llmClearKey)) payload.api_key = typedKey;
+
+    if (isEmbed) {
+      embedModelsLoading = true;
+      embedModelsNote = 'Loading models...';
+    } else {
+      llmModelsLoading = true;
+      llmModelsNote = 'Loading models...';
+    }
+    try {
+      const data = await fetchProviderModels(payload);
+      const models = Array.isArray(data.models) ? data.models : [];
+      if (isEmbed) {
+        embedModelOptions = models;
+        embedModelsNote = models.length ? `${models.length} models loaded.` : 'No matching models returned.';
+      } else {
+        llmModelOptions = models;
+        llmModelsNote = models.length ? `${models.length} models loaded.` : 'No matching models returned.';
+      }
+    } catch (err) {
+      const text = err?.message || 'Could not load models.';
+      if (isEmbed) {
+        embedModelOptions = [];
+        embedModelsNote = text;
+      } else {
+        llmModelOptions = [];
+        llmModelsNote = text;
+      }
+    } finally {
+      if (isEmbed) embedModelsLoading = false;
+      else llmModelsLoading = false;
+    }
+  }
 
   async function doLogout() {
     await logout();
@@ -55,6 +238,20 @@
     }
     const body = { burn_subtitles: burn };
     if (!envLocked) body.whisper_server_url = whisper.trim();
+    body.llm_provider = llmProvider;
+    body.embed_provider = embedProvider;
+    if (!llmEnvLocked) body.llm_server_url = llmUrl.trim();
+    if (!llmModelLocked) body.llm_model = llmModel.trim();
+    if (!llmKeyLocked) {
+      if (llmKey.trim()) body.llm_api_key = llmKey.trim();
+      if (llmClearKey) body.llm_api_key_clear = true;
+    }
+    if (!embedEnvLocked) body.embed_server_url = embedUrl.trim();
+    if (!embedModelLocked) body.embed_model = embedModel.trim();
+    if (!embedKeyLocked) {
+      if (embedKey.trim()) body.embed_api_key = embedKey.trim();
+      if (embedClearKey) body.embed_api_key_clear = true;
+    }
     let settingsErr = '';
     try {
       const r = await postSettings(body);
@@ -66,10 +263,11 @@
     else { msg = 'Saved.'; msgClass = 'text-[var(--success-ink)]'; setTimeout(onclose, 800); }
   }
 
-  // Escape backs out of the theme picker first, then closes the modal.
+  // Escape backs out of nested config pages first, then closes the modal.
   function onkey(e) {
     if (e.key !== 'Escape') return;
     if (pickingTheme) pickingTheme = false;
+    else if (pickingPromptAi) pickingPromptAi = false;
     else onclose();
   }
 </script>
@@ -82,19 +280,119 @@
         style={`--sw-bg:${t.preview[0]}; --sw-panel:${t.preview[1]}; --sw-a:${t.preview[2]}; --sw-b:${t.preview[3]};`}></span>
 {/snippet}
 
+{#snippet promptAiSettings()}
+  <div class="space-y-3">
+    <div class="rounded-xl border border-line p-3">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <div class="text-sm font-bold">Chat model</div>
+        {#if llmKeyConfigured}
+          <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{llmKeyLocked ? 'Env key' : 'Saved key'}</span>
+        {/if}
+      </div>
+      <div class="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1 sm:grid-cols-4">
+        {#each providers as p (p.id)}
+          <button type="button" class="rounded-md px-2 py-1.5 text-sm font-semibold transition pointer-coarse:min-h-10 {llmProvider === p.id ? 'bg-[var(--surface-solid)] shadow-sm' : 'text-muted'}"
+            aria-pressed={llmProvider === p.id} onclick={() => applyProvider('llm', p.id)}>{p.label}</button>
+        {/each}
+      </div>
+      <div class="grid gap-2 sm:grid-cols-[1fr_minmax(10rem,13rem)_auto]">
+        <input class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={llmEnvLocked ? 'Set by LLM_SERVER_URL env var' : 'http://host:11434/v1'}
+          bind:value={llmUrl} disabled={llmEnvLocked} />
+        <input class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={llmModelLocked ? 'Set by LLM_MODEL env var' : 'model'}
+          bind:value={llmModel} disabled={llmModelLocked} />
+        <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-60 pointer-coarse:min-h-10"
+          onclick={() => loadProviderModels('llm')} disabled={llmModelsLoading || !llmUrl || llmModelLocked}>
+          {llmModelsLoading ? 'Loading' : 'Models'}
+        </button>
+      </div>
+      {#if llmModelOptions.length}
+        <select class="mt-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
+          bind:value={llmModel}>
+          {#each llmModelOptions as model (model.id)}
+            <option value={model.id}>{model.name ? `${model.id} — ${model.name}` : model.id}</option>
+          {/each}
+        </select>
+      {/if}
+      {#if llmModelsNote}
+        <p class="mt-1 text-xs text-muted">{llmModelsNote}</p>
+      {/if}
+      <div class="mt-2 flex gap-2">
+        <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          type="password" autocomplete="off"
+          placeholder={llmKeyLocked ? 'Set by environment' : (llmKeyConfigured ? 'Leave blank to keep saved key' : 'API key')}
+          bind:value={llmKey} disabled={llmKeyLocked || llmClearKey} />
+        {#if llmKeyConfigured && !llmKeyLocked}
+          <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-10"
+            aria-pressed={llmClearKey} onclick={() => { llmClearKey = !llmClearKey; if (llmClearKey) llmKey = ''; }}>{llmClearKey ? 'Keep' : 'Clear'}</button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="rounded-xl border border-line p-3">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <div class="text-sm font-bold">Embeddings</div>
+        {#if embedKeyConfigured}
+          <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{embedKeyLocked ? 'Env key' : 'Saved key'}</span>
+        {/if}
+      </div>
+      <div class="mb-3 grid grid-cols-2 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1 sm:grid-cols-4">
+        {#each providers as p (p.id)}
+          <button type="button" class="rounded-md px-2 py-1.5 text-sm font-semibold transition pointer-coarse:min-h-10 {embedProvider === p.id ? 'bg-[var(--surface-solid)] shadow-sm' : 'text-muted'}"
+            aria-pressed={embedProvider === p.id} onclick={() => applyProvider('embed', p.id)}>{p.label}</button>
+        {/each}
+      </div>
+      <div class="grid gap-2 sm:grid-cols-[1fr_minmax(10rem,13rem)_auto]">
+        <input class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={embedEnvLocked ? 'Set by EMBED_SERVER_URL env var' : 'http://host:11434/v1'}
+          bind:value={embedUrl} disabled={embedEnvLocked} />
+        <input class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={embedModelLocked ? 'Set by EMBED_MODEL env var' : 'model'}
+          bind:value={embedModel} disabled={embedModelLocked} />
+        <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-60 pointer-coarse:min-h-10"
+          onclick={() => loadProviderModels('embed')} disabled={embedModelsLoading || !embedUrl || embedModelLocked}>
+          {embedModelsLoading ? 'Loading' : 'Models'}
+        </button>
+      </div>
+      {#if embedModelOptions.length}
+        <select class="mt-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
+          bind:value={embedModel}>
+          {#each embedModelOptions as model (model.id)}
+            <option value={model.id}>{model.name ? `${model.id} — ${model.name}` : model.id}</option>
+          {/each}
+        </select>
+      {/if}
+      {#if embedModelsNote}
+        <p class="mt-1 text-xs text-muted">{embedModelsNote}</p>
+      {/if}
+      <div class="mt-2 flex gap-2">
+        <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          type="password" autocomplete="off"
+          placeholder={embedKeyLocked ? 'Set by environment' : (embedKeyConfigured ? 'Leave blank to keep saved key' : 'API key')}
+          bind:value={embedKey} disabled={embedKeyLocked || embedClearKey} />
+        {#if embedKeyConfigured && !embedKeyLocked}
+          <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-10"
+            aria-pressed={embedClearKey} onclick={() => { embedClearKey = !embedClearKey; if (embedClearKey) embedKey = ''; }}>{embedClearKey ? 'Keep' : 'Clear'}</button>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/snippet}
+
 <!-- Backdrop: full-screen sheet on phones (panel fills it), centered card on ≥sm. -->
 <div use:portal class="fixed inset-0 z-[60] bg-[var(--overlay)] backdrop-blur-sm sm:grid sm:place-items-center sm:p-4" role="presentation"
      onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div class="config-panel panel flex h-[100dvh] w-full flex-col overflow-hidden sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:max-w-[640px] sm:rounded-card"
        role="dialog" aria-modal="true" aria-label="Config" tabindex="-1" use:trapFocus>
     <header class="cfg-header flex shrink-0 items-center gap-2 border-b border-line px-4 py-3 sm:px-5">
-      {#if pickingTheme}
+      {#if pickingTheme || pickingPromptAi}
         <button type="button" class="-ml-1 flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-11"
-          aria-label="Back to settings" onclick={() => (pickingTheme = false)}>
+          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; }}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
-        <h2 class="text-base font-bold">Theme</h2>
+        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : 'Prompt Studio AI'}</h2>
       {:else}
         <h2 class="text-lg font-bold">Config</h2>
         <button type="button" class="ml-auto grid h-9 w-9 place-items-center rounded-lg border border-line transition hover:bg-[var(--surface-2)] pointer-coarse:h-11 pointer-coarse:w-11"
@@ -118,6 +416,8 @@
             </button>
           {/each}
         </div>
+      {:else if pickingPromptAi}
+        {@render promptAiSettings()}
       {:else}
         <!-- Appearance: compact settings rows (live-applied, separate from Save). -->
         <section>
@@ -161,6 +461,23 @@
           <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
             <input type="checkbox" class="h-4 w-4 accent-[var(--accent)]" bind:checked={burn} /> Burn subtitles into merged playlist exports
           </label>
+        </section>
+
+        <section class="mt-6">
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Prompt Studio AI</div>
+          <button type="button" class="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+            aria-label="Configure Prompt Studio AI" onclick={() => (pickingPromptAi = true)}>
+            <span class="text-sm font-semibold">Providers</span>
+            <span class="ml-auto flex min-w-0 items-center gap-2 text-sm">
+              <span class="min-w-0 truncate font-medium">{llmProviderLabel} chat · {embedProviderLabel} embed</span>
+              {#if llmKeyLocked || embedKeyLocked}
+                <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">Env key</span>
+              {:else if llmKeyConfigured || embedKeyConfigured}
+                <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">Saved key</span>
+              {/if}
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+          </button>
         </section>
 
         {#if authRequired}

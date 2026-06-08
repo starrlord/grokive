@@ -161,6 +161,16 @@ export const postConfig = (curlText) =>
 export const getSettings = () => getJSON('/api/settings');
 export const postSettings = (body) =>
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+export async function fetchProviderModels(body) {
+  const res = await fetch('/api/settings/models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Could not load models.');
+  return d;
+}
 
 // --- Prompt Studio (Phase 0: corpus vocabulary + structured composer) -------
 export async function fetchPromptVocabulary() {

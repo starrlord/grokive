@@ -61,13 +61,13 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
 - **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with GPU-accelerated rendering and one-click **Add to Collection**.
-- **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional self-hosted LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish** (in your style, with fresh dialogue) — all on your own hardware.
+- **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish / Enhance** (in your style, with fresh dialogue). Use local Ollama for local-only AI, or OpenAI/OpenRouter when you want a remote provider.
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
 - **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
 - **Ten themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
-- Self-hosted and local-first: everything stays on your own hardware — no analytics, no external services, no account required.
+- Self-hosted and local-first: core media storage, browsing, sync state, and metadata stay on your own hardware. Optional integrations only call the endpoints you configure, such as Whisper, OpenAI, OpenRouter, or another OpenAI-compatible server.
 
 ## Run As A Docker Container (Unraid / self-hosted)
 
@@ -135,10 +135,15 @@ building on the server needed.
 | `BASIC_AUTH_USER` / `BASIC_AUTH_PASS` | _(unset)_ | Legacy HTTP Basic auth (used instead of the login screen when set). |
 | `SESSION_SECRET` | _(derived)_ | Optional override for the session-cookie signing key (otherwise derived from the admin credentials). |
 | `WHISPER_SERVER_URL` | _(unset)_ | Whisper ASR endpoint (e.g. `http://host:9000/asr`). Enables the **Generate Subtitles** button. Overrides the value saved in **Config**. |
-| `EMBED_SERVER_URL` | _(unset)_ | Embeddings endpoint for **Prompt Studio** (Ollama / OpenAI-compatible `/v1` base, e.g. `http://host:11434/v1`). Enables semantic prompt search and theme clusters. Overrides **Config**. |
+| `EMBED_SERVER_URL` | _(unset)_ | Embeddings endpoint for **Prompt Studio** (Ollama/OpenAI-compatible `/v1` base, OpenAI, or OpenRouter). Enables semantic prompt search and theme clusters. Overrides **Config**. |
 | `EMBED_MODEL` | `nomic-embed-text` | Embedding model name (only used when `EMBED_SERVER_URL` is set). |
-| `LLM_SERVER_URL` | _(unset)_ | Chat endpoint for **Prompt Studio** AI Variations / Remix / Polish (Ollama / OpenAI-compatible `/v1` base). Overrides **Config**. |
+| `EMBED_API_KEY` | _(unset)_ | API key for the embeddings endpoint. Overrides any key saved in **Config**. |
+| `LLM_SERVER_URL` | _(unset)_ | Chat endpoint for **Prompt Studio** AI Variations / Remix / Polish / Enhance (Ollama/OpenAI-compatible `/v1` base, OpenAI, or OpenRouter). Overrides **Config**. |
 | `LLM_MODEL` | `dolphin3` | Chat model name (only used when `LLM_SERVER_URL` is set). |
+| `LLM_API_KEY` | _(unset)_ | API key for the chat endpoint. Overrides any key saved in **Config**. |
+| `OPENAI_API_KEY` | _(unset)_ | Fallback key when a Prompt Studio URL points at `api.openai.com`. |
+| `OPENROUTER_API_KEY` | _(unset)_ | Fallback key when a Prompt Studio URL points at `openrouter.ai`. |
+| `OPENROUTER_HTTP_REFERER` / `OPENROUTER_APP_TITLE` | _(unset)_ / `Grokive` | Optional OpenRouter attribution headers. |
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
@@ -401,20 +406,62 @@ rules, it just answers. Type a request ("give me 10 in-character lines for the s
 and get a numbered list back. An optional **Start each with…** field forces every result to begin with an
 exact phrase you choose (prepended deterministically, not left to the model). (Needs an LLM endpoint.)
 
-### AI features (optional, self-hosted)
+### AI features (optional)
 
-These mirror the Whisper pattern: point the app at a local **[Ollama](https://ollama.com/)** (or any
-OpenAI-compatible) server, and nothing leaves your network — the features run on *your* hardware
-against *your* content.
+These mirror the Whisper pattern: point the app at a local **[Ollama](https://ollama.com/)**,
+OpenAI-compatible server, OpenAI API, or OpenRouter API. Local/Ollama keeps the model work on your
+hardware; OpenAI/OpenRouter send Prompt Studio text to the configured provider and are subject to
+that provider's account settings and content policies.
 
 1. Run Ollama with an embedding model and a chat model. `ollama pull nomic-embed-text`
    for embeddings; for chat, set `LLM_MODEL` to your model. A small 8B (e.g. `dolphin3`) works but
    writes incoherent dialogue — a **12B Mistral-Nemo creative/RP finetune** (e.g.
    `hf.co/bartowski/MN-12B-Mag-Mell-R1-GGUF:Q4_K_M`) is far more coherent for in-character lines.
 2. Set `EMBED_SERVER_URL` / `LLM_SERVER_URL` (env vars or **Config**) to the server's `/v1` base
-   (e.g. `http://<host>:11434/v1`).
-3. In **Studio**, click **Build prompt index** once. It embeds your unique prompts (a few seconds),
+   (e.g. `http://<host>:11434/v1`). In **Config**, the provider buttons can fill common values:
+   OpenAI uses `https://api.openai.com/v1` with `gpt-5.4-mini` and `text-embedding-3-small`;
+   OpenRouter uses `https://openrouter.ai/api/v1` with namespaced model IDs like
+   `openai/gpt-5.4-mini` and `openai/text-embedding-3-small`.
+3. Add keys either in **Config** or via env vars. `LLM_API_KEY` / `EMBED_API_KEY` target one endpoint
+   directly; `OPENAI_API_KEY` and `OPENROUTER_API_KEY` are provider fallbacks used when the URL host
+   matches that service. Saved keys are not sent back to the browser after saving.
+4. In **Studio**, click **Build prompt index** once. It embeds your unique prompts (a few seconds),
    stored durably in `prompt_studio.db`.
+
+#### Switching from a local LLM to OpenAI/OpenRouter
+
+If your local LLM/embeddings URLs were saved in **Config**:
+
+1. Open **Config -> Prompt Studio AI**.
+2. Under **Chat model**, click **OpenAI** or **OpenRouter**. This replaces the chat URL/model fields.
+3. Under **Embeddings**, click the same provider if you also want semantic search/themes to use that remote embedding model.
+4. Paste the provider API key into each API key field you want to use, then **Save**.
+5. In **Studio**, click **Build prompt index** again if you changed the embeddings provider or model.
+
+If your local endpoints were set with env vars, they override **Config** and the matching fields are locked in the UI. Replace the old local `LLM_SERVER_URL` / `EMBED_SERVER_URL` values in your container/env settings, then restart Grokive.
+
+OpenAI example:
+
+```dotenv
+LLM_SERVER_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-5.4-mini
+EMBED_SERVER_URL=https://api.openai.com/v1
+EMBED_MODEL=text-embedding-3-small
+OPENAI_API_KEY=sk-...
+```
+
+OpenRouter example:
+
+```dotenv
+LLM_SERVER_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openai/gpt-5.4-mini
+EMBED_SERVER_URL=https://openrouter.ai/api/v1
+EMBED_MODEL=openai/text-embedding-3-small
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_APP_TITLE=Grokive
+```
+
+You can also use endpoint-specific keys (`LLM_API_KEY` and `EMBED_API_KEY`) instead of the provider fallback keys. Saved keys are write-only from the browser's perspective: after saving, Config only shows whether a key exists, not the secret value.
 
 With those configured you get:
 
@@ -581,7 +628,7 @@ run `grokive.py download` / `index` and `server.py`.
 
 ## Privacy
 
-Everything runs on hardware you control. The app keeps your media, prompts, cookies, and metadata on local disk and never ships them to a third party — the only outbound traffic is the calls to Grok it makes on your behalf, signed with the cURL session you supply. The lone exception is optional subtitle generation, which reaches out to a Whisper server only when you choose to configure one (and that can be a box on your own LAN).
+The app keeps your media, cookies, and metadata on local disk. Its normal outbound traffic is the calls to Grok it makes on your behalf, signed with the cURL session you supply. Optional integrations send only what you configure them to send: subtitle generation uploads extracted audio to your Whisper server, and Prompt Studio sends prompt text to your chosen LLM/embedding provider when you use OpenAI, OpenRouter, or another remote API. Local Ollama keeps those AI calls on your own hardware.
 
 ## License
 

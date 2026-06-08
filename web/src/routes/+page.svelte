@@ -9,7 +9,8 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, updateCollection, removeFromCollection, ensureMoviePolling, movieChip
+    collections, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
+    setSort
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -250,8 +251,9 @@
   function openCollection(c) {
     activeCollectionId = c.id;
   }
-  async function playCollection(c) {
-    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video');
+  async function playCollection(c, orderedItems = null) {
+    const source = Array.isArray(orderedItems) ? orderedItems : await mediaByIds(c.ids);
+    const list = source.filter((v) => v.media_type === 'video');
     if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
@@ -336,11 +338,20 @@
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
         <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={() => (activeCollectionId = null)}>Back</button>
-        <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
-          bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
-        <span class="text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
+        <div class="min-w-[12rem] flex-1 sm:max-w-md">
+          <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
+            aria-label="Collection name" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+        </div>
+        <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
+        <select class="rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-semibold"
+          aria-label="Sort collection" title="Sort collection" value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
+          <option value="new">Newest</option>
+          <option value="old">Oldest</option>
+          <option value="prompt">Prompt A-Z</option>
+          <option value="model">Model A-Z</option>
+        </select>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
-          disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection)}>Play videos</button>
+          disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
 
       {#if currentGridItems.length === 0}

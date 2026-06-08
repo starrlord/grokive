@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/starrlord/grokive/issues</Support>
   <Project>https://github.com/starrlord/grokive</Project>
-  <Overview>Download your Grok Imagine favourites and Agent canvases, then browse them in a fast, modern web app (full-text prompt search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, installable PWA). Includes a Prompt Studio that composes new prompts from your own vocabulary and — with an optional self-hosted Ollama endpoint — adds semantic prompt search, auto theme clusters, and AI prompt variations. Click Sync in the web UI to fetch new media and rebuild the index; click Config to paste your browser cURL (login cookies) and set appearance/subtitle options. All data is stored in the mapped /data appdata folder.</Overview>
+  <Overview>Download your Grok Imagine favourites and Agent canvases, then browse them in a fast, modern web app (full-text prompt search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, installable PWA). Includes a Prompt Studio that composes new prompts from your own vocabulary and — with an optional Ollama/OpenAI-compatible, OpenAI, or OpenRouter endpoint — adds semantic prompt search, auto theme clusters, and AI prompt variations. Click Sync in the web UI to fetch new media and rebuild the index; click Config to paste your browser cURL (login cookies) and set appearance, subtitle, and Prompt Studio options. All data is stored in the mapped /data appdata folder.</Overview>
   <Category>MediaApp:Other Tools:</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL/>
@@ -19,7 +19,7 @@
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Description>Grokive — a self-hosted Grok Imagine archiver with a modern SvelteKit web UI (search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, PWA) plus a Prompt Studio (offline prompt composer; optional semantic search, theme clusters, and AI prompt variations via a self-hosted Ollama / OpenAI-compatible endpoint). Use the Sync button to run the downloader and rebuild the index; use Config to store the captured cURL request and settings. Optionally protect the UI with BASIC_AUTH_USER / BASIC_AUTH_PASS, or place it behind a reverse proxy.</Description>
+  <Description>Grokive — a self-hosted Grok Imagine archiver with a modern SvelteKit web UI (search, favorites, stash, playlists, MP4 export, optional Whisper subtitles, themes, PWA) plus a Prompt Studio (offline prompt composer; optional semantic search, theme clusters, and AI prompt variations via Ollama/OpenAI-compatible, OpenAI, or OpenRouter endpoints). Use the Sync button to run the downloader and rebuild the index; use Config to store the captured cURL request and settings. Optionally protect the UI with BASIC_AUTH_USER / BASIC_AUTH_PASS, or place it behind a reverse proxy.</Description>
   <Networking>
     <Mode>bridge</Mode>
     <Publish>
@@ -90,12 +90,42 @@
     </Variable>
     <Variable>
       <Value/>
+      <Name>EMBED_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
       <Name>LLM_SERVER_URL</Name>
       <Mode/>
     </Variable>
     <Variable>
       <Value>dolphin3</Value>
       <Name>LLM_MODEL</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>LLM_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>OPENAI_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>OPENROUTER_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>OPENROUTER_HTTP_REFERER</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>Grokive</Value>
+      <Name>OPENROUTER_APP_TITLE</Name>
       <Mode/>
     </Variable>
     <Variable>
@@ -123,10 +153,16 @@
   <Config Name="Disable Auth" Target="AUTH_DISABLED" Default="" Mode="" Description="Set to true to turn OFF the login (open UI). Only on a fully trusted, isolated LAN." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Trust Proxy" Target="TRUST_PROXY" Default="" Mode="" Description="Set to true when behind an HTTPS reverse proxy (real client IPs + Secure session cookie)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Whisper Server URL" Target="WHISPER_SERVER_URL" Default="" Mode="" Description="Optional: whisper-asr-webservice endpoint (e.g. http://host:9000/asr) to enable subtitle generation" Type="Variable" Display="advanced" Required="false" Mask="false"/>
-  <Config Name="Prompt Studio — Embeddings Server URL" Target="EMBED_SERVER_URL" Default="" Mode="" Description="Optional: Ollama / OpenAI-compatible /v1 base (e.g. http://host:11434/v1) for Prompt Studio. Enables semantic prompt search and auto theme clusters. Leave blank to use the offline composer only." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Prompt Studio — Embeddings Server URL" Target="EMBED_SERVER_URL" Default="" Mode="" Description="Optional: Ollama / OpenAI-compatible /v1 base, OpenAI, or OpenRouter for Prompt Studio. Enables semantic prompt search and auto theme clusters. Leave blank to use the offline composer only." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Prompt Studio — Embeddings Model" Target="EMBED_MODEL" Default="nomic-embed-text" Mode="" Description="Embedding model name. Only used when the Embeddings Server URL is set." Type="Variable" Display="advanced" Required="false" Mask="false">nomic-embed-text</Config>
-  <Config Name="Prompt Studio — LLM Server URL" Target="LLM_SERVER_URL" Default="" Mode="" Description="Optional: Ollama / OpenAI-compatible /v1 base for AI prompt variations / remix." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Prompt Studio — Embeddings API Key" Target="EMBED_API_KEY" Default="" Mode="" Description="Optional API key for the embeddings endpoint. Overrides keys saved in Config." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="Prompt Studio — LLM Server URL" Target="LLM_SERVER_URL" Default="" Mode="" Description="Optional: Ollama / OpenAI-compatible /v1 base, OpenAI, or OpenRouter for AI prompt variations / remix / enhance." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Prompt Studio — LLM Model" Target="LLM_MODEL" Default="dolphin3" Mode="" Description="Chat model name. Only used when the LLM Server URL is set." Type="Variable" Display="advanced" Required="false" Mask="false">dolphin3</Config>
+  <Config Name="Prompt Studio — LLM API Key" Target="LLM_API_KEY" Default="" Mode="" Description="Optional API key for the chat endpoint. Overrides keys saved in Config." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="OpenAI API Key" Target="OPENAI_API_KEY" Default="" Mode="" Description="Fallback key used when a Prompt Studio URL points at api.openai.com." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="OpenRouter API Key" Target="OPENROUTER_API_KEY" Default="" Mode="" Description="Fallback key used when a Prompt Studio URL points at openrouter.ai." Type="Variable" Display="advanced" Required="false" Mask="true"/>
+  <Config Name="OpenRouter HTTP Referer" Target="OPENROUTER_HTTP_REFERER" Default="" Mode="" Description="Optional OpenRouter attribution referer header." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="OpenRouter App Title" Target="OPENROUTER_APP_TITLE" Default="Grokive" Mode="" Description="Optional OpenRouter attribution title header." Type="Variable" Display="advanced" Required="false" Mask="false">Grokive</Config>
   <Config Name="NVIDIA Visible Devices" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU passthrough for NVENC (playlist merges / subtitle burn-in). 'all' exposes every GPU, or set a specific 'GPU-&lt;uuid&gt;' (from nvidia-smi -L). Requires --runtime=nvidia (already in Extra Parameters) and the Nvidia Driver plugin." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
   <Config Name="NVIDIA Driver Capabilities" Target="NVIDIA_DRIVER_CAPABILITIES" Default="all" Mode="" Description="Driver capabilities exposed to the container. 'all' includes 'video' (required for NVENC) and 'utility' (nvidia-smi)." Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
   <Config Name="Video Encoder" Target="VIDEO_ENCODER" Default="auto" Mode="" Description="Re-encoder for playlist merges and burned-in subtitles. 'auto' uses the NVIDIA GPU (NVENC) when visible, else CPU libx264. Force with 'nvenc' or 'cpu'." Type="Variable" Display="advanced" Required="false" Mask="false">auto</Config>
