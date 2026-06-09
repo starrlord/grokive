@@ -268,7 +268,8 @@ def compose_motion(components: dict) -> str:
     dialogue = _val(components, "dialogue").strip("\"“”'’").strip()
     voice = _val(components, "voice")
     if dialogue:
-        say = "she says" + (f" in a {voice}" if voice else "") + f': "{dialogue}"'
+        # Pronoun-free: the subject field invites any gender, so don't hardcode "she".
+        say = (f"spoken in a {voice}" if voice else "saying") + f': "{dialogue}"'
         text = f"{text}, {say}" if text else say
     elif voice:
         v = f"speaking in a {voice}"

@@ -7,7 +7,7 @@
   import { auditPromptLabels, autotagPrompt, enhancePrompt } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
 
-  let { llmReady = false } = $props(); // local LLM configured -> show auto-tag affordances
+  let { llmReady = false, onRemix = null } = $props(); // llmReady -> auto-tag affordances; onRemix -> load a saved prompt back into the Compose composer
 
   // A library of starred Prompt Studio outputs (Scene beats, Freeform items, Variations) plus any
   // prompt you add by hand here. Server-persisted via state.js, so they survive reloads and follow
@@ -169,6 +169,36 @@
   function onNewFolderKey(e) {
     if (e.key === 'Enter') { e.preventDefault(); commitNewFolder(); }
     else if (e.key === 'Escape') { newFolderOpen = false; newFolderDraft = ''; }
+  }
+
+  // Inline folder rename — same pattern as creation. Renaming retags every item in the folder in one
+  // write; renaming onto an existing folder merges into it. Empty (item-less) folders rename too.
+  let renamingFolder = $state(null);
+  let renameDraft = $state('');
+  function startRename(f) { renamingFolder = f; renameDraft = f; }
+  function commitRename() {
+    const from = renamingFolder;
+    const to = renameDraft.trim().slice(0, 40);
+    renamingFolder = null;
+    renameDraft = '';
+    if (!from || !to || to === from) return;
+    let touched = 0;
+    const next = items.map((r) => {
+      if (folderOf(r) !== from) return r;
+      touched++;
+      return { ...r, folder: to };
+    });
+    if (touched) setSavedResponses(next);
+    // Keep an empty folder visible after rename (it has no items to carry the name).
+    const stillHasItems = next.some((r) => folderOf(r) === to);
+    extraFolders = extraFolders.filter((e) => e !== from && e !== to);
+    if (!stillHasItems) extraFolders = [...extraFolders, to];
+    if (activeFolder === from) selectFolder(to);
+    else { try { if (localStorage.getItem(LAST_FOLDER_KEY) === from) localStorage.setItem(LAST_FOLDER_KEY, to); } catch {} }
+  }
+  function onRenameKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+    else if (e.key === 'Escape') { renamingFolder = null; renameDraft = ''; }
   }
   function moveToFolder(r, folder) {
     updateSavedResponse(rowId(r), { folder });
@@ -508,7 +538,23 @@
       {/snippet}
       {@render folderBtn(ALL, 'All', items.length)}
       {#each folderNames as f (f)}
-        {@render folderBtn(f, f, folderCounts.get(f) || 0)}
+        <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
+          {#if renamingFolder === f}
+            <input use:focusOnMount bind:value={renameDraft} onkeydown={onRenameKey} onblur={commitRename}
+              maxlength="40" aria-label={`Rename folder ${f}`}
+              class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none" />
+          {:else}
+            <div class="group flex items-stretch gap-0.5">
+              <button type="button" onclick={() => selectFolder(f)} ondblclick={() => startRename(f)} title={f}
+                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === f ? 'border-line border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-ink shadow-sm' : 'border-transparent text-muted hover:bg-[var(--surface-2)] hover:text-ink'}">
+                <span class="min-w-0 flex-1 truncate">{f}</span>
+                <span class="shrink-0 text-xs opacity-70">{folderCounts.get(f) || 0}</span>
+              </button>
+              <button type="button" onclick={() => startRename(f)} aria-label={`Rename folder ${f}`} title="Rename folder"
+                class="grid w-6 shrink-0 place-items-center rounded-md text-xs text-muted opacity-60 transition hover:bg-[var(--surface-2)] hover:text-ink focus:opacity-100 group-hover:opacity-100">✎</button>
+            </div>
+          {/if}
+        </li>
       {/each}
       {#if unfiledCount}
         {@render folderBtn(UNFILED, 'Unfiled', unfiledCount)}
@@ -699,6 +745,10 @@
                     class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
                     <span aria-hidden="true">✦</span>{suggest[id]?.loading ? '...' : 'AI'}
                   </button>
+                {/if}
+                {#if onRemix}
+                  <button type="button" onclick={() => onRemix(text)} aria-label="Edit in Compose" title="Load into the Compose composer to remix"
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-[0.8125rem] text-muted transition hover:border-[var(--accent)] hover:text-ink">✎</button>
                 {/if}
                 <button type="button" onclick={() => copy(text)} title="Copy prompt" class="h-7 rounded-md border border-line px-2 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
                 {#if confirmDeleteId === id}

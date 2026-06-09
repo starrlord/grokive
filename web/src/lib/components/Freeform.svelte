@@ -25,6 +25,15 @@
     presets = await fetchFreeformPresets();
   });
 
+  // Grow an editable result textarea to its content so it reads like the old static <p>, re-fitting
+  // when the bound value changes programmatically (a fresh generation).
+  function autosize(node) {
+    const fit = () => { node.style.height = 'auto'; node.style.height = node.scrollHeight + 'px'; };
+    fit();
+    node.addEventListener('input', fit);
+    return { update: fit, destroy: () => node.removeEventListener('input', fit) };
+  }
+
   function nameFromFields() {
     return (presetName.trim() || instruction.trim() || prefix.trim() || 'Freeform setup').slice(0, 80);
   }
@@ -175,10 +184,11 @@
         {#each items as it, i (i)}
           <li class="flex items-start gap-3 rounded-lg border border-line bg-[var(--surface-2)] p-3">
             <span class="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-[var(--surface-solid)] text-xs font-bold text-muted">{i + 1}</span>
-            <p class="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{it}</p>
+            <textarea bind:value={items[i]} use:autosize={items[i]} rows="1" aria-label={`Result ${i + 1}`}
+              class="min-w-0 flex-1 resize-none overflow-hidden whitespace-pre-wrap break-words rounded-md border border-transparent bg-transparent px-1.5 py-1 text-sm leading-relaxed text-ink outline-none transition focus:border-line focus:bg-[var(--surface-solid)]"></textarea>
             <div class="flex shrink-0 flex-col gap-1">
-              <button type="button" onclick={() => addSavedResponse(it)} title="Save this response" class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">★ Save</button>
-              <button type="button" onclick={() => copyItem(it)} class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
+              <button type="button" onclick={() => addSavedResponse(items[i])} title="Save this response" class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">★ Save</button>
+              <button type="button" onclick={() => copyItem(items[i])} class="rounded-md border border-line px-2 py-0.5 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
             </div>
           </li>
         {/each}

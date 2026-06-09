@@ -296,6 +296,33 @@ Rules you MUST follow:
     toast(ok ? 'Prompt copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
   }
   function clearAll() { for (const k of Object.keys(fields)) fields[k] = ''; }
+
+  // Save a hand-composed stage prompt to the library (only AI variations could be saved before).
+  // The stage maps to the folder the auto-tagger already uses, so saves land sorted, not Unfiled.
+  function saveStage(stage) {
+    addSavedResponse(previews[stage], { folder: stage === 'image' ? 'Character Descriptions' : 'Actions / Motion' });
+  }
+  // Copy both stages at once, labeled so the two prompts stay distinct on the clipboard.
+  async function copyBoth() {
+    const parts = [];
+    if (previews.image.trim()) parts.push(`IMAGE: ${previews.image}`);
+    if (previews.motion.trim()) parts.push(`MOTION: ${previews.motion}`);
+    if (!parts.length) return;
+    const ok = await copyText(parts.join('\n\n'));
+    toast(ok ? 'Both prompts copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
+  }
+
+  // Semantic search from the browse rail's search box: when embeddings are built, Enter (or the
+  // button) runs a "more like this" over the typed text instead of the live substring filter.
+  const semanticReady = $derived(embed.configured && embed.embedded > 0);
+  function runSemanticSearch() {
+    const q = browseQ.trim();
+    if (!q || !semanticReady) return;
+    showResults(`Search: ${q}`, { text: q });
+  }
+  function onSearchKey(e) {
+    if (e.key === 'Enter') { e.preventDefault(); runSemanticSearch(); }
+  }
 </script>
 
 <div class="mx-auto w-full max-w-[1180px]">
@@ -360,7 +387,7 @@ Rules you MUST follow:
             <textarea rows="6" bind:value={personaCards[activeIdx].text}
               placeholder="Paste a character / voice definition — who they are, tone, vocabulary, rules. Describe the VOICE and content, not the output format. Applied to Scene and Freeform."
               class="w-full resize-y rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]"></textarea>
-            <p class="mt-2 text-xs text-muted">Saved on this device · applied only to Scene and Freeform.</p>
+            <p class="mt-2 text-xs text-muted">Synced across your devices · applied only to Scene and Freeform.</p>
           {:else}
             <p class="py-4 text-center text-sm text-muted">No persona cards yet — <button type="button" onclick={newCard} class="font-semibold text-[var(--accent)] hover:underline">create one</button> to write generated lines in a specific voice.</p>
           {/if}
@@ -376,7 +403,7 @@ Rules you MUST follow:
   {:else if studioMode === 'freeform'}
     <Freeform {persona} {llmReady} />
   {:else if studioMode === 'saved'}
-    <SavedResponses {llmReady} />
+    <SavedResponses {llmReady} onRemix={remix} />
   {:else}
     {#snippet fieldGrid(keys)}
       <div class="grid grid-cols-1 gap-x-3 gap-y-3 sm:grid-cols-2">
@@ -427,7 +454,10 @@ Rules you MUST follow:
             <button type="button" title="Tighten and improve wording without changing the prompt's intent."
               class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40" disabled={!previews[stage].trim() || gen.running} onclick={() => runGenerate('polish', stage)}>Polish</button>
           {/if}
-          <button type="button" class="ml-auto rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-bold text-[var(--on-accent)] disabled:opacity-40" disabled={!previews[stage].trim()} onclick={() => copyText_(previews[stage])}>Copy</button>
+          <button type="button" title="Save this prompt to your library"
+            class="ml-auto rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)] disabled:opacity-40"
+            disabled={!previews[stage].trim()} onclick={() => saveStage(stage)}>★ Save</button>
+          <button type="button" class="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-bold text-[var(--on-accent)] disabled:opacity-40" disabled={!previews[stage].trim()} onclick={() => copyText_(previews[stage])}>Copy</button>
         </div>
         {#if (gen.running || gen.items.length) && gen.stage === stage}
           <div class="mt-2 border-t border-line pt-2">
@@ -490,6 +520,13 @@ Rules you MUST follow:
           {@render fieldGrid(MOTION_KEYS)}
           <div class="mt-3">{@render promptBox('motion')}</div>
         </div>
+
+        {#if previews.image.trim() && previews.motion.trim()}
+          <div class="flex items-center justify-end">
+            <button type="button" onclick={copyBoth} title="Copy both prompts at once, labeled IMAGE / MOTION"
+              class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)]">Copy both</button>
+          </div>
+        {/if}
       </section>
 
       <!-- Browse / Remix rail. Sticky + self-start so it pins just under the sticky TopBar and
@@ -551,8 +588,14 @@ Rules you MUST follow:
             <span class="text-xs font-bold uppercase tracking-wider text-muted">Your prompts</span>
             {#if !browseQ.trim()}<span class="text-[0.625rem] text-muted">top {shownPrompts.length}</span>{/if}
           </div>
-          <input type="search" placeholder="Search prompts…" bind:value={browseQ}
-            class="mb-3 w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+          <input type="search" placeholder={semanticReady ? 'Search prompts…' : 'Filter prompts…'} bind:value={browseQ} onkeydown={onSearchKey}
+            class="w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+          {#if semanticReady && browseQ.trim()}
+            <button type="button" onclick={runSemanticSearch} title="Find the most semantically similar prompts (not just text matches)"
+              class="mb-3 mt-1.5 w-full truncate rounded-lg border border-line px-3 py-1.5 text-xs font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">≈ Search similar to “{browseQ.trim()}”</button>
+          {:else}
+            <div class="mb-3"></div>
+          {/if}
           {#if shownPrompts.length === 0}
             <p class="py-8 text-center text-sm text-muted">No prompts match.</p>
           {:else}
