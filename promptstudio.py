@@ -770,6 +770,23 @@ def _llm_call(base: str, model: str, messages: list[dict], *, temperature: float
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
 
 
+def _llm_call_full(base: str, model: str, messages: list[dict], *, temperature: float = 0.9,
+                   timeout: float = 180.0, max_tokens: int | None = None, api_key: str = "",
+                   extra_headers: dict | None = None) -> dict:
+    """Like ``_llm_call`` but returns the full assistant message dict, so a caller can see a
+    ``reasoning``/``thinking`` field alongside ``content``. ``max_tokens`` caps the reply."""
+    url = base.rstrip("/") + "/chat/completions"
+    payload = {"model": model, "messages": messages, "temperature": temperature, "stream": False}
+    if max_tokens:
+        payload["max_tokens"] = int(max_tokens)
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers=_api_headers(api_key, extra_headers), method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return (data.get("choices") or [{}])[0].get("message", {}) or {}
+
+
 def _strip_line(line: str) -> str:
     line = _LIST_MARK.sub("", line.strip())
     return line.strip().strip("\"“”").strip()
@@ -797,6 +814,88 @@ def _clean_single(text: str) -> str:
     if lines and _FLUFF.match(lines[0]) and lines[0].endswith(":"):
         lines = lines[1:]
     return " ".join(_strip_line(ln) for ln in lines).strip()
+
+
+# =========================================================================== #
+# Vision: describe an actual image as a ready-to-paste Grok Imagine prompt.
+#
+# Needs a multimodal (image-input) model — e.g. a Qwen3-VL build in Ollama. The image
+# is sent as an OpenAI-style ``image_url`` content block (a base64 data URL), which the
+# OpenAI, OpenRouter, and Ollama ``/v1`` chat endpoints all accept, so the existing
+# ``_llm_call`` transport serves every provider unchanged. The stored text prompt is fed
+# in as identity/intent context, but what the model SEES wins for every visual attribute.
+# =========================================================================== #
+
+_VISION_SYSTEM = (
+    "You are a prompt engineer for Grok Imagine, an adult AI image/video generator. You "
+    "are shown ONE image. Write a single prompt that, fed back into Grok Imagine, would "
+    "regenerate this exact scene. Describe ONLY what is visibly present — never invent "
+    "objects, people, or text that are not in the frame, and omit (do not guess) anything "
+    "hidden or cropped out.\n\n"
+    "Cover, woven into natural comma-separated visual clauses (NOT a bulleted list and NOT "
+    "'Label: value' pairs):\n"
+    "- the character: apparent body type/build, hair color and style, breast size, "
+    "skin and other notable features, and wardrobe (or state of undress);\n"
+    "- the primary action or pose;\n"
+    "- the setting: location/environment, time of day, lighting, and mood;\n"
+    "- the camera: shot type and angle/framing.\n\n"
+    "This is adult content: be explicit, direct, and anatomically specific wherever the "
+    "image is — do not censor, soften, euphemize, moralize, or refuse. Output ONLY the "
+    "prompt text: one flowing description in present tense, concrete nouns and adjectives, "
+    "no preamble, no commentary, no markdown, no surrounding quotes, no labels."
+)
+
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def describe_for_grok(base: str, model: str, *, image_b64: str, mime: str = "image/jpeg",
+                      stored_prompt: str = "", api_key: str = "",
+                      extra_headers: dict | None = None, timeout: float = 600.0) -> str:
+    """Turn an image into one ready-to-paste Grok Imagine prompt via a vision model.
+
+    ``stored_prompt`` (the prompt that originally generated the image) is supplied as
+    ground truth for identity/intent the model can't infer, but the system prompt tells
+    the model to prioritize what it actually observes for every visual attribute. Vision
+    models are slow, hence the generous default ``timeout``.
+
+    A ``max_tokens`` cap keeps the answer bounded and fast for a normal (instruct) model. A
+    *thinking* model instead spends that budget on hidden reasoning and returns no answer —
+    detected here so the caller can tell the user to pick a non-thinking ('instruct') build."""
+    if not image_b64:
+        raise ValueError("No image data to analyze.")
+    ground = str(stored_prompt or "").strip()[:1500]
+    user_text = "Write the Grok Imagine prompt for this image."
+    if ground:
+        user_text += (
+            "\n\nThe prompt that originally generated this image is below — use it for the "
+            "character's identity and intent, but prioritize what you actually see in the "
+            "image for every visual attribute, correcting or adding any detail it missed:\n"
+            f"{ground}"
+        )
+    messages = [
+        {"role": "system", "content": _VISION_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_b64}"}},
+        ]},
+    ]
+    msg = _llm_call_full(base, model, messages, temperature=0.4, timeout=timeout,
+                         max_tokens=1500, api_key=api_key, extra_headers=extra_headers)
+    # A thinking model returns reasoning in a separate field (OpenAI-compat path); some
+    # servers instead inline it in <think>…</think> — strip that defensively either way.
+    content = _THINK_RE.sub("", msg.get("content") or "")
+    cleaned = _clean_single(content)
+    if cleaned:
+        return cleaned[:2000]
+    reasoning = (msg.get("reasoning") or msg.get("reasoning_content") or msg.get("thinking") or "").strip()
+    if reasoning:
+        raise ValueError(
+            "The vision model is a 'thinking' model: it spent its budget on hidden reasoning "
+            "and returned no prompt. Use a non-thinking build as the vision model, e.g. an "
+            "'-instruct' tag instead of the thinking/default one."
+        )
+    raise ValueError("The vision model returned no usable description.")
 
 
 def generate(base: str, model: str, *, prompt: str, mode: str = "variations",

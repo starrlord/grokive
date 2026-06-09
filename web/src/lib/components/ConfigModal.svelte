@@ -43,6 +43,10 @@
     }
   };
 
+  // Grok Imagine (xAI) generation defaults — aspect ratios the API accepts.
+  const XAI_IMAGE_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '2:1', '1:2', 'auto'];
+  const XAI_VIDEO_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3'];
+
   let { onclose = () => {} } = $props();
 
   let curl = $state('');
@@ -57,11 +61,16 @@
   let llmKeyConfigured = $state(false);
   let llmEnvLocked = $state(false);
   let llmModelLocked = $state(false);
+  let llmVisionModel = $state('');
+  let llmVisionModelLocked = $state(false);
   let llmKeyLocked = $state(false);
   let llmClearKey = $state(false);
   let llmModelOptions = $state([]);
   let llmModelsLoading = $state(false);
   let llmModelsNote = $state('');
+  let llmVisionModelOptions = $state([]);
+  let llmVisionModelsLoading = $state(false);
+  let llmVisionModelsNote = $state('');
   let embedProvider = $state('local');
   let embedUrl = $state('');
   let embedModel = $state('');
@@ -74,6 +83,19 @@
   let embedModelOptions = $state([]);
   let embedModelsLoading = $state(false);
   let embedModelsNote = $state('');
+  let xaiKey = $state('');
+  let xaiKeyConfigured = $state(false);
+  let xaiKeyLocked = $state(false);
+  let xaiClearKey = $state(false);
+  let xaiImageModel = $state('');
+  let xaiImageModelLocked = $state(false);
+  let xaiVideoModel = $state('');
+  let xaiVideoModelLocked = $state(false);
+  let xaiImageResolution = $state('1k');
+  let xaiImageAspect = $state('1:1');
+  let xaiVideoResolution = $state('480p');
+  let xaiVideoAspect = $state('16:9');
+  let xaiVideoDuration = $state(6);
   let msg = $state('');
   let msgClass = $state('');
   let authRequired = $state(false);
@@ -81,6 +103,7 @@
   // the pane — Appearance shows the current theme, the picker opens in-place.
   let pickingTheme = $state(false);
   let pickingPromptAi = $state(false);
+  let pickingImagine = $state(false);
   let llmProviderDrafts = {};
   let embedProviderDrafts = {};
 
@@ -104,6 +127,8 @@
       llmKeyConfigured = !!s.llm_api_key_configured;
       llmEnvLocked = !!s.llm_env_locked;
       llmModelLocked = !!s.llm_model_env_locked;
+      llmVisionModel = s.llm_vision_model || '';
+      llmVisionModelLocked = !!s.llm_vision_model_env_locked;
       llmKeyLocked = !!s.llm_api_key_env_locked;
       rememberProviderDraft('llm');
       embedProvider = s.embed_provider || providerFromUrl(s.embed_server_url);
@@ -114,6 +139,17 @@
       embedModelLocked = !!s.embed_model_env_locked;
       embedKeyLocked = !!s.embed_api_key_env_locked;
       rememberProviderDraft('embed');
+      xaiKeyConfigured = !!s.xai_api_key_configured;
+      xaiKeyLocked = !!s.xai_api_key_env_locked;
+      xaiImageModel = s.xai_image_model || '';
+      xaiImageModelLocked = !!s.xai_image_model_env_locked;
+      xaiVideoModel = s.xai_video_model || '';
+      xaiVideoModelLocked = !!s.xai_video_model_env_locked;
+      xaiImageResolution = s.xai_image_resolution || '1k';
+      xaiImageAspect = s.xai_image_aspect_ratio || '1:1';
+      xaiVideoResolution = s.xai_video_resolution || '480p';
+      xaiVideoAspect = s.xai_video_aspect_ratio || '16:9';
+      xaiVideoDuration = s.xai_video_duration || 6;
     } catch {}
     try { authRequired = !!(await authStatus()).auth_required; } catch {}
   });
@@ -168,6 +204,8 @@
       llmClearKey = false;
       llmModelOptions = [];
       llmModelsNote = '';
+      llmVisionModelOptions = [];
+      llmVisionModelsNote = '';
       return;
     }
     if (provider === embedProvider) return;
@@ -184,6 +222,8 @@
 
   async function loadProviderModels(kind) {
     const isEmbed = kind === 'embed';
+    const isVision = kind === 'vision';
+    // Vision shares the chat (LLM) endpoint/provider/key — it's just a different model.
     const payload = {
       kind,
       provider: isEmbed ? embedProvider : llmProvider,
@@ -192,35 +232,22 @@
     const typedKey = isEmbed ? embedKey.trim() : llmKey.trim();
     if (typedKey && !(isEmbed ? embedClearKey : llmClearKey)) payload.api_key = typedKey;
 
-    if (isEmbed) {
-      embedModelsLoading = true;
-      embedModelsNote = 'Loading models...';
-    } else {
-      llmModelsLoading = true;
-      llmModelsNote = 'Loading models...';
-    }
+    const setLoading = (v) => { if (isEmbed) embedModelsLoading = v; else if (isVision) llmVisionModelsLoading = v; else llmModelsLoading = v; };
+    const setNote = (v) => { if (isEmbed) embedModelsNote = v; else if (isVision) llmVisionModelsNote = v; else llmModelsNote = v; };
+    const setOptions = (v) => { if (isEmbed) embedModelOptions = v; else if (isVision) llmVisionModelOptions = v; else llmModelOptions = v; };
+
+    setLoading(true);
+    setNote('Loading models...');
     try {
       const data = await fetchProviderModels(payload);
       const models = Array.isArray(data.models) ? data.models : [];
-      if (isEmbed) {
-        embedModelOptions = models;
-        embedModelsNote = models.length ? `${models.length} models loaded.` : 'No matching models returned.';
-      } else {
-        llmModelOptions = models;
-        llmModelsNote = models.length ? `${models.length} models loaded.` : 'No matching models returned.';
-      }
+      setOptions(models);
+      setNote(models.length ? `${models.length} models loaded.` : (data.note || 'No matching models returned.'));
     } catch (err) {
-      const text = err?.message || 'Could not load models.';
-      if (isEmbed) {
-        embedModelOptions = [];
-        embedModelsNote = text;
-      } else {
-        llmModelOptions = [];
-        llmModelsNote = text;
-      }
+      setOptions([]);
+      setNote(err?.message || 'Could not load models.');
     } finally {
-      if (isEmbed) embedModelsLoading = false;
-      else llmModelsLoading = false;
+      setLoading(false);
     }
   }
 
@@ -242,6 +269,7 @@
     body.embed_provider = embedProvider;
     if (!llmEnvLocked) body.llm_server_url = llmUrl.trim();
     if (!llmModelLocked) body.llm_model = llmModel.trim();
+    if (!llmVisionModelLocked) body.llm_vision_model = llmVisionModel.trim();
     if (!llmKeyLocked) {
       if (llmKey.trim()) body.llm_api_key = llmKey.trim();
       if (llmClearKey) body.llm_api_key_clear = true;
@@ -252,6 +280,17 @@
       if (embedKey.trim()) body.embed_api_key = embedKey.trim();
       if (embedClearKey) body.embed_api_key_clear = true;
     }
+    if (!xaiKeyLocked) {
+      if (xaiKey.trim()) body.xai_api_key = xaiKey.trim();
+      if (xaiClearKey) body.xai_api_key_clear = true;
+    }
+    if (!xaiImageModelLocked) body.xai_image_model = xaiImageModel.trim();
+    if (!xaiVideoModelLocked) body.xai_video_model = xaiVideoModel.trim();
+    body.xai_image_resolution = xaiImageResolution;
+    body.xai_image_aspect_ratio = xaiImageAspect;
+    body.xai_video_resolution = xaiVideoResolution;
+    body.xai_video_aspect_ratio = xaiVideoAspect;
+    body.xai_video_duration = xaiVideoDuration;
     let settingsErr = '';
     try {
       const r = await postSettings(body);
@@ -268,6 +307,7 @@
     if (e.key !== 'Escape') return;
     if (pickingTheme) pickingTheme = false;
     else if (pickingPromptAi) pickingPromptAi = false;
+    else if (pickingImagine) pickingImagine = false;
     else onclose();
   }
 </script>
@@ -318,6 +358,31 @@
       {#if llmModelsNote}
         <p class="mt-1 text-xs text-muted">{llmModelsNote}</p>
       {/if}
+      <div class="mt-3 border-t border-line pt-3">
+        <label for="llm-vision-model" class="mb-1 block text-xs font-semibold text-muted">
+          Vision model <span class="font-normal">— for “Describe for Grok” on the image lightbox</span>
+        </label>
+        <div class="grid gap-2 sm:grid-cols-[1fr_auto]">
+          <input id="llm-vision-model" class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+            placeholder={llmVisionModelLocked ? 'Set by LLM_VISION_MODEL env var' : 'blank uses the chat model'}
+            bind:value={llmVisionModel} disabled={llmVisionModelLocked} />
+          <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-60 pointer-coarse:min-h-10"
+            onclick={() => loadProviderModels('vision')} disabled={llmVisionModelsLoading || !llmUrl || llmVisionModelLocked}>
+            {llmVisionModelsLoading ? 'Loading' : 'Models'}
+          </button>
+        </div>
+        {#if llmVisionModelOptions.length}
+          <select class="mt-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
+            bind:value={llmVisionModel}>
+            {#each llmVisionModelOptions as model (model.id)}
+              <option value={model.id}>{model.name ? `${model.id} — ${model.name}` : model.id}</option>
+            {/each}
+          </select>
+        {/if}
+        {#if llmVisionModelsNote}
+          <p class="mt-1 text-xs text-muted">{llmVisionModelsNote}</p>
+        {/if}
+      </div>
       <div class="mt-2 flex gap-2">
         <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
           type="password" autocomplete="off"
@@ -380,19 +445,89 @@
   </div>
 {/snippet}
 
+{#snippet imagineSettings()}
+  <div class="space-y-3">
+    <p class="text-sm text-muted">xAI API key for <strong class="text-ink">Imagine</strong> image &amp; video generation — create one at <code class="rounded-sm bg-[var(--code-bg)] px-1">console.x.ai</code>. Write-only: after saving, Config only shows whether a key exists. Stored only on this server.</p>
+    <div class="rounded-xl border border-line p-3">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <div class="text-sm font-bold">API key</div>
+        {#if xaiKeyConfigured}
+          <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{xaiKeyLocked ? 'Env key' : 'Saved key'}</span>
+        {/if}
+      </div>
+      <div class="flex gap-2">
+        <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          type="password" autocomplete="off"
+          placeholder={xaiKeyLocked ? 'Set by XAI_API_KEY env var' : (xaiKeyConfigured ? 'Leave blank to keep saved key' : 'xai-...')}
+          bind:value={xaiKey} disabled={xaiKeyLocked || xaiClearKey} />
+        {#if xaiKeyConfigured && !xaiKeyLocked}
+          <button type="button" class="rounded-lg border border-line px-3 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-10"
+            aria-pressed={xaiClearKey} onclick={() => { xaiClearKey = !xaiClearKey; if (xaiClearKey) xaiKey = ''; }}>{xaiClearKey ? 'Keep' : 'Clear'}</button>
+        {/if}
+      </div>
+    </div>
+
+    <div class="grid gap-3 sm:grid-cols-2">
+      <div class="rounded-xl border border-line p-3">
+        <div class="mb-2 text-sm font-bold">Image defaults</div>
+        <input class="mb-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={xaiImageModelLocked ? 'Set by XAI_IMAGE_MODEL env var' : 'grok-imagine-image-quality'}
+          bind:value={xaiImageModel} disabled={xaiImageModelLocked} />
+        <div class="grid grid-cols-2 gap-2">
+          <label class="block text-xs font-semibold text-muted">Resolution
+            <select class="mt-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-normal text-[var(--ink)] outline-none" bind:value={xaiImageResolution}>
+              <option value="1k">1k</option>
+              <option value="2k">2k</option>
+            </select>
+          </label>
+          <label class="block text-xs font-semibold text-muted">Aspect ratio
+            <select class="mt-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-normal text-[var(--ink)] outline-none" bind:value={xaiImageAspect}>
+              {#each XAI_IMAGE_RATIOS as r (r)}<option value={r}>{r}</option>{/each}
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="rounded-xl border border-line p-3">
+        <div class="mb-2 text-sm font-bold">Video defaults</div>
+        <input class="mb-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
+          placeholder={xaiVideoModelLocked ? 'Set by XAI_VIDEO_MODEL env var' : 'grok-imagine-video'}
+          bind:value={xaiVideoModel} disabled={xaiVideoModelLocked} />
+        <div class="grid grid-cols-3 gap-2">
+          <label class="block text-xs font-semibold text-muted">Resolution
+            <select class="mt-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-normal text-[var(--ink)] outline-none" bind:value={xaiVideoResolution}>
+              <option value="480p">480p</option>
+              <option value="720p">720p</option>
+            </select>
+          </label>
+          <label class="block text-xs font-semibold text-muted">Aspect
+            <select class="mt-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-normal text-[var(--ink)] outline-none" bind:value={xaiVideoAspect}>
+              {#each XAI_VIDEO_RATIOS as r (r)}<option value={r}>{r}</option>{/each}
+            </select>
+          </label>
+          <label class="block text-xs font-semibold text-muted">Seconds
+            <input type="number" min="1" max="15" step="1"
+              class="mt-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-normal text-[var(--ink)] outline-none"
+              bind:value={xaiVideoDuration} />
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+{/snippet}
+
 <!-- Backdrop: full-screen sheet on phones (panel fills it), centered card on ≥sm. -->
 <div use:portal class="fixed inset-0 z-[60] bg-[var(--overlay)] backdrop-blur-sm sm:grid sm:place-items-center sm:p-4" role="presentation"
      onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div class="config-panel panel flex h-[100dvh] w-full flex-col overflow-hidden sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:max-w-[640px] sm:rounded-card"
        role="dialog" aria-modal="true" aria-label="Config" tabindex="-1" use:trapFocus>
     <header class="cfg-header flex shrink-0 items-center gap-2 border-b border-line px-4 py-3 sm:px-5">
-      {#if pickingTheme || pickingPromptAi}
+      {#if pickingTheme || pickingPromptAi || pickingImagine}
         <button type="button" class="-ml-1 flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-11"
-          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; }}>
+          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; pickingImagine = false; }}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
-        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : 'Prompt Studio AI'}</h2>
+        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : pickingImagine ? 'Grok Imagine API' : 'Prompt Studio AI'}</h2>
       {:else}
         <h2 class="text-lg font-bold">Config</h2>
         <button type="button" class="ml-auto grid h-9 w-9 place-items-center rounded-lg border border-line transition hover:bg-[var(--surface-2)] pointer-coarse:h-11 pointer-coarse:w-11"
@@ -418,6 +553,8 @@
         </div>
       {:else if pickingPromptAi}
         {@render promptAiSettings()}
+      {:else if pickingImagine}
+        {@render imagineSettings()}
       {:else}
         <!-- Appearance: compact settings rows (live-applied, separate from Save). -->
         <section>
@@ -474,6 +611,22 @@
                 <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">Env key</span>
               {:else if llmKeyConfigured || embedKeyConfigured}
                 <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">Saved key</span>
+              {/if}
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+          </button>
+        </section>
+
+        <section class="mt-6">
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Grok Imagine API</div>
+          <button type="button" class="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+            aria-label="Configure Grok Imagine API" onclick={() => (pickingImagine = true)}>
+            <span class="text-sm font-semibold">Key &amp; defaults</span>
+            <span class="ml-auto flex min-w-0 items-center gap-2 text-sm">
+              {#if xaiKeyConfigured}
+                <span class="shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{xaiKeyLocked ? 'Env key' : 'Saved key'}</span>
+              {:else}
+                <span class="shrink-0 text-xs text-muted">Not set</span>
               {/if}
               <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
             </span>

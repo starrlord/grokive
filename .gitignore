@@ -8,6 +8,8 @@ library.json
 deleted_ids.json
 playlists.json
 settings.json
+imagine_sessions.json
+imagine_staging/
 data/
 media/
 thumbnails/

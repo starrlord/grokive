@@ -172,6 +172,70 @@ export async function fetchProviderModels(body) {
   return d;
 }
 
+// --- Grok Imagine (xAI) generation -----------------------------------------
+// Image generation is synchronous (returns the ingested gallery records). Video
+// is async: start a job, then poll status until it finishes.
+export async function generateImage(body) {
+  const res = await fetch('/api/imagine/image', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Image generation failed.');
+  return d; // { ok, session_id, generations: [record, ...] }
+}
+export async function startImagineVideo(body) {
+  const res = await fetch('/api/imagine/video', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Video generation failed to start.');
+  return d; // { ok, job_id }
+}
+export const imagineVideoStatus = (sessionId = '') =>
+  getJSON(`/api/imagine/video/status?session=${encodeURIComponent(sessionId)}`);
+export const imagineJobsAll = () => getJSON('/api/imagine/jobs');
+export const ackImagineVideo = (sessionId = '') =>
+  fetch('/api/imagine/video/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId }) }).catch(() => {});
+// Staging workspaces: per-session histories of generations; nothing reaches the
+// gallery until saveImagineGen() promotes one. Load by session id (scratch, ws:*,
+// src:*); list all sessions for the workspace switcher.
+export const getImagineSession = (sessionId = '') =>
+  getJSON(`/api/imagine/session?id=${encodeURIComponent(sessionId)}`);
+export const getImagineSessions = () => getJSON('/api/imagine/sessions');
+export async function saveImagineGen(genId) {
+  const res = await fetch('/api/imagine/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gen_id: genId })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Save failed.');
+  return d; // { ok, item, already? }
+}
+export async function clearImagineSession(sessionId) {
+  const res = await fetch('/api/imagine/session/clear', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sessionId })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Clear failed.');
+  return d;
+}
+export async function discardImagineGen(genId) {
+  const res = await fetch('/api/imagine/discard', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gen_id: genId })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Delete failed.');
+  return d;
+}
+export async function uploadImagineImage(sessionId, file) {
+  const fd = new FormData();
+  fd.append('session_id', sessionId);
+  fd.append('file', file);
+  const res = await fetch('/api/imagine/upload', { method: 'POST', body: fd });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || 'Upload failed.');
+  return d; // { ok, session_id, generation }
+}
+
 // --- Prompt Studio (Phase 0: corpus vocabulary + structured composer) -------
 export async function fetchPromptVocabulary() {
   try { return await getJSON('/api/prompts/vocabulary'); }
@@ -209,6 +273,17 @@ export async function generatePrompts(body) {
   const d = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(d.error || 'Generation failed.');
   return d; // { variations: string[], model }
+}
+
+// Vision — describe an image (by media id) as a ready-to-paste Grok Imagine prompt.
+// Needs a multimodal model configured as the vision model in Config → Prompt Studio AI.
+export async function describeImage(id) {
+  const res = await fetch('/api/prompts/from-image', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Could not describe the image.');
+  return d; // { prompt, model }
 }
 
 // Enhance one saved prompt into a more descriptive prompt; optionally rewrite only quoted dialogue.
@@ -283,6 +358,29 @@ export async function fetchSavedResponses() {
   try { return (await getJSON('/api/prompts/responses')).responses || []; } catch { return []; }
 }
 export const saveSavedResponses = (responses) => saveJSON('/api/prompts/responses', { responses });
+// Append ONE saved response server-side (read-modify-write) and get the full list back. Use
+// this from any context that hasn't loaded the full list (e.g. the lightbox) — the full-list
+// POST above would otherwise overwrite the server with whatever the client happens to hold.
+export async function addSavedResponseRemote(text, folder = '') {
+  const res = await fetch('/api/prompts/responses/add', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, folder })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Could not save.');
+  return d; // { ok, added, responses }
+}
+// Merge media-library prompts (metadata.json) into Saved, server-side: backed up first, deduped,
+// can only grow the list. preview:true returns only counts ({missing, library_unique, saved});
+// otherwise it imports and returns the full updated list ({added, total, backup, responses}).
+export async function importLibraryPrompts({ preview = false, folder } = {}) {
+  const res = await fetch('/api/prompts/responses/import-library', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preview, ...(folder ? { folder } : {}) })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Import failed.');
+  return d;
+}
 
 // Persona cards (durable, server-side, shared across devices). Returns null when the GET FAILS
 // (so callers don't mistake an unreachable server for a genuinely empty list and overwrite it);

@@ -6,7 +6,7 @@
 
 Download your Grok Imagine favorites and Agent canvases, then browse them in a modern, responsive web app — chain clips into a playlist and export them as one seamless video, auto-generate subtitles for every clip, and burn them straight into the merged file.
 
-Grokive is a free, self-hosted archiver that keeps your Grok Imagine library entirely on hardware you control. You sign in once by pasting a cURL request copied from your browser session; from there the tool pulls your saved media down to local disk. Browsing happens in a **SvelteKit single-page web app** (run via Docker or `python server.py`) backed by a SQLite read-model, with full-text prompt search, favorites, archive, collections, playlists, subtitle generation, themes, and an installable PWA. A small **CLI** handles the downloading and index builds.
+Grokive is a free, self-hosted archiver that keeps your Grok Imagine library entirely on hardware you control. You sign in once by pasting a cURL request copied from your browser session; from there the tool pulls your saved media down to local disk. Browsing happens in a **SvelteKit single-page web app** (run via Docker or `python server.py`) backed by a SQLite read-model, with full-text prompt search, favorites, archive, collections, playlists, subtitle generation, themes, and an installable PWA. With an xAI key it can also **generate new images and video** with the **Grok Imagine API** straight into your library. A small **CLI** handles the downloading and index builds.
 
 ## Screenshots
 
@@ -33,6 +33,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - [Playlists and export](#playlists-and-export)
 - [Song Beat Montage](#song-beat-montage)
 - [Prompt Studio](#prompt-studio)
+- [Grok Imagine (generate images & video)](#grok-imagine-generate-images--video)
 - [Subtitles (Whisper)](#subtitles-whisper)
 - [Capture your Grok auth request](#capture-your-grok-auth-request)
 - [Running from source](#running-from-source-without-docker)
@@ -62,6 +63,8 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
 - **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with GPU-accelerated rendering and one-click **Add to Collection**.
 - **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish / Enhance** (in your style, with fresh dialogue). Use local Ollama for local-only AI, or OpenAI/OpenRouter when you want a remote provider.
+- **Grok Imagine generation (xAI):** generate brand-new **images and video** from text — or from a **source image** (edit a still, or animate it) — in its own **Grok Imagine** view. Work in multiple **workspaces** that each keep their own history and can render videos concurrently, bring an image in via **Use as source** (gallery), a previous generation, or an **upload** (button or drag-and-drop), then **Save to Gallery** the keepers (tagged with a ✨ badge and linked back to their source). Needs an xAI API key (`XAI_API_KEY` or **Config**).
+- **Describe for Grok (image → prompt):** a ⚡ button on any image in the lightbox reads the picture *and* its saved prompt with a **vision model** and writes a ready-to-paste Grok Imagine prompt — character, wardrobe, action, setting, and camera — which you can edit and **save straight into Prompt Studio**. Point it at a self-hosted multimodal model (e.g. a Qwen3-VL build in Ollama) to keep it local.
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
@@ -82,7 +85,8 @@ All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
 `playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
 scenes), `saved_responses.json` (starred prompts), `personas.json` (Prompt Studio persona
-cards), `prompt_studio.db` (durable prompt embeddings),
+cards), `prompt_studio.db` (durable prompt embeddings), `imagine_sessions.json` +
+`imagine_staging/` (un-saved Grok Imagine generations, per workspace),
 media, thumbnails, subtitle `.srt`/`.vtt` sidecars, and the built gallery) is written
 under one volume: the container's `/data` (set via the `GROK_DATA_DIR` env var), so it
 survives container updates. `index.db` is purely derived from `metadata.json` and
@@ -140,10 +144,15 @@ building on the server needed.
 | `EMBED_API_KEY` | _(unset)_ | API key for the embeddings endpoint. Overrides any key saved in **Config**. |
 | `LLM_SERVER_URL` | _(unset)_ | Chat endpoint for **Prompt Studio** AI Variations / Remix / Polish / Enhance (Ollama/OpenAI-compatible `/v1` base, OpenAI, or OpenRouter). Overrides **Config**. |
 | `LLM_MODEL` | `dolphin3` | Chat model name (only used when `LLM_SERVER_URL` is set). |
+| `LLM_VISION_MODEL` | _(falls back to `LLM_MODEL`)_ | Multimodal model for **Describe for Grok** (image → prompt in the lightbox). Set a vision-capable model served on the same chat endpoint — a non-thinking Qwen3-VL `-instruct` build (e.g. `huihui_ai/qwen3-vl-abliterated:8b-instruct`); blank reuses the chat model. |
 | `LLM_API_KEY` | _(unset)_ | API key for the chat endpoint. Overrides any key saved in **Config**. |
 | `OPENAI_API_KEY` | _(unset)_ | Fallback key when a Prompt Studio URL points at `api.openai.com`. |
 | `OPENROUTER_API_KEY` | _(unset)_ | Fallback key when a Prompt Studio URL points at `openrouter.ai`. |
 | `OPENROUTER_HTTP_REFERER` / `OPENROUTER_APP_TITLE` | _(unset)_ / `Grokive` | Optional OpenRouter attribution headers. |
+| `XAI_API_KEY` | _(unset)_ | xAI API key enabling the **Grok Imagine** view (image & video generation, **Use as source** on gallery images, and uploads). Create one at [console.x.ai](https://console.x.ai). Overrides any key saved in **Config**. |
+| `XAI_IMAGE_MODEL` | `grok-imagine-image-quality` | Grok Imagine image-generation model. Overrides the value saved in **Config**. |
+| `XAI_VIDEO_MODEL` | `grok-imagine-video` | Grok Imagine video-generation model. Overrides the value saved in **Config**. |
+| `IMAGINE_VIDEO_CONCURRENCY` | `5` | Max Grok Imagine **videos** rendering at once across all workspaces (each workspace is still one-at-a-time). |
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
@@ -232,6 +241,7 @@ by a SQLite read-model (`db.py` → `index.db`, with FTS5 full-text search) and 
 Flask API (`/api/media`, `/api/facets`, …). Highlights:
 
 - **Views:** Recent, All Media, Collections, Favorites, Archive, and Canvases tabs. All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
+- **Workspaces:** beyond browsing, two top-bar tools — **✦ Prompt Studio** (compose prompts) and **✨ Grok Imagine** (generate images & video). See those sections below.
 - **Collections:** group mixed images and videos into named cards with covers, then drill into each collection with the normal gallery controls and scoped tag/resolution filters.
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
@@ -247,7 +257,9 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 - **Select mode:** multi-select plus compact Select Visible / Next 25 helpers for bulk favorite/archive, **Add to Collection**, **Save as playlist**, or a
   one-off **Export**.
 - **Lightbox:** the media fills the window; press `i` / tap ⓘ for prompt + actions, `f`
-  for fullscreen, arrows to navigate; subtitle track shown when available.
+  for fullscreen, arrows to navigate; subtitle track shown when available. On images, a
+  **⚡ Describe for Grok** button turns the picture into a Grok Imagine prompt (see
+  *Prompt Studio → Describe for Grok*).
 - **Installable PWA:** add to your home screen on iOS/Android for a full-screen app.
 - **Mobile:** a **Filters** button opens the same tag/model/type modal.
 
@@ -487,9 +499,87 @@ With those configured you get:
   it in a server-side library you can search, copy, and reuse from the **Saved** tab on any device. You
   can also **add a prompt by hand** there (⌘/Ctrl + Enter) to stash one without generating it.
 
+### Describe for Grok (image → prompt)
+
+Open any **image** in the lightbox and click the **⚡** button: Grokive sends the picture
+(downscaled server-side) plus its saved prompt to a **vision model** and writes a single,
+ready-to-paste Grok Imagine prompt describing the character, wardrobe, action, setting, and
+camera. Edit it in place, then **Save to Prompt Studio** — it lands in a *From Image* folder
+on the **Saved** tab — or **Copy** it. **Regenerate** for another take.
+
+This needs a **multimodal** model — the regular chat model (e.g. `dolphin3`) can't see
+images. Set a vision-capable model in **Config → Prompt Studio AI → Vision model** (or the
+`LLM_VISION_MODEL` env var); leave it blank to reuse the chat model when that model is itself
+multimodal. It runs on the **same endpoint, provider, and key** as the chat model, so a local
+Ollama vision model keeps everything on your own hardware. Pick a **non-thinking ("instruct")**
+build — a *thinking* model spends its output budget on hidden reasoning and may return no prompt
+(Grokive surfaces a clear message if that happens). A Qwen3-VL instruct build works well:
+
+```bash
+ollama pull huihui_ai/qwen3-vl-abliterated:8b-instruct
+```
+
+then set `huihui_ai/qwen3-vl-abliterated:8b-instruct` as the **Vision model** (Config → Prompt
+Studio AI, or the `LLM_VISION_MODEL` env var). Local vision models are slower than text — a
+generation can take a few seconds to a minute on CPU, and the overlay shows a progress state
+while it works.
+
 Embeddings live in `prompt_studio.db` keyed by prompt text, so they survive an index rebuild and
 only new prompts are ever re-embedded. Saved scenes, responses, and persona cards live in
 `scenes.json` / `saved_responses.json` / `personas.json` under `/data`.
+
+## Grok Imagine (generate images & video)
+
+Generate brand-new images and videos with the **xAI Grok Imagine API**, right inside
+Grokive — then save the keepers into your gallery alongside your archived media. Open it
+from the **✨ Imagine** button in the top bar (next to ✦ Prompt Studio).
+
+It needs an **xAI API key** — create one at [console.x.ai](https://console.x.ai), then
+paste it into **Config → Grok Imagine API** (or set `XAI_API_KEY`). The key is stored
+**write-only** on the server and never returned to the browser; the same panel holds the
+model / resolution / aspect / duration defaults (also settable via the `XAI_*` env vars).
+
+### Workspaces
+
+Each piece of work lives in its own **workspace** with its own running history — switch
+between them freely from the strip at the top, and they never overwrite each other. A
+workspace is either rooted on a gallery image (opened via **Use as source**) or a blank
+**text** workspace (**+ New**). Generations sit in a staging area and **don't touch your
+gallery until you click *Save to Gallery*** on the ones you want. **Clear workspace**
+deletes a workspace's staged history (saved gallery items are untouched).
+
+### What you can make
+
+- **Text → image** — describe it; pick count (1–4), aspect ratio, and resolution (1k / 2k).
+- **Text → video** — describe it; pick duration (1–15 s), aspect ratio, and resolution (480p / 720p).
+- **Image → image (edit)** — alter an existing image with a prompt (keeps the source's aspect ratio).
+- **Image → video (animate)** — turn a still into a motion clip (defaults to *Match source* so it isn't stretched).
+
+A **From text / Use this image** toggle lets you flip between editing the active source and
+generating fresh from your prompt at any time, so you're never locked into needing a source.
+
+### Bring your own image
+
+Use any image as the source — from the **gallery** (the wand **Use as source** action on
+image cards and in the lightbox), a **previous generation** in the workspace history (click
+it), or an **uploaded** image: the **Upload** button or **drag-and-drop** onto the preview.
+An uploaded image lands in the history like a generation, ready to edit or animate. (Saving
+an uploaded *original* to the gallery doesn't tag it AI-generated — only true generations
+get the ✨ badge.)
+
+### Concurrent video
+
+Each workspace renders **one video at a time**, but up to **5 workspaces render at once**
+(tune with `IMAGINE_VIDEO_CONCURRENCY`). Progress shows per-workspace and keeps running if
+you navigate away — a spinner on the workspace chip tells you which ones are still rendering.
+
+### Saving & provenance
+
+Saved generations land in your gallery like any other media — searchable, filterable,
+playable — and carry a small **✨ badge** on the card and in the lightbox marking them
+API-generated, plus a `parent_id` link back to the source image so the lightbox's *Related*
+panel ties an edit or animation to the image it came from. The image bytes are fetched
+inline (base64) so nothing depends on an expiring CDN URL.
 
 ## Subtitles (Whisper)
 

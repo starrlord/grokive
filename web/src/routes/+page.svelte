@@ -10,7 +10,7 @@
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
     collections, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
-    setSort
+    setSort, galleryReload
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -26,6 +26,7 @@
   import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
   import ScrollToTop from '$lib/components/ScrollToTop.svelte';
   import PromptStudio from '$lib/components/PromptStudio.svelte';
+  import ImagineStudio from '$lib/components/ImagineStudio.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
 
   const PAGE_SIZE = 120;
@@ -132,7 +133,7 @@
     if (next !== sig) {
       sig = next;
       // Studio is an authoring tool, not a media view — no fetch to make.
-      if ($filters.view === 'studio') return;
+      if ($filters.view === 'studio' || $filters.view === 'imagine') return;
       if (!activeCollection) load(true);
       if (!activeCollection || $filters.view !== 'collections') refreshFacets();
     }
@@ -151,6 +152,19 @@
   async function refreshFacets() {
     try { facets = await fetchFacets($filters, activeCollectionId); } catch {}
   }
+
+  // Refetch the current media view after a Grok Imagine generation ingests new
+  // media (the index is rebuilt server-side first, so a fresh fetch includes it).
+  let _reloadSig = 0;
+  $effect(() => {
+    const n = $galleryReload;
+    if (n === _reloadSig) return;
+    _reloadSig = n;
+    if (n === 0 || $filters.view === 'studio' || $filters.view === 'imagine') return;
+    if (activeCollection) loadCollectionItems(activeCollection, true);
+    else load(true);
+    refreshFacets();
+  });
 
   onMount(async () => {
     applyLibrary(await fetchLibrary());
@@ -326,7 +340,7 @@
 <div class="flex">
   <!-- Studio is its own full-width workspace; the media-browsing sidebar (filters,
        playlists) doesn't apply there, so hide it for that view. -->
-  {#if $filters.view !== 'studio'}
+  {#if $filters.view !== 'studio' && $filters.view !== 'imagine'}
     <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
       <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
     </aside>
@@ -421,6 +435,8 @@
       </div>
     {:else if $filters.view === 'studio'}
       <PromptStudio />
+    {:else if $filters.view === 'imagine'}
+      <ImagineStudio />
     {:else}
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <p class="text-sm text-muted">{displayTotal.toLocaleString()} {$filters.view === 'favorites' ? 'favorites' : $filters.view === 'archive' ? 'archived' : $filters.view === 'all' ? 'items' : 'recent items'}</p>

@@ -4,7 +4,8 @@ import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
   getSettings, deleteMedia, movieStatus, dismissMovie,
-  fetchSavedResponses, saveSavedResponses
+  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, importLibraryPrompts,
+  getImagineSessions, imagineJobsAll
 } from './api.js';
 import { toast } from './toast.js';
 
@@ -425,10 +426,79 @@ export const settings = writable({
   llm_model_env_locked: false,
   llm_provider: 'local',
   llm_api_key_configured: false,
-  llm_api_key_env_locked: false
+  llm_api_key_env_locked: false,
+  xai_api_key_configured: false,
+  xai_api_key_env_locked: false,
+  xai_image_model: 'grok-imagine-image-quality',
+  xai_video_model: 'grok-imagine-video',
+  xai_image_resolution: '1k',
+  xai_image_aspect_ratio: '1:1',
+  xai_video_resolution: '480p',
+  xai_video_aspect_ratio: '16:9',
+  xai_video_duration: 6
 });
 export async function loadSettings() {
   try { settings.set(await getSettings()); } catch {}
+}
+
+// --- Grok Imagine: multi-session workspaces --------------------------------
+// Each workspace is a server-side staging session keyed by id: `src:<galleryId>`
+// (rooted on a gallery image), `scratch`, or `ws:<rand>` (an ad-hoc text workspace).
+// `activeImagineSession` is the one the Imagine view shows; sessions persist and
+// coexist, so switching never overwrites another.
+export const activeImagineSession = writable('scratch');
+
+// "Use as source" on a gallery image opens (or resumes) that image's workspace and
+// jumps to the Imagine view. The session id is all that's needed — the server fills
+// in the source thumbnail/prompt/dimensions when the session loads.
+export function sendToImagine(item) {
+  if (!item?.id) return;
+  activeImagineSession.set(`src:${item.id}`);
+  filters.update((f) => ({ ...f, view: 'imagine' }));
+}
+export function newImagineWorkspace() {
+  const id = 'ws:' + Math.random().toString(36).slice(2, 10);
+  activeImagineSession.set(id);
+  return id;
+}
+
+// The switcher's list of sessions (refreshed after generate/clear/delete).
+export const imagineSessions = writable([]);
+export async function refreshImagineSessions() {
+  try {
+    const d = await getImagineSessions();
+    imagineSessions.set(Array.isArray(d.sessions) ? d.sessions : []);
+  } catch {}
+}
+
+// Per-session video jobs, polled globally so progress survives switching sessions/
+// views and drives the switcher's render spinners. Keyed by session_id.
+export const imagineJobs = writable({});
+let _imaginePollTimer = null;
+export async function refreshImagineJobs() {
+  try {
+    const d = await imagineJobsAll();
+    const map = {};
+    for (const j of d.jobs || []) map[j.session_id] = j;
+    imagineJobs.set(map);
+    if (!(d.jobs || []).some((j) => j.running)) stopImaginePolling();
+  } catch {}
+}
+function stopImaginePolling() {
+  if (_imaginePollTimer) { clearInterval(_imaginePollTimer); _imaginePollTimer = null; }
+}
+// Begin (or keep) polling jobs; safe to call repeatedly. Stops itself once nothing
+// is running (a freshly-started job re-arms it).
+export function ensureImaginePolling() {
+  if (typeof setInterval === 'undefined') return;
+  refreshImagineJobs();
+  if (!_imaginePollTimer) _imaginePollTimer = setInterval(refreshImagineJobs, 2500);
+}
+
+// Bumped after a generation is SAVED into the gallery so the gallery refetches.
+export const galleryReload = writable(0);
+export function requestGalleryReload() {
+  galleryReload.update((n) => n + 1);
 }
 
 // --- Saved Prompt Studio responses (starred outputs, server-persisted) ------
@@ -451,6 +521,30 @@ export function addSavedResponse(text, { folder = '' } = {}) {
   if (added) { persistSavedResponses(); toast('Saved', { type: 'success' }); }
   else toast('Already saved', { type: 'info' });
   return added;
+}
+// Safe one-off save for callers that may NOT have loaded the full list (e.g. the lightbox's
+// "Describe for Grok"): the server appends to the on-disk file and returns the full list, so
+// it can't overwrite the user's other saved prompts with an empty/stale local store. Always
+// use this — NOT addSavedResponse — from outside Prompt Studio.
+export async function saveResponseToStudio(text, { folder = '' } = {}) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  try {
+    const d = await addSavedResponseRemote(t, folder);
+    if (Array.isArray(d.responses)) savedResponses.set(d.responses);
+    toast(d.added === false ? 'Already saved' : 'Saved', { type: d.added === false ? 'info' : 'success' });
+    return true;
+  } catch {
+    toast("Couldn't save to Prompt Studio — check your connection.", { type: 'error' });
+    return false;
+  }
+}
+// Import every library prompt not already saved (server-side merge, backed up + deduped) and
+// refresh the store from the authoritative list. Returns { added, total, backup }.
+export async function importLibraryIntoSaved({ folder = 'Library' } = {}) {
+  const d = await importLibraryPrompts({ folder });
+  if (Array.isArray(d.responses)) savedResponses.set(d.responses);
+  return d;
 }
 // Merge a partial patch ({ folder } / { tags }) into one saved response and persist.
 export function updateSavedResponse(id, patch) {

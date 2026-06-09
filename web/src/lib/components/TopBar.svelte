@@ -70,15 +70,26 @@
     {/each}
   </nav>
 
-  <button type="button"
-    class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
-    aria-label="Open Prompt Studio"
-    aria-current={$filters.view === 'studio' ? 'page' : undefined}
-    title="Open Prompt Studio"
-    onclick={() => setView('studio')}>
-    <span aria-hidden="true">✦</span>
-    <span aria-hidden="true" class="topbar-workspace-label"></span>
-  </button>
+  <div class="topbar-workspace-group flex shrink-0 items-center gap-1.5">
+    <button type="button"
+      class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
+      aria-label="Open Prompt Studio"
+      aria-current={$filters.view === 'studio' ? 'page' : undefined}
+      title="Open Prompt Studio"
+      onclick={() => setView('studio')}>
+      <span aria-hidden="true">✦</span>
+      <span aria-hidden="true" class="topbar-workspace-label"></span>
+    </button>
+    <button type="button"
+      class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'imagine' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
+      aria-label="Open Grok Imagine"
+      aria-current={$filters.view === 'imagine' ? 'page' : undefined}
+      title="Open Grok Imagine — generate images & video"
+      onclick={() => setView('imagine')}>
+      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+      <span aria-hidden="true" class="hidden sm:inline">Imagine</span>
+    </button>
+  </div>
 
   <div class="topbar-tools flex flex-wrap items-center gap-1.5">
     <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
@@ -127,7 +138,7 @@
     .topbar-brand { grid-area: brand; }
     .topbar-system { grid-area: system; justify-self: end; min-width: 0; }
     .topbar-views { grid-area: views; width: 100%; min-width: 0; }
-    .topbar-workspace { grid-area: workspace; justify-self: end; }
+    .topbar-workspace-group { grid-area: workspace; justify-self: end; }
     .topbar-tools {
       grid-area: tools;
       width: 100%;
@@ -214,7 +225,7 @@
       width: 100%;
       min-width: 0;
     }
-    .topbar-workspace {
+    .topbar-workspace-group {
       grid-area: workspace;
       justify-self: end;
     }
@@ -264,7 +275,7 @@
       min-width: 0;
       width: 100%;
     }
-    .topbar-workspace {
+    .topbar-workspace-group {
       grid-area: workspace;
       justify-self: start;
     }

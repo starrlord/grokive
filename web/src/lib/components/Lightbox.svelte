@@ -19,11 +19,12 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import VisionPrompt from './VisionPrompt.svelte';
 
   async function copy(e, text) {
     const b = e.currentTarget;
@@ -72,6 +73,7 @@
   let videoEl = $state(null);
   let stageEl = $state(null);
   let showInfo = $state(false);
+  let showVision = $state(false);
   let relatedFor = $state('');
   let related = $state({ base: null, generated: [] });
   let relatedLoading = $state(false);
@@ -268,7 +270,7 @@
     onclose();
   }
   function onkey(e) {
-    if (e.key === 'Escape') { if (document.fullscreenElement) return; if (showInfo) { showInfo = false; return; } close(); }
+    if (e.key === 'Escape') { if (document.fullscreenElement) return; if (showVision) { showVision = false; return; } if (showInfo) { showInfo = false; return; } close(); }
     else if (e.key === 'ArrowLeft') step(-1);
     else if (e.key === 'ArrowRight') step(1);
     else if (e.key === 'f' || e.key === 'F') toggleFs();
@@ -307,8 +309,20 @@
     <div class="absolute z-10 flex gap-2" style="top: max(0.75rem, env(safe-area-inset-top)); right: max(0.75rem, env(safe-area-inset-right));">
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
         title="Favorite" aria-label={$favorites.has(item.id) ? 'Unfavorite' : 'Favorite'} aria-pressed={$favorites.has(item.id)} onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
+      {#if item.media_type !== 'video'}
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg {showVision ? 'text-[var(--accent)]' : ''}"
+          title="Describe for Grok (AI)" aria-label="Describe image for Grok" aria-pressed={showVision}
+          onclick={() => { showVision = !showVision; if (showVision) showInfo = false; }}>
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+        </button>
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg"
+          title="Use as source for Grok Imagine" aria-label="Use as Imagine source"
+          onclick={() => { sendToImagine(item); close(); }}>
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+        </button>
+      {/if}
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
-        title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => (showInfo = !showInfo)}>ⓘ</button>
+        title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => { showInfo = !showInfo; if (showInfo) showVision = false; }}>ⓘ</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {autoplayVideos ? 'text-[var(--accent)]' : ''}"
         title={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
         aria-label={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
@@ -358,6 +372,13 @@
             (item.href || '').split('/').pop()
           ].filter(Boolean).join('  ·  ')}
         </p>
+        {#if item.api_generated}
+          <div class="mb-3 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-bold"
+               style="background: color-mix(in srgb, var(--accent-2) 18%, transparent); color: var(--accent-2);">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>
+            <span>Generated with Grok Imagine</span>
+          </div>
+        {/if}
         {#if related.base || related.generated.length}
           <div class="mb-3 flex flex-wrap items-center gap-2">
             <span class="text-xs font-bold uppercase tracking-wide text-muted">Related</span>
@@ -382,9 +403,19 @@
             onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥ Favorited' : '♡ Favorite'}</button>
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold"
             onclick={(e) => copy(e, item.prompt)}>Copy prompt</button>
+          {#if item.media_type !== 'video'}
+            <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold hover:border-[var(--accent)]"
+              onclick={() => { sendToImagine(item); close(); }}>Use as Imagine source</button>
+          {/if}
           <a class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" href={item.href} target="_blank" rel="noreferrer">Open original</a>
         </div>
       </div>
+    {/if}
+
+    <!-- Describe-for-Grok overlay: image-only, generates a Grok Imagine prompt from the
+         image + its stored prompt via a vision model. Sits above the Info panel. -->
+    {#if showVision && item.media_type !== 'video'}
+      <VisionPrompt {item} onclose={() => (showVision = false)} />
     {/if}
 
     {#if confirmingDelete}

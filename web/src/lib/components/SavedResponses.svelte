@@ -1,11 +1,12 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
-    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses
+    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses, importLibraryIntoSaved
   } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
-  import { auditPromptLabels, autotagPrompt, enhancePrompt } from '$lib/api.js';
+  import { auditPromptLabels, autotagPrompt, enhancePrompt, importLibraryPrompts } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   let { llmReady = false, onRemix = null } = $props(); // llmReady -> auto-tag affordances; onRemix -> load a saved prompt back into the Compose composer
 
@@ -59,15 +60,13 @@
     return best;
   });
 
-  // Every tag in use, most-used first, for the filter row.
+  // Full tag vocabulary across ALL saved responses — used only for auto-tag/audit reuse
+  // suggestions (so the model reuses existing labels regardless of the current folder).
   const allTags = $derived.by(() => {
     const m = new Map();
     for (const r of items) for (const t of tagsOf(r)) m.set(t, (m.get(t) || 0) + 1);
     return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name, count]) => ({ name, count }));
   });
-  const selectedTagItems = $derived(allTags.filter((t) => activeTags.includes(t.name)));
-  const availableTagItems = $derived(allTags.filter((t) => !activeTags.includes(t.name)));
-  const hasCollapsibleTags = $derived(availableTagItems.length > 14);
 
   // Filter pipeline: folder → tags (OR) → text search. Array order is preserved throughout.
   const inFolder = $derived(items.filter((r) => {
@@ -80,6 +79,18 @@
     if (q.trim() && !textOf(r).toLowerCase().includes(q.trim().toLowerCase())) return false;
     return true;
   }));
+
+  // The tag-filter cloud reflects only the tags present in the CURRENT folder, with folder-scoped
+  // counts (in "All" it spans everything). Built from inFolder — the folder filter only, not the
+  // active tag/search — so selecting one tag never hides the others you might also want to toggle.
+  const folderTags = $derived.by(() => {
+    const m = new Map();
+    for (const r of inFolder) for (const t of tagsOf(r)) m.set(t, (m.get(t) || 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name, count]) => ({ name, count }));
+  });
+  const selectedTagItems = $derived(folderTags.filter((t) => activeTags.includes(t.name)));
+  const availableTagItems = $derived(folderTags.filter((t) => !activeTags.includes(t.name)));
+  const hasCollapsibleTags = $derived(availableTagItems.length > 14);
 
   // Reordering is only unambiguous when the view isn't sparsely filtered — i.e. no tag filter and no
   // search. A single folder (or All) is fine: the visible rows map cleanly back onto their slots.
@@ -142,6 +153,35 @@
   // Ctrl/⌘+Enter saves without reaching for the button.
   function onKey(e) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); add(); }
+  }
+
+  // --- Import library prompts into Saved (server-side merge: backed up, deduped, additive) ----
+  let importPreview = $state(null); // { missing, library_unique, saved } | null
+  let importing = $state(false);
+  let confirmImport = $state(false);
+  async function refreshImportPreview() {
+    try { importPreview = await importLibraryPrompts({ preview: true }); }
+    catch { importPreview = null; }
+  }
+  onMount(refreshImportPreview);
+  async function doImport() {
+    if (importing) return;
+    importing = true;
+    try {
+      const d = await importLibraryIntoSaved({ folder: 'Library' });
+      confirmImport = false;
+      if (d.added) {
+        toast(`Added ${d.added} prompt${d.added === 1 ? '' : 's'} from your library${d.backup ? ' · previous list backed up' : ''}`, { type: 'success' });
+        selectFolder('Library');
+      } else {
+        toast('Your library prompts are already all saved', { type: 'info' });
+      }
+      await refreshImportPreview();
+    } catch (e) {
+      toast(e.message || 'Import failed', { type: 'error' });
+    } finally {
+      importing = false;
+    }
   }
 
   function toggleTagFilter(t) {
@@ -589,35 +629,45 @@
         {/if}
       </div>
 
-      <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center lg:flex-1">
         <input type="search" placeholder="Search saved responses…" bind:value={q}
-          class="w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)] sm:w-80" />
+          class="w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)] sm:min-w-0 sm:flex-1" />
 
-        {#if llmReady}
-          <div class="flex flex-wrap items-center gap-2">
+        <!-- All action buttons sit in one no-wrap, no-shrink cluster so they always stay on a
+             single line; the search above flexes to give up width instead of letting these wrap. -->
+        <div class="flex shrink-0 flex-nowrap items-center gap-2">
+          {#if importPreview && importPreview.missing > 0}
+            <button type="button" onclick={() => (confirmImport = true)} disabled={importing}
+              title="Add prompts from your media library that aren't saved yet (your list is backed up first)"
+              class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)] disabled:opacity-50">
+              <span aria-hidden="true">⇪</span> Import {importPreview.missing} from library
+            </button>
+          {/if}
+
+          {#if llmReady}
             {#if bulkRunning}
-              <span class="text-xs font-semibold text-[var(--accent)]">Auto-tagging… {bulkProgress.done}/{bulkProgress.total}</span>
+              <span class="whitespace-nowrap text-xs font-semibold text-[var(--accent)]">Auto-tagging… {bulkProgress.done}/{bulkProgress.total}</span>
               <button type="button" onclick={() => (bulkRunning = false)}
-                class="rounded-md border border-line px-2.5 py-1 text-xs font-semibold transition hover:border-[var(--danger)]">Stop</button>
+                class="shrink-0 whitespace-nowrap rounded-md border border-line px-2.5 py-1 text-xs font-semibold transition hover:border-[var(--danger)]">Stop</button>
             {:else}
               <button type="button" onclick={autotagBulk} title="Suggest tags & a folder for every untagged prompt in this view"
-                class="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)]"><span aria-hidden="true">✦</span> Auto-tag</button>
+                class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)]"><span aria-hidden="true">✦</span> Auto-tag</button>
             {/if}
             {#if auditRunning}
-              <span class="text-xs font-semibold text-[var(--accent)]">Auditing… {auditProgress.done}/{auditProgress.total}</span>
+              <span class="whitespace-nowrap text-xs font-semibold text-[var(--accent)]">Auditing… {auditProgress.done}/{auditProgress.total}</span>
               <button type="button" onclick={() => (auditRunning = false)}
-                class="rounded-md border border-line px-2.5 py-1 text-xs font-semibold transition hover:border-[var(--danger)]">Stop</button>
+                class="shrink-0 whitespace-nowrap rounded-md border border-line px-2.5 py-1 text-xs font-semibold transition hover:border-[var(--danger)]">Stop</button>
             {:else}
               <button type="button" onclick={auditBulk} title="Review visible prompts for overbroad folders/tags and suggest corrections"
-                class="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)]"><span aria-hidden="true">◎</span> Audit labels</button>
+                class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)]"><span aria-hidden="true">◎</span> Audit labels</button>
             {/if}
             {#if suggestCount}
-              <span class="text-xs text-muted">{suggestCount} suggested</span>
-              <button type="button" onclick={acceptAll} class="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--on-accent)] transition">Accept all</button>
-              <button type="button" onclick={dismissAll} class="text-xs text-muted transition hover:text-ink">Dismiss all</button>
+              <span class="whitespace-nowrap text-xs text-muted">{suggestCount} suggested</span>
+              <button type="button" onclick={acceptAll} class="shrink-0 whitespace-nowrap rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--on-accent)] transition">Accept all</button>
+              <button type="button" onclick={dismissAll} class="shrink-0 whitespace-nowrap text-xs text-muted transition hover:text-ink">Dismiss all</button>
             {/if}
-          </div>
-        {/if}
+          {/if}
+        </div>
       </div>
     </div>
 
@@ -642,8 +692,8 @@
       </div>
     </div>
 
-    <!-- Tag filter (match ANY) -->
-    {#if allTags.length}
+    <!-- Tag filter (match ANY) — scoped to the active folder's tags -->
+    {#if folderTags.length}
       <div class="mb-3 rounded-lg border border-line bg-[var(--surface)]/25 px-2.5 py-2">
         <div class="mb-1.5 flex items-center justify-between gap-2">
           <span class="text-[0.625rem] font-bold uppercase tracking-wider text-muted">Filter by tag</span>
@@ -701,6 +751,14 @@
             Clear search or tag filters to get back to the full folder.
           {/if}
         </p>
+        {#if items.length === 0 && importPreview && importPreview.missing > 0}
+          <div class="mt-4 flex justify-center">
+            <button type="button" onclick={() => (confirmImport = true)} disabled={importing}
+              class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-bold text-[var(--on-accent)] transition hover:brightness-110 disabled:opacity-50">
+              {importing ? 'Importing…' : `Import ${importPreview.missing} prompts from your library`}
+            </button>
+          </div>
+        {/if}
         {#if q.trim() || activeTags.length}
           <div class="mt-4 flex justify-center gap-2">
             <button type="button" onclick={() => (q = '')}
@@ -914,6 +972,13 @@
       </footer>
     </div>
   </div>
+{/if}
+
+{#if confirmImport}
+  <ConfirmDialog danger={false} title="Import library prompts?"
+    message={`Add ${importPreview?.missing ?? ''} prompt${(importPreview?.missing ?? 0) === 1 ? '' : 's'} from your media library that aren't saved yet, into a “Library” folder. Your current saved list is backed up first.`}
+    confirmLabel={importing ? 'Importing…' : 'Import'}
+    onconfirm={doImport} oncancel={() => { if (!importing) confirmImport = false; }} />
 {/if}
 
 <style>

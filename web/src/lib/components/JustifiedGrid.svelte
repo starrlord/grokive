@@ -1,6 +1,6 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -203,6 +203,11 @@
             {:else if it.media_type === 'video'}
               <span class="meta-badge meta-badge-video">video</span>
             {/if}
+            {#if it.api_generated}
+              <span class="meta-badge meta-badge-api" title="Generated with Grok Imagine" aria-label="Generated with Grok Imagine">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>
+              </span>
+            {/if}
             {#if it.has_subtitles}<span class="meta-badge">CC</span>{/if}
           </span>
 
@@ -227,6 +232,13 @@
           {#if !selectMode}
             {@const isStashed = $stashed.has(it.id)}
             <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1.5">
+              {#if it.media_type !== 'video'}
+                <button type="button" aria-label="Use as Imagine source" title="Use as source for Grok Imagine"
+                  class="card-action-btn"
+                  onclick={(e) => { e.stopPropagation(); sendToImagine(it); }}>
+                  <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                </button>
+              {/if}
               <button type="button" aria-label="Favorite" title="Favorite"
                 class="card-action-btn {fav ? 'text-[var(--favorite)]' : ''}"
                 onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
@@ -316,6 +328,19 @@
   }
 
   .meta-badge-music svg {
+    height: 0.85rem;
+    width: 0.85rem;
+  }
+
+  /* Grok Imagine marker: teal accent-2 pill with a sparkle, distinct from the
+     violet music-montage badge so API-generated media reads at a glance. */
+  .meta-badge-api {
+    background: var(--accent-2, #4bb3a8);
+    color: var(--on-accent, #fff);
+    padding-inline: 0.4rem;
+  }
+
+  .meta-badge-api svg {
     height: 0.85rem;
     width: 0.85rem;
   }

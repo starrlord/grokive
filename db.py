@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS media (
   media_w           INTEGER,
   media_h           INTEGER,
   has_subtitles     INTEGER DEFAULT 0,
-  size_bytes        INTEGER
+  size_bytes        INTEGER,
+  api_generated     INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at);
 CREATE INDEX IF NOT EXISTS idx_media_type    ON media(media_type);
@@ -73,7 +74,7 @@ MEDIA_COLUMNS = [
     "id", "media_type", "prompt", "normalized_prompt", "model", "created_at",
     "parent_id", "source_url", "local_path", "href", "thumb", "subtitles",
     "canvas_id", "canvas_name", "thumb_w", "thumb_h", "media_w", "media_h",
-    "has_subtitles", "size_bytes",
+    "has_subtitles", "size_bytes", "api_generated",
 ]
 
 
@@ -170,6 +171,12 @@ def build_index(
                 conn.execute(f"ALTER TABLE media ADD COLUMN {col} INTEGER")
             except sqlite3.OperationalError:
                 pass  # already present
+        # Provenance flag for API-generated media (Grok Imagine). DEFAULT 0 so existing
+        # rows read as "not generated".
+        try:
+            conn.execute("ALTER TABLE media ADD COLUMN api_generated INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # already present
         # Carry probed dimensions forward from the previous build so we only ffprobe
         # each video once (not on every startup/sync rebuild).
         try:
@@ -223,6 +230,7 @@ def build_index(
                 item.get("source_url"), rel, href, thumb_href, subtitles,
                 item.get("canvas_id"), item.get("canvas_name"), tw, th, mw, mh,
                 1 if subtitles else 0, size_bytes,
+                1 if item.get("api_generated") else 0,
             ))
             for tag in tags:
                 tag_rows.append((mid, tag))
@@ -387,6 +395,7 @@ def query_media(
                 )
             ]
             d["has_subtitles"] = bool(d["has_subtitles"])
+            d["api_generated"] = bool(d.get("api_generated"))
             items.append(d)
         return {"total": total, "page": page, "page_size": page_size, "items": items}
     finally:
@@ -409,6 +418,7 @@ def media_by_ids(db_path: str | Path, ids: list[str]) -> list[dict[str, Any]]:
             for row in conn.execute(f"SELECT * FROM media WHERE id IN ({qmarks})", chunk):
                 d = dict(row)
                 d["has_subtitles"] = bool(d["has_subtitles"])
+                d["api_generated"] = bool(d.get("api_generated"))
                 d["tags"] = [
                     r[0] for r in conn.execute("SELECT tag FROM media_tags WHERE media_id = ?", (d["id"],))
                 ]
@@ -423,6 +433,7 @@ def _media_dict(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, 
         return None
     d = dict(row)
     d["has_subtitles"] = bool(d["has_subtitles"])
+    d["api_generated"] = bool(d.get("api_generated"))
     d["tags"] = [
         r[0] for r in conn.execute("SELECT tag FROM media_tags WHERE media_id = ? ORDER BY tag", (d["id"],))
     ]

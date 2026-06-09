@@ -15,6 +15,7 @@ state is kept in-process and guarded by a lock.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -47,10 +48,16 @@ from flask import (
 import db
 import moviegen
 import promptstudio
+import xai_imagine
 from mediautil import media_shard
 # Aliased: the `/thumbnails/...` route function below is also named `thumbnails`
 # and would otherwise shadow this module at module scope.
 import thumbnails as thumbgen
+
+# Bound image decoding (thumbnails, upload transcode) so a decompression-bomb image
+# can't pin CPU/RAM — well above any real photo, well under Pillow's ~178 MP default.
+from PIL import Image as _PILImage
+_PILImage.MAX_IMAGE_PIXELS = 64_000_000
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("GROK_DATA_DIR", ROOT / "data")).resolve()
@@ -112,6 +119,7 @@ EMBED_ENV = os.environ.get("EMBED_SERVER_URL", "").strip()
 EMBED_MODEL_ENV = os.environ.get("EMBED_MODEL", "").strip()
 LLM_ENV = os.environ.get("LLM_SERVER_URL", "").strip()
 LLM_MODEL_ENV = os.environ.get("LLM_MODEL", "").strip()
+LLM_VISION_MODEL_ENV = os.environ.get("LLM_VISION_MODEL", "").strip()
 EMBED_API_KEY_ENV = os.environ.get("EMBED_API_KEY", "").strip()
 LLM_API_KEY_ENV = os.environ.get("LLM_API_KEY", "").strip()
 OPENAI_API_KEY_ENV = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -122,6 +130,15 @@ EMBED_MODEL_DEFAULT = "nomic-embed-text"
 LLM_MODEL_DEFAULT = "dolphin3"
 OPENAI_LLM_MODEL_DEFAULT = "gpt-5.4-mini"
 OPENROUTER_LLM_MODEL_DEFAULT = "openai/gpt-5.4-mini"
+# Grok Imagine API (xAI) — image & video generation. The API key is the only secret;
+# the base URL is fixed (unlike the user-pointable Prompt Studio endpoints). Env vars
+# win over the saved setting, exactly like the LLM_* keys.
+XAI_BASE = "https://api.x.ai/v1"
+XAI_API_KEY_ENV = os.environ.get("XAI_API_KEY", "").strip()
+XAI_IMAGE_MODEL_ENV = os.environ.get("XAI_IMAGE_MODEL", "").strip()
+XAI_VIDEO_MODEL_ENV = os.environ.get("XAI_VIDEO_MODEL", "").strip()
+XAI_IMAGE_MODEL_DEFAULT = "grok-imagine-image-quality"
+XAI_VIDEO_MODEL_DEFAULT = "grok-imagine-video"
 
 
 def _auth_mode() -> str:
@@ -173,6 +190,9 @@ if not _session_secret:
 app.secret_key = _session_secret
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Hard cap on any request body so oversized uploads (Imagine image upload, montage song)
+# are rejected (413) during parsing — before a handler can read them into memory.
+app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
 # SESSION_COOKIE_SECURE: true | false | auto (default). 'auto' = secure when behind an
 # HTTPS-terminating proxy (TRUST_PROXY on). Never forced on plain HTTP, or the login
 # cookie would be dropped and you could never stay signed in.
@@ -300,10 +320,7 @@ def _load_settings() -> dict:
 
 
 def _save_settings(data: dict) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(SETTINGS_FILE)
+    _atomic_write_json(SETTINGS_FILE, data)
 
 
 def _whisper_url() -> str:
@@ -331,6 +348,17 @@ def _llm_url() -> str:
 
 def _llm_model() -> str:
     return LLM_MODEL_ENV or str(_load_settings().get("llm_model", "")).strip() or LLM_MODEL_DEFAULT
+
+
+def _llm_vision_model() -> str:
+    """Effective multimodal (image-input) chat model for the lightbox "Describe for Grok"
+    feature. Falls back to the text model so a single vision-capable model still works
+    without setting this separately. Env wins, then settings, then the chat model."""
+    return (
+        LLM_VISION_MODEL_ENV
+        or str(_load_settings().get("llm_vision_model", "")).strip()
+        or _llm_model()
+    )
 
 
 def _provider_from_url(url: str) -> str:
@@ -381,6 +409,47 @@ def _llm_api_key_env_locked() -> bool:
 
 def _embed_api_key_env_locked() -> bool:
     return bool(EMBED_API_KEY_ENV or _provider_key(_embed_url()))
+
+
+def _xai_api_key() -> str:
+    """Effective xAI Imagine API key: env var wins, else the saved setting."""
+    return XAI_API_KEY_ENV or str(_load_settings().get("xai_api_key", "")).strip()
+
+
+def _xai_api_key_env_locked() -> bool:
+    return bool(XAI_API_KEY_ENV)
+
+
+def _xai_image_model() -> str:
+    return XAI_IMAGE_MODEL_ENV or str(_load_settings().get("xai_image_model", "")).strip() or XAI_IMAGE_MODEL_DEFAULT
+
+
+def _xai_video_model() -> str:
+    return XAI_VIDEO_MODEL_ENV or str(_load_settings().get("xai_video_model", "")).strip() or XAI_VIDEO_MODEL_DEFAULT
+
+
+def _xai_image_resolution() -> str:
+    return str(_load_settings().get("xai_image_resolution", "")).strip() or "1k"
+
+
+def _xai_image_aspect() -> str:
+    return str(_load_settings().get("xai_image_aspect_ratio", "")).strip() or "1:1"
+
+
+def _xai_video_resolution() -> str:
+    return str(_load_settings().get("xai_video_resolution", "")).strip() or "480p"
+
+
+def _xai_video_aspect() -> str:
+    return str(_load_settings().get("xai_video_aspect_ratio", "")).strip() or "16:9"
+
+
+def _xai_video_duration() -> int:
+    try:
+        d = int(_load_settings().get("xai_video_duration") or 6)
+    except (TypeError, ValueError):
+        d = 6
+    return max(1, min(15, d))
 
 
 def _provider_headers(url: str) -> dict:
@@ -443,6 +512,40 @@ def _fetch_provider_models(provider: str, base_url: str, api_key: str, kind: str
         name = str(row.get("name") or row.get("owned_by") or "").strip()
         models.append({"id": model_id, "name": name})
     return sorted(models, key=lambda m: m["id"].lower())
+
+
+def _ollama_native_root(base_url: str) -> str:
+    """Ollama's native API lives at the host root; its OpenAI-compatible base ends in /v1."""
+    base = str(base_url or "").strip().rstrip("/")
+    if base.lower().endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base
+
+
+def _fetch_ollama_vision_models(base_url: str, *, timeout: float = 20.0) -> list[dict]:
+    """Installed Ollama models that can accept images, via the native ``/api/tags`` (which
+    reports per-model ``capabilities`` — the OpenAI ``/v1/models`` list doesn't). Raises if
+    the endpoint isn't an Ollama server, so the caller can fall back to a generic list. If
+    this Ollama build doesn't report capabilities at all, returns every model (can't filter)
+    rather than an empty list."""
+    url = _ollama_native_root(base_url) + "/api/tags"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    rows = [r for r in (data.get("models") or []) if isinstance(r, dict)]
+    any_caps = False
+    vision: list[dict] = []
+    for row in rows:
+        caps = [str(c).lower() for c in (row.get("capabilities") or [])]
+        if caps:
+            any_caps = True
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name and "vision" in caps:
+            vision.append({"id": name, "name": "vision"})
+    if not any_caps:  # capability data unavailable — offer everything rather than nothing
+        vision = [{"id": str(r.get("name") or r.get("model") or "").strip(), "name": ""}
+                  for r in rows if (r.get("name") or r.get("model"))]
+    return sorted(vision, key=lambda m: m["id"].lower())
 
 
 def _llm_extra_headers() -> dict:
@@ -764,12 +867,25 @@ def api_settings_get() -> Response:
         embed_api_key_env_locked=_embed_api_key_env_locked(),
         llm_server_url=_llm_url(),
         llm_model=_llm_model(),
+        llm_vision_model=(LLM_VISION_MODEL_ENV or str(settings.get("llm_vision_model", "")).strip()),
+        llm_vision_model_env_locked=bool(LLM_VISION_MODEL_ENV),
         llm_configured=bool(_llm_url()),
         llm_env_locked=bool(LLM_ENV),
         llm_model_env_locked=bool(LLM_MODEL_ENV),
         llm_provider=str(settings.get("llm_provider") or _provider_from_url(_llm_url()) or "local"),
         llm_api_key_configured=bool(_llm_api_key()),
         llm_api_key_env_locked=_llm_api_key_env_locked(),
+        xai_api_key_configured=bool(_xai_api_key()),
+        xai_api_key_env_locked=_xai_api_key_env_locked(),
+        xai_image_model=_xai_image_model(),
+        xai_image_model_env_locked=bool(XAI_IMAGE_MODEL_ENV),
+        xai_video_model=_xai_video_model(),
+        xai_video_model_env_locked=bool(XAI_VIDEO_MODEL_ENV),
+        xai_image_resolution=_xai_image_resolution(),
+        xai_image_aspect_ratio=_xai_image_aspect(),
+        xai_video_resolution=_xai_video_resolution(),
+        xai_video_aspect_ratio=_xai_video_aspect(),
+        xai_video_duration=_xai_video_duration(),
     )
 
 
@@ -803,6 +919,8 @@ def api_settings_post() -> Response:
         settings["llm_server_url"] = str(payload.get("llm_server_url") or "").strip()[:500]
     if not LLM_MODEL_ENV and "llm_model" in payload:
         settings["llm_model"] = str(payload.get("llm_model") or "").strip()[:120]
+    if not LLM_VISION_MODEL_ENV and "llm_vision_model" in payload:
+        settings["llm_vision_model"] = str(payload.get("llm_vision_model") or "").strip()[:120]
     if "llm_provider" in payload:
         settings["llm_provider"] = str(payload.get("llm_provider") or "").strip()[:40]
     if not _llm_api_key_env_locked():
@@ -810,6 +928,30 @@ def api_settings_post() -> Response:
             settings["llm_api_key"] = str(payload.get("llm_api_key") or "").strip()[:500]
         elif payload.get("llm_api_key_clear"):
             settings.pop("llm_api_key", None)
+    # Grok Imagine API (xAI) — key is write-only from the browser (same as llm_api_key);
+    # the generation defaults are plain knobs.
+    if not _xai_api_key_env_locked():
+        if str(payload.get("xai_api_key") or "").strip():
+            settings["xai_api_key"] = str(payload.get("xai_api_key") or "").strip()[:500]
+        elif payload.get("xai_api_key_clear"):
+            settings.pop("xai_api_key", None)
+    if not XAI_IMAGE_MODEL_ENV and "xai_image_model" in payload:
+        settings["xai_image_model"] = str(payload.get("xai_image_model") or "").strip()[:120]
+    if not XAI_VIDEO_MODEL_ENV and "xai_video_model" in payload:
+        settings["xai_video_model"] = str(payload.get("xai_video_model") or "").strip()[:120]
+    if "xai_image_resolution" in payload:
+        settings["xai_image_resolution"] = str(payload.get("xai_image_resolution") or "").strip()[:16]
+    if "xai_image_aspect_ratio" in payload:
+        settings["xai_image_aspect_ratio"] = str(payload.get("xai_image_aspect_ratio") or "").strip()[:16]
+    if "xai_video_resolution" in payload:
+        settings["xai_video_resolution"] = str(payload.get("xai_video_resolution") or "").strip()[:16]
+    if "xai_video_aspect_ratio" in payload:
+        settings["xai_video_aspect_ratio"] = str(payload.get("xai_video_aspect_ratio") or "").strip()[:16]
+    if "xai_video_duration" in payload:
+        try:
+            settings["xai_video_duration"] = max(1, min(15, int(payload.get("xai_video_duration"))))
+        except (TypeError, ValueError):
+            pass
     _save_settings(settings)
     return jsonify(
         ok=True,
@@ -819,14 +961,17 @@ def api_settings_post() -> Response:
         embed_api_key_configured=bool(_embed_api_key()),
         llm_configured=bool(_llm_url()),
         llm_api_key_configured=bool(_llm_api_key()),
+        xai_api_key_configured=bool(_xai_api_key()),
     )
 
 
 @app.post("/api/settings/models")
 def api_settings_models() -> Response:
     payload = request.get_json(silent=True) or {}
-    kind = "embed" if str(payload.get("kind") or "").strip() == "embed" else "llm"
+    raw_kind = str(payload.get("kind") or "").strip().lower()
+    kind = raw_kind if raw_kind in {"embed", "vision"} else "llm"
     provider = str(payload.get("provider") or "").strip().lower()
+    # Vision shares the chat (LLM) endpoint/provider/key — it's just a different model.
     if kind == "embed":
         base_url = str(payload.get("url") or "").strip() or _embed_url()
         api_key = str(payload.get("api_key") or "").strip() or _embed_api_key()
@@ -834,11 +979,30 @@ def api_settings_models() -> Response:
         base_url = str(payload.get("url") or "").strip() or _llm_url()
         api_key = str(payload.get("api_key") or "").strip() or _llm_api_key()
     effective_provider = provider or _provider_from_url(base_url)
-    if effective_provider == "local" or not base_url:
+    # A URL is all that's required: a local Ollama lists its installed models via
+    # /v1/models (and /api/tags for capabilities) just like a remote provider does — so
+    # don't reject the "local" provider here (that was the "set a provider URL" bug).
+    if not base_url:
         return jsonify(ok=False, error="Set a provider URL before loading models."), 400
     if effective_provider in {"openai", "openrouter"} and not api_key:
         return jsonify(ok=False, error=f"Add a {_provider_display(effective_provider)} API key before loading models."), 400
     try:
+        if kind == "vision":
+            # Prefer a true vision-only list from a local Ollama (its native /api/tags
+            # reports per-model capabilities; the OpenAI /v1/models list doesn't). If the
+            # endpoint isn't Ollama, fall back to the full chat-model list to pick from.
+            models = None
+            if effective_provider in {"local", "custom"}:
+                try:
+                    models = _fetch_ollama_vision_models(base_url)
+                except Exception:
+                    models = None
+            if models is None:
+                models = _fetch_provider_models(effective_provider, base_url, api_key, "llm")
+                note = "Showing all chat models — pick a vision-capable one."
+            else:
+                note = "" if models else "No vision-capable models installed — pull one (e.g. a Qwen3-VL build)."
+            return jsonify(ok=True, provider=effective_provider, kind=kind, models=models, note=note)
         models = _fetch_provider_models(effective_provider, base_url, api_key, kind)
     except urllib.error.HTTPError as exc:
         return jsonify(ok=False, error=f"Model list failed ({exc.code})."), 502
@@ -919,10 +1083,7 @@ def api_playlists_post() -> Response:
                 "created_at": str(entry.get("created_at", ""))[:32],
             }
         )
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = PLAYLISTS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(PLAYLISTS_FILE)
+    _atomic_write_json(PLAYLISTS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
 
@@ -1030,10 +1191,7 @@ def api_collections_post() -> Response:
         coll = _clean_collection(entry)
         if coll:
             clean.append(coll)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = COLLECTIONS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(COLLECTIONS_FILE)
+    _atomic_write_json(COLLECTIONS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
 
@@ -1084,6 +1242,47 @@ def _video_paths_for_ids(ids: list, *, exclude_montages: bool = False) -> list[P
 
 def _playlist_video_paths(playlist: dict) -> list[Path]:
     return _video_paths_for_ids(playlist.get("ids", []))
+
+
+def _image_path_for_id(media_id: str):
+    """Resolve ``(path, record)`` for an IMAGE media id, guarding against path traversal
+    out of the gallery root. ``path`` is None when the record is missing, is a video, has
+    no file on disk, or would escape the gallery; ``record`` is the metadata dict (or None
+    when the id is unknown) so the caller can distinguish those cases."""
+    item = _metadata_index().get(str(media_id))
+    if not item or item.get("media_type") == "video":
+        return None, item
+    rel = str(item.get("local_path", "")).replace("\\", "/")
+    if not rel:
+        return None, item
+    gallery_root = GALLERY_DIR.resolve()
+    candidate = (GALLERY_DIR / rel).resolve()
+    if candidate != gallery_root and gallery_root not in candidate.parents:
+        return None, item
+    return (candidate if candidate.exists() else None), item
+
+
+def _image_b64_for_vision(path: Path, *, max_edge: int = 1024) -> tuple[str, str]:
+    """Base64-encode an image for a vision model, downscaled to ``max_edge`` px on the long
+    edge via ffmpeg (already a hard dependency) to cap tokens/latency without upscaling
+    small images. Returns ``(b64, mime)``; falls back to the raw bytes (mime guessed from
+    the suffix) if ffmpeg is unavailable or fails."""
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(path),
+             "-vf", f"scale='min({max_edge},iw)':'min({max_edge},ih)':force_original_aspect_ratio=decrease",
+             "-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "3", "pipe:1"],
+            capture_output=True, timeout=60,
+        )
+        if out.returncode == 0 and out.stdout:
+            return base64.b64encode(out.stdout).decode("ascii"), "image/jpeg"
+    except Exception:
+        pass
+    raw = path.read_bytes()
+    ext = path.suffix.lower().lstrip(".")
+    mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+    return base64.b64encode(raw).decode("ascii"), mime
 
 
 def _probe_signature(path: Path):
@@ -1798,6 +1997,781 @@ def rebuild_db() -> None:
         print(f"index.db rebuild failed: {exc}")
 
 
+# --------------------------------------------------------------------------- #
+# Grok Imagine API (xAI) — image & video generation into the gallery.
+#
+# Generated media is ingested exactly like downloaded media (file + thumbnail +
+# metadata record + index rebuild), with an `api_generated` provenance flag and,
+# for source-image generations, a `parent_id` link back to the gallery image so
+# the existing related-media UI surfaces it.
+# --------------------------------------------------------------------------- #
+
+_CT_EXT = {
+    "image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+    "image/webp": "webp", "image/gif": "gif",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+}
+_MEDIA_EXTS = {"jpg", "jpeg", "png", "webp", "gif", "mp4", "webm", "mov", "m4v"}
+
+
+def _ext_for_content_type(content_type: str, url: str = "", *, default: str = "jpg") -> str:
+    """Best file extension for a downloaded media payload: prefer the Content-Type,
+    fall back to the URL suffix, else ``default``."""
+    ct = str(content_type or "").split(";")[0].strip().lower()
+    if ct in _CT_EXT:
+        return _CT_EXT[ct]
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower().lstrip(".")
+    if suffix in _MEDIA_EXTS:
+        return "jpg" if suffix == "jpeg" else suffix
+    return default
+
+
+def _image_data_uri_for_generation(path: Path) -> str:
+    """A base64 data-URI for a gallery image used as a generation source. The
+    self-hosted media server isn't reachable by xAI, so the image must be inlined
+    (not passed as a URL). Encoded at a generous size to preserve source quality."""
+    b64, mime = _image_b64_for_vision(path, max_edge=2048)
+    return f"data:{mime};base64,{b64}"
+
+
+def _sniff_image_ext(raw: bytes, *, default: str = "jpg") -> str:
+    """File extension from an image's magic bytes (base64 results carry no mime)."""
+    if raw[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    return default
+
+
+def _xai_image_payload_bytes(item: dict) -> tuple[bytes, str]:
+    """Resolve an xAI image result item to ``(raw_bytes, ext)``, decoding inline
+    base64 (preferred) or, as a fallback, downloading the temporary URL."""
+    b64 = item.get("b64_json")
+    if b64:
+        raw = base64.b64decode(b64)
+        return raw, _sniff_image_ext(raw)
+    url = item.get("url")
+    if not url:
+        raise xai_imagine.XaiError("Image result had no data (it may have been filtered by moderation).")
+    raw, ctype = xai_imagine.fetch_bytes(url)
+    return raw, _ext_for_content_type(ctype, url, default="jpg")
+
+
+def _ingest_generated_media(*, raw_bytes: bytes, ext: str, media_type: str, prompt: str,
+                            model: str, provenance: dict, parent_id: str | None = None,
+                            width=None, height=None, duration=None,
+                            api_generated: bool = True, reindex: bool = True) -> dict:
+    """Persist a generated image/video into the gallery: write the file under a
+    unique ``imagine_*`` id, make a thumbnail, append a metadata record with
+    provenance, and (optionally) rebuild the index. Returns the metadata record.
+
+    ``reindex=False`` lets a batch (n>1) defer to a single rebuild by the caller."""
+    mid = "imagine_" + secrets.token_hex(8)  # unique; never collides with Grok UUIDs
+    sub = "videos" if media_type == "video" else "images"
+    rel = f"media/{sub}/{media_shard(mid)}/{mid}.{ext}"
+    dest = GALLERY_DIR / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw_bytes)
+    try:
+        thumb_dest = thumbgen.thumb_path({"id": mid}, THUMBS_DIR)
+        thumb_dest.parent.mkdir(parents=True, exist_ok=True)
+        if media_type == "video":
+            thumbgen.make_video_thumb(dest, thumb_dest)
+        else:
+            thumbgen.make_image_thumb(dest, thumb_dest)
+    except Exception as exc:  # pragma: no cover - thumbnail is best-effort
+        print(f"imagine thumbnail failed: {exc}")
+
+    record = {
+        "id": mid,
+        "media_type": media_type,
+        "local_path": rel,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "prompt": prompt or "",
+        "model": model,
+        "parent_id": parent_id,
+        "width": width,
+        "height": height,
+        # Provenance — `api_generated` is also indexed (badge); the rest rides along
+        # in metadata.json for reference (ignored by the index). An uploaded original
+        # isn't AI-generated, so it carries no badge/provider.
+        "api_generated": bool(api_generated),
+        "api_provider": "xai" if api_generated else "",
+        "api_params": provenance or {},
+    }
+    if duration is not None:
+        record["duration"] = duration
+    # Strict load: if metadata.json exists but is unreadable, abort rather than
+    # rewrite it with only this record (which would erase the whole library).
+    loaded = _load_json_strict(METADATA_FILE, [])
+    items: list = loaded if isinstance(loaded, list) else []
+    items.append(record)
+    _atomic_write_json(METADATA_FILE, items)
+    if reindex:
+        rebuild_db()
+    return record
+
+
+def _resolve_generation_source(source_id: str):
+    """Resolve a gallery image id to ``(data_uri, error_response)`` for use as a
+    generation source. Exactly one of the two is non-None."""
+    path, rec = _image_path_for_id(source_id)
+    if rec is None:
+        return None, (jsonify(ok=False, error="Source image not found."), 404)
+    if path is None:
+        return None, (jsonify(ok=False, error="Source must be an image with a file on disk."), 400)
+    return _image_data_uri_for_generation(path), None
+
+
+# --- Generation staging workspace ------------------------------------------- #
+# Generations land in a per-source "session" (rooted on the gallery image you sent
+# as a source, or one "scratch" session for text-only) — staged files + a sessions
+# index live under GROK_DATA_DIR/imagine_staging and are NOT in the gallery. Saving a
+# generation runs the normal ingest; clearing a session deletes its staged files
+# (saved gallery items are independent and untouched).
+
+STAGING_DIR = DATA_DIR / "imagine_staging"
+STAGING_THUMBS_DIR = STAGING_DIR / "thumbs"
+SESSIONS_FILE = DATA_DIR / "imagine_sessions.json"
+_sessions_lock = threading.Lock()
+
+
+def _load_sessions() -> dict:
+    """All Imagine sessions keyed by session_id. Strict load: an unreadable file
+    raises CorruptStateError rather than letting us blind-overwrite real history."""
+    loaded = _load_json_strict(SESSIONS_FILE, {})
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_sessions(data: dict) -> None:
+    _atomic_write_json(SESSIONS_FILE, data)
+
+
+def _staged_media_path(gen_id: str, ext: str) -> Path:
+    return STAGING_DIR / f"{gen_id}.{ext}"
+
+
+def _staged_thumb_path(gen_id: str) -> Path:
+    return STAGING_THUMBS_DIR / f"{gen_id}.jpg"
+
+
+def _session_id_for(source_gallery_id: str) -> str:
+    return f"src:{source_gallery_id}" if source_gallery_id else "scratch"
+
+
+def _source_info(gallery_id: str):
+    """The {id, thumb, prompt} of a gallery image used as a session root, or None."""
+    if not gallery_id:
+        return None
+    rows = db.media_by_ids(DB_FILE, [gallery_id])
+    r = rows[0] if rows else None
+    return {
+        "id": gallery_id,
+        "thumb": (r.get("thumb") or r.get("href") or "") if r else "",
+        "prompt": (r.get("prompt") or "") if r else "",
+        "media_w": (r.get("media_w") if r else None),
+        "media_h": (r.get("media_h") if r else None),
+    }
+
+
+def _ensure_session(sessions: dict, session_id: str) -> dict:
+    sess = sessions.get(session_id)
+    if sess is None:
+        gid = session_id[4:] if session_id.startswith("src:") else ""
+        sess = {"session_id": session_id, "source": _source_info(gid), "generations": []}
+        sessions[session_id] = sess
+    return sess
+
+
+def _find_gen(sessions: dict, gen_id: str):
+    for sess in sessions.values():
+        for g in sess.get("generations", []):
+            if g.get("gen_id") == gen_id:
+                return sess, g
+    return None, None
+
+
+def _gen_public(rec: dict) -> dict:
+    gid = rec.get("gen_id")
+    return {**rec, "staged_url": f"/api/imagine/staged/{gid}",
+            "thumb_url": f"/api/imagine/staged/{gid}/thumb"}
+
+
+def _session_public(sess: dict) -> dict:
+    return {
+        "session_id": sess.get("session_id"),
+        "source": sess.get("source"),
+        "generations": [_gen_public(g) for g in sess.get("generations", [])],
+    }
+
+
+def _resolve_imagine_source(sessions: dict, source: str):
+    """Resolve a per-generation source to ``(data_uri, parent_gen_id, error)``.
+    ``source`` is a staged ``gen_*`` id (branch off a child), a gallery image id, or
+    empty (text-only). ``error`` is a Flask response tuple when it can't be used."""
+    source = str(source or "").strip()
+    if not source:
+        return "", None, None
+    if source.startswith("gen_"):
+        _, gen = _find_gen(sessions, source)
+        if not gen:
+            return "", None, (jsonify(ok=False, error="Source generation not found."), 404)
+        if gen.get("media_type") != "image":
+            return "", None, (jsonify(ok=False, error="Only an image can be used as a source."), 400)
+        p = _staged_media_path(source, gen.get("ext") or "jpg")
+        if not p.exists():
+            return "", None, (jsonify(ok=False, error="Source generation file is missing."), 410)
+        return _image_data_uri_for_generation(p), source, None
+    data_uri, err = _resolve_generation_source(source)
+    if err:
+        return "", None, err
+    return data_uri, None, None
+
+
+def _write_staged_record(*, raw_bytes: bytes, ext: str, media_type: str, prompt: str,
+                         model: str, params: dict, session_id: str,
+                         source_gallery_id: str | None, parent_gen_id: str | None,
+                         width=None, height=None, duration=None) -> dict:
+    """Write a staged media file + thumbnail and build its record. No sessions I/O —
+    the caller appends it under the lock (keeps the lock off slow downloads)."""
+    gen_id = "gen_" + secrets.token_hex(8)
+    media_path = _staged_media_path(gen_id, ext)
+    media_path.parent.mkdir(parents=True, exist_ok=True)
+    media_path.write_bytes(raw_bytes)
+    # Capture image dimensions so the UI can size things (e.g. a match-source preview).
+    if media_type == "image" and not (width and height):
+        try:
+            import io as _io
+            from PIL import Image as _Image
+            with _Image.open(_io.BytesIO(raw_bytes)) as _im:
+                width, height = _im.size
+        except Exception:
+            pass
+    try:
+        thumb = _staged_thumb_path(gen_id)
+        thumb.parent.mkdir(parents=True, exist_ok=True)
+        if media_type == "video":
+            thumbgen.make_video_thumb(media_path, thumb)
+        else:
+            thumbgen.make_image_thumb(media_path, thumb)
+    except Exception as exc:  # pragma: no cover - thumbnail is best-effort
+        print(f"imagine staging thumbnail failed: {exc}")
+    return {
+        "gen_id": gen_id,
+        "session_id": session_id,
+        "media_type": media_type,
+        "ext": ext,
+        "prompt": prompt or "",
+        "model": model,
+        "params": params or {},
+        "source_gallery_id": source_gallery_id or None,
+        "parent_gen_id": parent_gen_id or None,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "width": width, "height": height, "duration": duration,
+        "saved": False, "saved_media_id": None,
+    }
+
+
+def _append_generations(session_id: str, records: list) -> None:
+    if not records:
+        return
+    with _sessions_lock:
+        sessions = _load_sessions()
+        sess = _ensure_session(sessions, session_id)
+        sess["generations"].extend(records)
+        _save_sessions(sessions)
+
+
+def _save_parent_for(sessions: dict, gen: dict):
+    """Gallery parent_id for a saved generation: the nearest already-saved ancestor,
+    else the session's root gallery source, else None."""
+    pid = gen.get("parent_gen_id")
+    if pid:
+        _, parent = _find_gen(sessions, pid)
+        if parent and parent.get("saved_media_id"):
+            return parent["saved_media_id"]
+    return gen.get("source_gallery_id") or None
+
+
+@app.post("/api/imagine/image")
+def api_imagine_image() -> Response:
+    """Generate image(s) via Grok Imagine into the active session's staging history
+    (NOT the gallery — Save promotes a generation). With a ``source`` (a gallery image
+    id, or a staged ``gen_*`` id to branch off) it's an edit/alteration."""
+    api_key = _xai_api_key()
+    if not api_key:
+        return jsonify(ok=False, error="No xAI API key configured. Add one in Config → Grok Imagine API."), 400
+    payload = request.get_json(silent=True) or {}
+    prompt = str(payload.get("prompt") or "").strip()
+    source = str(payload.get("source") or "").strip()
+    if not prompt and not source:
+        return jsonify(ok=False, error="A prompt is required."), 400
+    session_id = str(payload.get("session_id") or "").strip() or (
+        "scratch" if source.startswith("gen_") else _session_id_for(source))
+    try:
+        n = max(1, min(4, int(payload.get("n") or 1)))
+    except (TypeError, ValueError):
+        n = 1
+    aspect_ratio = str(payload.get("aspect_ratio") or "").strip() or _xai_image_aspect()
+    resolution = str(payload.get("resolution") or "").strip() or _xai_image_resolution()
+    model = _xai_image_model()
+    source_gallery_id = session_id[4:] if session_id.startswith("src:") else ""
+
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            data_uri, parent_gen_id, err = _resolve_imagine_source(sessions, source)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    if err:
+        return err
+
+    try:
+        # Ask for inline base64 so the image comes back in the API response itself —
+        # no second request to a CDN URL that can 403 / expire.
+        results = xai_imagine.generate_images(
+            api_key, model=model, prompt=prompt, n=n,
+            aspect_ratio=aspect_ratio, resolution=resolution,
+            image_data_uri=data_uri, response_format="b64_json",
+        )
+    except xai_imagine.XaiError as exc:
+        return jsonify(ok=False, error=exc.message or "Image generation failed.", code=exc.code), 502
+
+    params = {"mode": "edit" if data_uri else "text", "aspect_ratio": aspect_ratio,
+              "resolution": resolution, "n": n, "source": source or None}
+    records: list = []
+    skipped = 0
+    for item in results:
+        try:
+            raw, ext = _xai_image_payload_bytes(item)
+        except xai_imagine.XaiError:
+            # One image had no usable data (often moderation) — skip it and keep the
+            # rest of the batch rather than failing the whole request. This is why
+            # n>1 could silently yield nothing if any single image came back empty.
+            skipped += 1
+            continue
+        records.append(_write_staged_record(
+            raw_bytes=raw, ext=ext, media_type="image", prompt=prompt, model=model,
+            params=params, session_id=session_id, source_gallery_id=source_gallery_id,
+            parent_gen_id=parent_gen_id))
+    print(f"imagine image: requested n={n}, xAI returned {len(results)}, staged {len(records)}, skipped {skipped}")
+    if not records:
+        return jsonify(ok=False, code="empty", error=(
+            "No images came back — they may have been filtered by moderation. "
+            "Try a different prompt, or generate fewer at once.")), 502
+    _append_generations(session_id, records)
+    return jsonify(ok=True, session_id=session_id, skipped=skipped,
+                   generations=[_gen_public(r) for r in records])
+
+
+@app.post("/api/imagine/upload")
+def api_imagine_upload() -> Response:
+    """Stage an uploaded image into a workspace as if it were generated, so it can be
+    edited or animated like any other generation. Multipart: ``session_id`` + ``file``."""
+    session_id = str(request.form.get("session_id") or "").strip() or "scratch"
+    f = request.files.get("file")
+    if f is None:
+        return jsonify(ok=False, error="No file uploaded."), 400
+    raw = f.read()
+    if not raw:
+        return jsonify(ok=False, error="The uploaded file was empty."), 400
+    if len(raw) > 30 * 1024 * 1024:
+        return jsonify(ok=False, error="Image is too large (max 30 MB)."), 413
+    ext = _sniff_image_ext(raw, default="")
+    if ext not in ("jpg", "png", "webp", "gif"):
+        # Transcode anything else Pillow can read (bmp/tiff/heic/…) to JPEG.
+        try:
+            import io as _io
+            from PIL import Image as _Image
+            with _Image.open(_io.BytesIO(raw)) as _im:
+                buf = _io.BytesIO()
+                _im.convert("RGB").save(buf, "JPEG", quality=92)
+                raw, ext = buf.getvalue(), "jpg"
+        except Exception:
+            return jsonify(ok=False, error="That doesn't look like an image. Use a JPEG, PNG, or WebP."), 415
+    rec = _write_staged_record(
+        raw_bytes=raw, ext=ext, media_type="image", prompt="", model="",
+        params={"mode": "upload", "source": None},
+        # An uploaded original isn't derived from anything — no parent link (so saving it
+        # never mislinks it as a "generated" child of the workspace's source image).
+        session_id=session_id, source_gallery_id=None, parent_gen_id=None)
+    _append_generations(session_id, [rec])
+    return jsonify(ok=True, session_id=session_id, generation=_gen_public(rec))
+
+
+# Per-session video jobs: a registry keyed by session_id so several workspaces can
+# render at once. A semaphore caps concurrent renders; each session is single-flight.
+IMAGINE_VIDEO_CONCURRENCY = max(1, int(os.environ.get("IMAGINE_VIDEO_CONCURRENCY", "5") or 5))
+_imagine_lock = threading.Lock()
+_imagine_jobs: dict[str, dict] = {}
+_imagine_video_sem = threading.Semaphore(IMAGINE_VIDEO_CONCURRENCY)
+_IMAGINE_JOB_KEYS = ("session_id", "running", "job_id", "status", "detail",
+                     "progress", "error", "result", "acknowledged",
+                     "started_at", "finished_at")
+
+
+def _imagine_job_default(session_id: str) -> dict:
+    return {"session_id": session_id, "running": False, "job_id": "", "status": "idle",
+            "detail": "", "progress": 0.0, "error": "", "result": None,
+            "acknowledged": True, "started_at": "", "finished_at": ""}
+
+
+def _imagine_job_set(session_id: str, **kw) -> None:
+    with _imagine_lock:
+        job = _imagine_jobs.setdefault(session_id, _imagine_job_default(session_id))
+        job.update(kw)
+
+
+def _imagine_video_worker(*, session_id: str, api_key: str, model: str, prompt: str,
+                          image_data_uri: str, source_gallery_id: str, parent_gen_id: str | None,
+                          duration: int, aspect_ratio: str, resolution: str, source: str) -> None:
+    try:
+        # Wait for a concurrency slot (status stays "queued" while blocked here).
+        with _imagine_video_sem:
+            _imagine_job_set(session_id, status="submitting", detail="Submitting to xAI…", progress=0.05)
+            request_id = xai_imagine.start_video(
+                api_key, model=model, prompt=prompt, image_data_uri=image_data_uri,
+                duration=duration, aspect_ratio=aspect_ratio, resolution=resolution,
+            )
+            _imagine_job_set(session_id, status="pending",
+                             detail="Generating… this can take a few minutes.", progress=0.1)
+            start = time.monotonic()
+            deadline = start + 15 * 60  # xAI's default poll timeout
+            video_url = None
+            vid_duration = None
+            while True:
+                if time.monotonic() > deadline:
+                    raise xai_imagine.XaiError("Timed out waiting for the video (15 min).")
+                data = xai_imagine.poll_video(api_key, request_id)
+                status = str(data.get("status") or "").lower()
+                if status == "done":
+                    video = data.get("video") or {}
+                    video_url = video.get("url")
+                    vid_duration = video.get("duration")
+                    break
+                if status in ("failed", "expired"):
+                    err = data.get("error") or {}
+                    raise xai_imagine.XaiError(
+                        err.get("message") or f"Video generation {status}.",
+                        code=err.get("code") or status,
+                    )
+                elapsed = int(time.monotonic() - start)
+                _imagine_job_set(session_id, status="pending",
+                                 detail=f"Generating… {elapsed // 60}:{elapsed % 60:02d} elapsed",
+                                 progress=min(0.9, 0.1 + elapsed / 600.0))
+                time.sleep(5)
+            if not video_url:
+                raise xai_imagine.XaiError("xAI reported done but returned no video URL.")
+            _imagine_job_set(session_id, status="saving", detail="Downloading…", progress=0.95)
+            raw, ctype = xai_imagine.fetch_bytes(video_url)
+            ext = _ext_for_content_type(ctype, video_url, default="mp4")
+            rec = _write_staged_record(
+                raw_bytes=raw, ext=ext, media_type="video", prompt=prompt, model=model,
+                params={
+                    "mode": "image-to-video" if image_data_uri else "text-to-video",
+                    "duration": vid_duration or duration, "aspect_ratio": aspect_ratio,
+                    "resolution": resolution, "source": source or None, "request_id": request_id,
+                },
+                session_id=session_id, source_gallery_id=source_gallery_id,
+                parent_gen_id=parent_gen_id, duration=vid_duration or duration)
+            _append_generations(session_id, [rec])
+            _imagine_job_set(session_id, status="done", detail="Done", progress=1.0,
+                             result=_gen_public(rec), error="", acknowledged=False)
+    except xai_imagine.XaiError as exc:
+        _imagine_job_set(session_id, status="error", error=exc.message[:400], detail="Generation failed")
+    except Exception as exc:  # pragma: no cover - defensive
+        _imagine_job_set(session_id, status="error", error=str(exc)[:400], detail="Generation failed")
+    finally:
+        with _imagine_lock:
+            job = _imagine_jobs.get(session_id)
+            if job:
+                job["running"] = False
+                job["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+@app.post("/api/imagine/video")
+def api_imagine_video() -> Response:
+    """Start an async Grok Imagine video into the session's staging history. Per-session
+    single-flight (409 if THIS workspace is already rendering); up to
+    IMAGINE_VIDEO_CONCURRENCY workspaces render at once. Poll /api/imagine/video/status."""
+    api_key = _xai_api_key()
+    if not api_key:
+        return jsonify(ok=False, error="No xAI API key configured. Add one in Config → Grok Imagine API."), 400
+    payload = request.get_json(silent=True) or {}
+    prompt = str(payload.get("prompt") or "").strip()
+    source = str(payload.get("source") or "").strip()
+    if not prompt and not source:
+        return jsonify(ok=False, error="A prompt is required."), 400
+    session_id = str(payload.get("session_id") or "").strip() or (
+        "scratch" if source.startswith("gen_") else _session_id_for(source))
+    try:
+        duration = max(1, min(15, int(payload.get("duration") or _xai_video_duration())))
+    except (TypeError, ValueError):
+        duration = _xai_video_duration()
+    aspect_ratio = str(payload.get("aspect_ratio") or "").strip() or _xai_video_aspect()
+    resolution = str(payload.get("resolution") or "").strip() or _xai_video_resolution()
+    model = _xai_video_model()
+    source_gallery_id = session_id[4:] if session_id.startswith("src:") else ""
+
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            data_uri, parent_gen_id, err = _resolve_imagine_source(sessions, source)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    if err:
+        return err
+
+    with _imagine_lock:
+        job = _imagine_jobs.get(session_id)
+        if job and job.get("running"):
+            return jsonify(ok=False, error="This workspace already has a video generating."), 409
+        job_id = secrets.token_hex(8)
+        _imagine_jobs[session_id] = {
+            **_imagine_job_default(session_id), "running": True, "job_id": job_id,
+            "status": "queued", "detail": "Queued…", "acknowledged": False,
+            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    try:
+        threading.Thread(
+            target=_imagine_video_worker, daemon=True,
+            kwargs=dict(session_id=session_id, api_key=api_key, model=model, prompt=prompt,
+                        image_data_uri=data_uri, source_gallery_id=source_gallery_id,
+                        parent_gen_id=parent_gen_id, duration=duration, aspect_ratio=aspect_ratio,
+                        resolution=resolution, source=source),
+        ).start()
+    except Exception:
+        # Thread exhaustion etc. — don't leave the session stuck "running" (409 forever).
+        with _imagine_lock:
+            j = _imagine_jobs.get(session_id)
+            if j and j.get("job_id") == job_id:
+                _imagine_jobs.pop(session_id, None)
+        return jsonify(ok=False, error="Could not start the render. Try again."), 503
+    return jsonify(ok=True, job_id=job_id, session_id=session_id), 202
+
+
+@app.get("/api/imagine/video/status")
+def api_imagine_video_status() -> Response:
+    session_id = str(request.args.get("session") or "").strip()
+    with _imagine_lock:
+        job = dict(_imagine_jobs.get(session_id) or _imagine_job_default(session_id))
+    return jsonify(**{k: job.get(k) for k in _IMAGINE_JOB_KEYS})
+
+
+@app.get("/api/imagine/jobs")
+def api_imagine_jobs() -> Response:
+    """All known video jobs (running + finished-unacked), for the workspace switcher."""
+    with _imagine_lock:
+        jobs = [{k: j.get(k) for k in _IMAGINE_JOB_KEYS} for j in _imagine_jobs.values()]
+    return jsonify(jobs=jobs)
+
+
+@app.post("/api/imagine/video/ack")
+def api_imagine_video_ack() -> Response:
+    """Acknowledge (and drop) a finished video job so its result stops being
+    re-delivered by /jobs and the registry doesn't grow without bound."""
+    payload = request.get_json(silent=True) or {}
+    session_id = str(payload.get("session_id") or "").strip()
+    with _imagine_lock:
+        job = _imagine_jobs.get(session_id)
+        if job and not job.get("running"):
+            _imagine_jobs.pop(session_id, None)
+    return jsonify(ok=True)
+
+
+@app.get("/api/imagine/sessions")
+def api_imagine_sessions() -> Response:
+    """Summaries of every staging session with content (for the workspace switcher)."""
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    with _imagine_lock:
+        running = {sid for sid, j in _imagine_jobs.items() if j.get("running")}
+    out = []
+    for sid, sess in sessions.items():
+        gens = sess.get("generations") or []
+        if not gens:
+            continue
+        out.append({
+            "session_id": sid,
+            "source": sess.get("source"),
+            "count": len(gens),
+            "updated_at": max((g.get("created_at") or "") for g in gens),
+            "rendering": sid in running,
+            "cover": f"/api/imagine/staged/{gens[-1].get('gen_id')}/thumb",
+        })
+    out.sort(key=lambda s: s["updated_at"], reverse=True)
+    return jsonify(ok=True, sessions=out)
+
+
+@app.get("/api/imagine/session")
+def api_imagine_session() -> Response:
+    """Load one staging session. ``?id=<session_id>`` loads any session (scratch, ws:*,
+    src:*); ``?source=<gallery id>`` is shorthand for that image's ``src:`` session."""
+    sid = str(request.args.get("id") or "").strip()
+    source_id = str(request.args.get("source") or "").strip()
+    session_id = sid or _session_id_for(source_id)
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            if session_id in sessions:
+                sess = sessions[session_id]
+            else:
+                gid = session_id[4:] if session_id.startswith("src:") else ""
+                sess = {"session_id": session_id, "source": _source_info(gid), "generations": []}
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    return jsonify(ok=True, session=_session_public(sess))
+
+
+@app.post("/api/imagine/save")
+def api_imagine_save() -> Response:
+    """Promote one staged generation into the Grokive gallery (normal ingest +
+    parent_id link), leaving the staging history intact (now flagged saved)."""
+    payload = request.get_json(silent=True) or {}
+    gen_id = str(payload.get("gen_id") or "").strip()
+    if not gen_id:
+        return jsonify(ok=False, error="No generation specified."), 400
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            _, gen = _find_gen(sessions, gen_id)
+            if not gen:
+                return jsonify(ok=False, error="Generation not found."), 404
+            if gen.get("saved") and gen.get("saved_media_id"):
+                rows = db.media_by_ids(DB_FILE, [gen["saved_media_id"]])
+                return jsonify(ok=True, item=(rows[0] if rows else None), already=True)
+            snap = dict(gen)
+            parent_id = _save_parent_for(sessions, gen)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+
+    ext = snap.get("ext") or ("mp4" if snap.get("media_type") == "video" else "jpg")
+    path = _staged_media_path(gen_id, ext)
+    if not path.exists():
+        return jsonify(ok=False, error="The staged file is no longer available."), 410
+    # An uploaded *original* isn't AI-generated — don't badge it. Anything derived
+    # from it (edit / video) is a real generation and stays badged.
+    is_upload = (snap.get("params") or {}).get("mode") == "upload"
+    record = _ingest_generated_media(
+        raw_bytes=path.read_bytes(), ext=ext,
+        media_type=snap.get("media_type") or "image", prompt=snap.get("prompt") or "",
+        model=snap.get("model") or "",
+        provenance={**(snap.get("params") or {}), "staged_from": gen_id},
+        parent_id=parent_id, duration=snap.get("duration"),
+        api_generated=not is_upload)
+    with _sessions_lock:
+        sessions = _load_sessions()
+        _, g2 = _find_gen(sessions, gen_id)
+        if g2:
+            g2["saved"] = True
+            g2["saved_media_id"] = record["id"]
+            _save_sessions(sessions)
+    rows = db.media_by_ids(DB_FILE, [record["id"]])
+    return jsonify(ok=True, item=(rows[0] if rows else record))
+
+
+@app.post("/api/imagine/discard")
+def api_imagine_discard() -> Response:
+    """Delete a single staged generation (file + thumbnail + record). A saved gallery
+    copy, if any, is independent and left intact."""
+    payload = request.get_json(silent=True) or {}
+    gen_id = str(payload.get("gen_id") or "").strip()
+    if not gen_id:
+        return jsonify(ok=False, error="No generation specified."), 400
+    ext = ""
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            sess, gen = _find_gen(sessions, gen_id)
+            if not gen:
+                return jsonify(ok=False, error="Generation not found."), 404
+            ext = gen.get("ext") or ""
+            sess["generations"] = [g for g in sess.get("generations", []) if g.get("gen_id") != gen_id]
+            _save_sessions(sessions)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    try:
+        _staged_media_path(gen_id, ext).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        _staged_thumb_path(gen_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return jsonify(ok=True)
+
+
+@app.post("/api/imagine/session/clear")
+def api_imagine_session_clear() -> Response:
+    """Delete a session's staged files + history. Saved gallery items are untouched."""
+    payload = request.get_json(silent=True) or {}
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return jsonify(ok=False, error="No session specified."), 400
+    try:
+        with _sessions_lock:
+            sessions = _load_sessions()
+            sess = sessions.pop(session_id, None)
+            if sess:
+                for g in sess.get("generations", []):
+                    gid = g.get("gen_id") or ""
+                    if not gid:
+                        continue
+                    try:
+                        _staged_media_path(gid, g.get("ext") or "").unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    try:
+                        _staged_thumb_path(gid).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                _save_sessions(sessions)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    # Drop any finished job for this session so it can't be re-delivered into the
+    # now-empty workspace (a running render is left alone).
+    with _imagine_lock:
+        job = _imagine_jobs.get(session_id)
+        if job and not job.get("running"):
+            _imagine_jobs.pop(session_id, None)
+    return jsonify(ok=True)
+
+
+@app.get("/api/imagine/staged/<gen_id>")
+def api_imagine_staged(gen_id: str) -> Response:
+    """Serve a staged generation's media file (range-enabled for video playback)."""
+    if not str(gen_id).startswith("gen_"):
+        return jsonify(error="not found"), 404
+    try:
+        with _sessions_lock:
+            _, gen = _find_gen(_load_sessions(), gen_id)
+    except CorruptStateError:
+        return jsonify(error="not found"), 404
+    if not gen:
+        return jsonify(error="not found"), 404
+    path = _staged_media_path(gen_id, gen.get("ext") or "jpg")
+    if not path.exists():
+        return jsonify(error="not found"), 404
+    return send_file(path, conditional=True)
+
+
+@app.get("/api/imagine/staged/<gen_id>/thumb")
+def api_imagine_staged_thumb(gen_id: str) -> Response:
+    if not str(gen_id).startswith("gen_"):
+        return jsonify(error="not found"), 404
+    path = _staged_thumb_path(gen_id)
+    if not path.exists():
+        return jsonify(error="not found"), 404
+    return send_file(path, conditional=True)
+
+
 def _library_sets() -> tuple[set, set]:
     favorites: set = set()
     stashed: set = set()
@@ -2192,6 +3166,43 @@ def api_prompts_generate() -> Response:
     return jsonify(ok=True, variations=variations, model=model)
 
 
+@app.post("/api/prompts/from-image")
+def api_prompts_from_image() -> Response:
+    """Vision: describe one image as a ready-to-paste Grok Imagine prompt (the lightbox
+    lightning-bolt). Needs a multimodal LLM — set ``llm_vision_model`` / ``LLM_VISION_MODEL``
+    to a VLM such as a Qwen3-VL build; it falls back to the chat model. Body: ``{"id": ...}``."""
+    base = _llm_url()
+    if not base:
+        return jsonify(ok=False, error="No LLM endpoint configured.", prompt=""), 400
+    payload = request.get_json(silent=True) or {}
+    media_id = str(payload.get("id") or "").strip()
+    if not media_id:
+        return jsonify(ok=False, error="No image id provided.", prompt=""), 400
+    path, item = _image_path_for_id(media_id)
+    if item is None:
+        return jsonify(ok=False, error="Unknown media id.", prompt=""), 404
+    if item.get("media_type") == "video":
+        return jsonify(ok=False, error="This works on images, not videos.", prompt=""), 400
+    if path is None:
+        return jsonify(ok=False, error="Image file not found on disk.", prompt=""), 404
+    try:
+        image_b64, mime = _image_b64_for_vision(path)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=f"Could not read the image: {exc}"[:200], prompt=""), 500
+    model = _llm_vision_model()
+    try:
+        prompt = promptstudio.describe_for_grok(
+            base, model, image_b64=image_b64, mime=mime,
+            stored_prompt=str(item.get("prompt") or ""),
+            api_key=_llm_api_key(), extra_headers=_llm_extra_headers(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify(ok=False, error=str(exc)[:200], prompt=""), 502
+    if not prompt:
+        return jsonify(ok=False, error="The vision model returned no usable description.", prompt=""), 502
+    return jsonify(ok=True, prompt=prompt, model=model)
+
+
 @app.post("/api/prompts/enhance")
 def api_prompts_enhance() -> Response:
     """Enhance one saved prompt into a richer prompt. Needs LLM_SERVER_URL."""
@@ -2354,9 +3365,7 @@ def api_prompts_scenes_post() -> Response:
             "created_at": str(entry.get("created_at", ""))[:32],
         })
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SCENES_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(SCENES_FILE)
+    _atomic_write_json(SCENES_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
 
@@ -2430,10 +3439,7 @@ def api_prompts_freeform_presets_post() -> Response:
             "count": count,
             "created_at": str(entry.get("created_at", ""))[:32],
         })
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = FREEFORM_PRESETS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(FREEFORM_PRESETS_FILE)
+    _atomic_write_json(FREEFORM_PRESETS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
 
@@ -2481,11 +3487,109 @@ def api_prompts_responses_post() -> Response:
             "folder": str(entry.get("folder", "")).strip()[:40],
             "tags": tags,
         })
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = RESPONSES_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(RESPONSES_FILE)
+    _atomic_write_json(RESPONSES_FILE, clean)
     return jsonify(ok=True, count=len(clean))
+
+
+@app.post("/api/prompts/responses/add")
+def api_prompts_responses_add() -> Response:
+    """Append ONE saved response server-side (read-modify-write) and return the full list.
+
+    Unlike the full-list POST above, this NEVER overwrites the file with the caller's view —
+    so a context that hasn't loaded the list (e.g. the lightbox 'Describe for Grok') can add a
+    prompt without wiping the others. Deduplicates by exact text."""
+    payload = request.get_json(silent=True) or {}
+    text = str(payload.get("text") or "").strip()[:2000]
+    if not text:
+        return jsonify(ok=False, error="No text provided.", responses=[]), 400
+    folder = str(payload.get("folder") or "").strip()[:40]
+    current: list = []
+    if RESPONSES_FILE.exists():
+        try:
+            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                current = [x for x in loaded if isinstance(x, dict)]
+        except Exception:
+            current = []
+    if any(str(x.get("text", "")).strip() == text for x in current):
+        return jsonify(ok=True, added=False, responses=current)  # already saved — leave as-is
+    entry = {
+        "id": "rs-" + secrets.token_hex(6),
+        "text": text,
+        "created_at": datetime.date.today().isoformat(),
+        "folder": folder,
+        "tags": [],
+    }
+    current = [entry] + current
+    _atomic_write_json(RESPONSES_FILE, current)
+    return jsonify(ok=True, added=True, responses=current)
+
+
+def _library_unique_prompts() -> dict:
+    """Map normalized-prompt hash -> {text, created} over every media prompt in metadata.json,
+    deduped (trivially-different wordings collapse, matching Prompt Studio's unique count)."""
+    uniq: dict = {}
+    if not METADATA_FILE.exists():
+        return uniq
+    try:
+        items = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return uniq
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("prompt") or "").strip()
+        if not text:
+            continue
+        h = promptstudio.prompt_hash(text)
+        if not h:
+            continue
+        created = str(it.get("created_at") or "")
+        row = uniq.get(h)
+        if row is None:
+            uniq[h] = {"text": text, "created": created}
+        elif created > row["created"]:
+            row["created"] = created
+    return uniq
+
+
+@app.post("/api/prompts/responses/import-library")
+def api_prompts_responses_import_library() -> Response:
+    """Merge the media library's prompts (from metadata.json) into Saved responses: add any that
+    aren't already saved (deduped by normalized prompt hash). ``{"preview": true}`` only COUNTS
+    what would be added (for the button label) and writes nothing. The real import backs up the
+    current list first and can only grow it. Returns the full updated list."""
+    payload = request.get_json(silent=True) or {}
+    preview = bool(payload.get("preview"))
+    folder = str(payload.get("folder") or "Library").strip()[:40]
+    current: list = []
+    if RESPONSES_FILE.exists():
+        try:
+            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                current = [x for x in loaded if isinstance(x, dict)]
+        except Exception:
+            current = []
+    have = {promptstudio.prompt_hash(t) for t in
+            (str(x.get("text", "")).strip() for x in current) if t}
+    uniq = _library_unique_prompts()
+    missing = [(h, r) for h, r in uniq.items() if h not in have]
+    if preview:
+        return jsonify(ok=True, missing=len(missing), library_unique=len(uniq), saved=len(current))
+    if not missing:
+        return jsonify(ok=True, added=0, total=len(current), backup="", responses=current)
+    missing.sort(key=lambda hr: hr[1]["created"], reverse=True)  # newest first
+    today = datetime.date.today().isoformat()
+    new_entries = [{
+        "id": "rs-" + secrets.token_hex(6),
+        "text": r["text"][:2000],
+        "created_at": (r["created"][:10] or today),
+        "folder": folder,
+        "tags": [],
+    } for _, r in missing]
+    merged = current + new_entries  # keep existing/curated on top; imports appended
+    backup = _atomic_write_json(RESPONSES_FILE, merged)
+    return jsonify(ok=True, added=len(new_entries), total=len(merged), backup=backup, responses=merged)
 
 
 @app.get("/api/prompts/personas")
@@ -2523,10 +3627,7 @@ def api_prompts_personas_post() -> Response:
             "text": text,
             "anchor": str(entry.get("anchor", "")).strip()[:200],
         })
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = PERSONAS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(PERSONAS_FILE)
+    _atomic_write_json(PERSONAS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
 
@@ -2563,10 +3664,7 @@ def api_library_post() -> Response:
         return out
 
     data = {"favorites": _ids(payload.get("favorites")), "stashed": _ids(payload.get("stashed"))}
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = LIBRARY_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(LIBRARY_FILE)
+    _atomic_write_json(LIBRARY_FILE, data)
     return jsonify(ok=True, favorites=len(data["favorites"]), stashed=len(data["stashed"]))
 
 
@@ -2589,11 +3687,44 @@ def _load_json_strict(path: Path, default):
         raise CorruptStateError(f"{path.name} exists but could not be read: {exc}") from exc
 
 
-def _atomic_write_json(path: Path, data) -> None:
+BACKUPS_DIR = DATA_DIR / "backups"  # rolling backups of state files, capped per file
+
+
+def _backup_state_file(path: Path, *, keep: int = 10) -> str:
+    """Copy an existing, non-empty state file into ``/data/backups/<stem>-<ts><suffix>`` before
+    it's overwritten, pruning that file's backups to the newest ``keep``. Best-effort — never
+    raises (a backup failure must not block the write). Returns the backup filename, or ""."""
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return ""
+        BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        dest = BACKUPS_DIR / f"{path.stem}-{ts}{path.suffix}"
+        if dest.exists():  # more than one write in the same second
+            dest = BACKUPS_DIR / f"{path.stem}-{ts}-{secrets.token_hex(2)}{path.suffix}"
+        shutil.copy2(path, dest)
+        kept = sorted(BACKUPS_DIR.glob(f"{path.stem}-*{path.suffix}"),
+                      key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in kept[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return dest.name
+    except Exception:
+        return ""
+
+
+def _atomic_write_json(path: Path, data, *, backup: bool = True) -> str:
+    """Atomically write ``data`` as JSON (tmp + replace). Unless ``backup`` is False, the file's
+    prior contents are copied into ``/data/backups`` first (capped per file) so a bad or
+    unintended write is always recoverable. Returns the backup filename (or "")."""
+    bak = _backup_state_file(path) if backup else ""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+    return bak
 
 
 def _load_deleted() -> set:
@@ -2784,7 +3915,8 @@ def main() -> None:
 
     # channel_timeout is generous so long exports (merge + optional burn re-encode)
     # and subtitle jobs aren't cut off mid-request.
-    serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=3600)
+    serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=3600,
+          max_request_body_size=128 * 1024 * 1024)
 
 
 if __name__ == "__main__":
