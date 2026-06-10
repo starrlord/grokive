@@ -1,24 +1,39 @@
 <script>
   import { collections, removeCollection } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import SearchField from './SearchField.svelte';
 
   let { onopen = () => {}, onplay = () => {}, onmovie = () => {} } = $props();
   let confirming = $state(null);
 
-  // Pin the auto-generated "Beat Montage" collection to the top, wherever it sits in
-  // the stored order (new collections prepend, which would otherwise push it down).
-  // Same id/name check the server uses (server.py _commit_montage). Array.sort is
-  // stable, so every other collection keeps its existing relative order.
-  const isMontage = (c) => c.id === 'beat-montage' || c.name?.toLowerCase() === 'beat montage';
-  const sorted = $derived(
-    [...$collections].sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0))
-  );
+  // Toolbar: filter the grid by name and choose its order.
+  let q = $state('');
+  let sortBy = $state('recent'); // recent (store order) | name | size
 
+  // The auto-generated "Beat Montage" collection — pinned to the top of the default
+  // (recent) order wherever it sits in the stored list. Same id/name check the server uses.
+  const isMontage = (c) => c.id === 'beat-montage' || c.name?.toLowerCase() === 'beat montage';
+
+  const filtered = $derived(
+    ($collections || []).filter((c) => !q.trim() || (c.name || '').toLowerCase().includes(q.trim().toLowerCase()))
+  );
+  const shown = $derived.by(() => {
+    const list = [...filtered];
+    if (sortBy === 'name') return list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    if (sortBy === 'size') return list.sort((a, b) => (b.item_count ?? b.ids?.length ?? 0) - (a.item_count ?? a.ids?.length ?? 0));
+    // 'recent' = stored order, with Beat Montage pinned on top (sort is stable, so the rest stay put).
+    return list.sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0));
+  });
+
+  // Count line for the cover, dropping any zero segments (e.g. "26 items · 26 videos").
   const countLabel = (c) => {
     const total = c.item_count ?? c.ids?.length ?? 0;
     const videos = c.video_count ?? 0;
     const images = c.image_count ?? 0;
-    return `${total} item${total === 1 ? '' : 's'} · ${videos} video${videos === 1 ? '' : 's'} · ${images} image${images === 1 ? '' : 's'}`;
+    const parts = [`${total} item${total === 1 ? '' : 's'}`];
+    if (videos) parts.push(`${videos} video${videos === 1 ? '' : 's'}`);
+    if (images) parts.push(`${images} image${images === 1 ? '' : 's'}`);
+    return parts.join(' · ');
   };
 </script>
 
@@ -30,44 +45,77 @@
     </div>
   </div>
 {:else}
-  <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-    {#each sorted as c (c.id)}
-      <article class="group overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
-        <button type="button" class="relative block aspect-[4/3] w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => onopen(c)}>
-          {#if c.covers?.length > 1}
-            <span class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">
-              {#each c.covers.slice(0, 4) as cover (cover)}
-                <img src={cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-[1.03]" />
-              {/each}
-            </span>
-          {:else if c.cover}
-            <img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-[1.03]" />
-          {:else}
-            <span class="grid h-full w-full place-items-center text-sm text-muted">No cover</span>
-          {/if}
-          <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-3 pb-3 pt-14 text-[var(--media-control-ink)]">
-            <span class="block truncate text-base font-extrabold">{c.name}</span>
-            <span class="block text-xs opacity-80">{countLabel(c)}</span>
-          </span>
-        </button>
-        <div class="flex items-center gap-2 p-2">
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm bg-[var(--accent)] text-[var(--on-accent)] disabled:opacity-45"
-            title="Play videos" aria-label="Play collection videos" disabled={!c.video_count} onclick={() => onplay(c)}>▶</button>
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm border border-line text-muted transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-45"
-            title="Beat montage from these videos" aria-label="Create a beat montage from this collection's videos"
-            disabled={(c.video_count ?? 0) < 2} onclick={() => onmovie(c)}>
-            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-          </button>
-          <button type="button" class="min-w-0 flex-1 truncate text-left text-sm font-semibold hover:underline" onclick={() => onopen(c)}>{c.name}</button>
-          <span class="text-xs text-muted">{c.item_count ?? c.ids?.length ?? 0}</span>
-          <button type="button" class="grid h-8 w-8 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-sm border border-line text-muted transition hover:border-[var(--danger-border-strong)] hover:bg-[var(--danger-bg)] hover:text-[var(--danger-ink)]"
-            title="Delete collection" aria-label="Delete collection" onclick={() => (confirming = c)}>
-            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
-          </button>
-        </div>
-      </article>
-    {/each}
+  <!-- Toolbar: title + count, name filter, ordering. -->
+  <div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+    <h1 class="text-lg font-extrabold tracking-tight text-ink">Collections</h1>
+    <span class="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{$collections.length}</span>
+    <div class="ml-auto flex w-full items-center gap-2 sm:w-auto">
+      <SearchField bind:value={q} placeholder="Search collections…" ariaLabel="collection search"
+        wrapperClass="min-w-0 flex-1 sm:w-60 sm:flex-none"
+        inputClass="rounded-full border border-line bg-[var(--surface-2)] py-1.5 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+      <select bind:value={sortBy} aria-label="Sort collections" title="Sort collections"
+        class="shrink-0 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm font-semibold">
+        <option value="recent">Recent</option>
+        <option value="name">Name A–Z</option>
+        <option value="size">Largest</option>
+      </select>
+    </div>
   </div>
+
+  {#if !shown.length}
+    <p class="py-16 text-center text-sm text-muted">No collections match “{q.trim()}”.</p>
+  {:else}
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {#each shown as c (c.id)}
+        <article class="group relative overflow-hidden rounded-card border border-line bg-[var(--surface-2)] transition-colors hover:border-[var(--accent)] focus-within:border-[var(--accent)]">
+          <!-- Cover with title + count overlay. -->
+          <div class="relative aspect-[4/3] w-full overflow-hidden bg-[var(--media-bg)]">
+            {#if c.covers?.length > 1}
+              <span class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">
+                {#each c.covers.slice(0, 4) as cover (cover)}
+                  <img src={cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-[1.03]" />
+                {/each}
+              </span>
+            {:else if c.cover}
+              <img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-[1.03]" />
+            {:else}
+              <span class="grid h-full w-full place-items-center text-sm text-muted">No cover</span>
+            {/if}
+            <span class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-3 pb-3 pt-14 text-[var(--media-control-ink)]">
+              <span class="block truncate text-base font-extrabold">{c.name}</span>
+              <span class="block text-xs opacity-80">{countLabel(c)}</span>
+            </span>
+          </div>
+
+          <!-- Full-bleed open target sits under the action buttons (which carry higher z). -->
+          <button type="button" class="absolute inset-0 z-0" aria-label={`Open collection ${c.name}`} onclick={() => onopen(c)}></button>
+
+          <!-- Secondary actions: top-right, revealed on hover / keyboard focus anywhere in the
+               card (group-focus-within), always shown for touch. -->
+          <div class="absolute right-2 top-2 z-10 flex gap-1.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
+            {#if (c.video_count ?? 0) >= 2}
+              <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--media-control-border-hover)] hover:bg-[var(--media-control-bg-hover)]"
+                title="Beat montage from these videos" aria-label="Create a beat montage from this collection's videos" onclick={() => onmovie(c)}>
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              </button>
+            {/if}
+            <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--danger-hover)] hover:bg-[var(--danger-hover)] hover:text-white"
+              title="Delete collection" aria-label="Delete collection" onclick={() => (confirming = c)}>
+              <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+            </button>
+          </div>
+
+          <!-- Primary action: Play videos, bottom-right, only when the collection has any. -->
+          {#if c.video_count}
+            <button type="button" class="absolute bottom-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
+              title="Play videos" aria-label="Play collection videos" onclick={() => onplay(c)}>
+              <span aria-hidden="true">▶</span> Play
+            </button>
+          {/if}
+        </article>
+      {/each}
+    </div>
+  {/if}
 {/if}
 
 {#if confirming}

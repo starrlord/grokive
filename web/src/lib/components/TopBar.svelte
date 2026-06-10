@@ -1,5 +1,5 @@
 <script>
-  import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab } from '$lib/state.js';
+  import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab, activeCollectionId } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
   import SearchField from './SearchField.svelte';
 
@@ -47,6 +47,9 @@
     if ($filters.query !== lastSet) { q = $filters.query; lastSet = $filters.query; }
   });
   const toggleMode = () => mode.update((m) => (m === 'cinematic' ? 'editorial' : 'cinematic'));
+  // On the collections landing grid, media sort/period don't apply (you're looking at
+  // collections, not media). The grid has its own sort; these return inside a collection.
+  const onCollectionsLanding = $derived($filters.view === 'collections' && !$activeCollectionId);
 
   function label(v) {
     if (v.id === 'favorites' && $counts.favorites) return `Favorites (${$counts.favorites})`;
@@ -108,17 +111,19 @@
   </div>
 
   <div class="topbar-tools flex flex-wrap items-center gap-1.5">
-    <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
-      title="Time period" value={$filters.period} onchange={(e) => setPeriod(e.target.value)}>
-      {#each periods as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
-    </select>
-    <select class="rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm"
-      value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
-      <option value="new">Newest</option>
-      <option value="old">Oldest</option>
-      <option value="prompt">Prompt A–Z</option>
-      <option value="model">Model A–Z</option>
-    </select>
+    {#if !onCollectionsLanding}
+      <select class="rounded-lg border bg-[var(--surface-2)] px-2 py-1.5 text-sm {$filters.period !== 'all' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line'}"
+        title="Time period" value={$filters.period} onchange={(e) => setPeriod(e.target.value)}>
+        {#each periods as p (p.id)}<option value={p.id}>{p.label}</option>{/each}
+      </select>
+      <select class="rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm"
+        value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
+        <option value="new">Newest</option>
+        <option value="old">Oldest</option>
+        <option value="prompt">Prompt A–Z</option>
+        <option value="model">Model A–Z</option>
+      </select>
+    {/if}
     <button type="button" title="Layout mode" aria-label="Toggle layout mode" class="grid h-9 w-9 place-items-center rounded-lg border border-line text-sm" onclick={toggleMode}>
       {$mode === 'cinematic' ? '▦' : '▤'}
     </button>

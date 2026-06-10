@@ -350,6 +350,10 @@ export function removePlaylist(id) {
 
 // --- Collections -----------------------------------------------------------
 export const collections = writable([]);
+// Which collection is open in the Collections view (null = the landing grid). Lifted to a
+// store so the top bar can tell "collections landing" from "inside a collection" and adapt
+// its controls. Owned by the page: set on open, cleared on Back / when leaving the view.
+export const activeCollectionId = writable(null);
 const cid = () => 'co-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 const today = () => new Date().toISOString().slice(0, 10);
 

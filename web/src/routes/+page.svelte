@@ -9,8 +9,8 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
-    setSort, galleryReload
+    collections, activeCollectionId, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
+    galleryReload
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -39,7 +39,7 @@
 
   let lb = $state(null); // { list, index, autoAdvance, title }
   let editing = $state(null); // playlist being edited
-  let activeCollectionId = $state(null);
+  // activeCollectionId now lives in the shared store (state.js) so the TopBar can read collection context.
   let collectionItems = $state([]);
   let collectionTotal = $state(0);
   let collectionName = $state('');
@@ -70,7 +70,9 @@
   // both). Subtract the loaded items the overlay now hides to keep it honest — only
   // loaded/visible items can be acted on, so unloaded ones are unaffected.
   const displayTotal = $derived(Math.max(displayItems.length, total - (items.length - displayItems.length)));
-  const activeCollection = $derived(($collections || []).find((c) => c.id === activeCollectionId) || null);
+  const activeCollection = $derived(($collections || []).find((c) => c.id === $activeCollectionId) || null);
+  // The collections landing grid (not drilled into a collection) — chrome adapts to this.
+  const onCollectionsLanding = $derived($filters.view === 'collections' && !activeCollection);
   const activeCanvas = $derived((facets.canvases || []).find((c) => c.id === $filters.canvas) || null);
   const activeCanvasTitle = $derived(activeCanvas?.name || activeCanvasName || 'Canvas');
   const hasCanvasRefinements = $derived(!!(
@@ -145,12 +147,12 @@
   // tags, models) keeps the selection. Select mode itself stays on.
   let ctxSig = '';
   $effect(() => {
-    const next = `${$filters.view}|${$filters.canvas ?? ''}|${activeCollectionId ?? ''}`;
+    const next = `${$filters.view}|${$filters.canvas ?? ''}|${$activeCollectionId ?? ''}`;
     if (ctxSig !== '' && next !== ctxSig) clearSelection();
     ctxSig = next;
   });
   async function refreshFacets() {
-    try { facets = await fetchFacets($filters, activeCollectionId); } catch {}
+    try { facets = await fetchFacets($filters, $activeCollectionId); } catch {}
   }
 
   // Refetch the current media view after a Grok Imagine generation ingests new
@@ -194,13 +196,15 @@
   let collSig = $state('');
   $effect(() => {
     if ($filters.view !== 'collections') {
-      activeCollectionId = null;
+      $activeCollectionId = null;
       collectionItems = [];
       collectionTotal = 0;
       collSig = '';
       return;
     }
-    if (!activeCollection) return;
+    // Clear an orphaned id (its collection was deleted here or on another device) so the
+    // store reflects "landing", keeping the page and the TopBar's chrome logic in sync.
+    if (!activeCollection) { $activeCollectionId = null; return; }
     const next = JSON.stringify({
       id: activeCollection.id,
       ids: activeCollection.ids || [],
@@ -263,7 +267,7 @@
     lb = { list, index: 0, autoAdvance: true, title: pl.name };
   }
   function openCollection(c) {
-    activeCollectionId = c.id;
+    $activeCollectionId = c.id;
   }
   async function playCollection(c, orderedItems = null) {
     const source = Array.isArray(orderedItems) ? orderedItems : await mediaByIds(c.ids);
@@ -340,7 +344,7 @@
 <div class="flex">
   <!-- Studio is its own full-width workspace; the media-browsing sidebar (filters,
        playlists) doesn't apply there, so hide it for that view. -->
-  {#if $filters.view !== 'studio' && $filters.view !== 'imagine'}
+  {#if $filters.view !== 'studio' && $filters.view !== 'imagine' && !onCollectionsLanding}
     <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
       <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
     </aside>
@@ -351,19 +355,12 @@
       <CollectionsGrid onopen={openCollection} onplay={playCollection} onmovie={montageCollection} />
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
-        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={() => (activeCollectionId = null)}>Back</button>
+        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={() => ($activeCollectionId = null)}>Back</button>
         <div class="min-w-[12rem] flex-1 sm:max-w-md">
           <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
             aria-label="Collection name" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
         </div>
         <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
-        <select class="rounded-lg border border-line bg-[var(--surface-2)] px-2 py-2 text-sm font-semibold"
-          aria-label="Sort collection" title="Sort collection" value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
-          <option value="new">Newest</option>
-          <option value="old">Oldest</option>
-          <option value="prompt">Prompt A-Z</option>
-          <option value="model">Model A-Z</option>
-        </select>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
