@@ -10,6 +10,7 @@
   import SceneBuilder from './SceneBuilder.svelte';
   import Freeform from './Freeform.svelte';
   import SavedResponses from './SavedResponses.svelte';
+  import SearchField from './SearchField.svelte';
   import { addSavedResponse, loadSavedResponses, studioTab } from '$lib/state.js';
 
   // Grok Imagine is two-stage: a detailed still (text-to-image) is then animated with a SHORT
@@ -593,8 +594,8 @@ Rules you MUST follow:
             <span class="text-xs font-bold uppercase tracking-wider text-muted">Your prompts</span>
             {#if !browseQ.trim()}<span class="text-[0.625rem] text-muted">top {shownPrompts.length}</span>{/if}
           </div>
-          <input type="search" placeholder={semanticReady ? 'Search prompts…' : 'Filter prompts…'} bind:value={browseQ} onkeydown={onSearchKey}
-            class="w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+          <SearchField bind:value={browseQ} onkeydown={onSearchKey} placeholder={semanticReady ? 'Search prompts…' : 'Filter prompts…'}
+            wrapperClass="w-full" inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
           {#if semanticReady && browseQ.trim()}
             <button type="button" onclick={runSemanticSearch} title="Find the most semantically similar prompts (not just text matches)"
               class="mb-3 mt-1.5 w-full truncate rounded-lg border border-line px-3 py-1.5 text-xs font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">≈ Search similar to “{browseQ.trim()}”</button>

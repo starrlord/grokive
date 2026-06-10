@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
+  import SearchField from './SearchField.svelte';
   import {
     collections, addCollection, addToCollection,
     loadCollections, setStashed, setSelectMode, clearSelection
@@ -74,8 +75,9 @@
           <span>Existing collections</span>
           <span>{$collections.length}</span>
         </div>
-        <input class="mb-2 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
-          placeholder="Search collections..." bind:value={q} />
+        <SearchField bind:value={q} placeholder="Search collections..." ariaLabel="collection search"
+          wrapperClass="mb-2 w-full"
+          inputClass="rounded-lg border border-line bg-[var(--surface-2)] py-2 pl-3 pr-10 text-sm outline-none" />
         <div class="flex max-h-72 flex-col gap-1 overflow-auto">
           {#if !shown.length}
             <p class="py-6 text-center text-sm text-muted">No collections match.</p>

@@ -2,6 +2,7 @@
   import { filters, toggleTag, toggleModel, toggleResolution, setMediaType, clearFilters } from '$lib/state.js';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
+  import SearchField from './SearchField.svelte';
 
   let { facets = { tags: [], models: [] }, onclose = () => {} } = $props();
   let q = $state('');
@@ -20,7 +21,8 @@
 
 <Modal {onclose} ariaLabel="Filters" z="z-[60]" panelClass="panel flex max-h-[88dvh] w-full max-w-3xl flex-col overflow-hidden rounded-card">
     <div class="flex items-center gap-3 border-b border-line p-4">
-      <input class="flex-1 rounded-full border border-line bg-[var(--surface-2)] px-4 py-2 text-sm outline-none" placeholder="Filter tags…" bind:value={q} />
+      <SearchField bind:value={q} placeholder="Filter tags…" ariaLabel="tag filter" wrapperClass="flex-1"
+        inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-4 pr-10 text-sm outline-none" />
       <Button onclick={onclose}>Done</Button>
     </div>
 

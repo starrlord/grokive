@@ -1,6 +1,7 @@
 <script>
   import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
+  import SearchField from './SearchField.svelte';
 
   let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {} } = $props();
 
@@ -30,10 +31,16 @@
   let q = $state($filters.query);
   let lastSet = $filters.query;
   let timer;
-  function onInput(e) {
-    q = e.target.value;
+  function onInput() {
+    // `q` is already updated by bind:value; just debounce the push to the store.
     clearTimeout(timer);
     timer = setTimeout(() => { lastSet = q; setQuery(q); }, 250);
+  }
+  // Clearing skips the debounce so results reset the instant the × is clicked.
+  function clearSearch() {
+    clearTimeout(timer);
+    lastSet = '';
+    setQuery('');
   }
   // Keep the box in sync when the query is cleared elsewhere (Reset / logo).
   $effect(() => {
@@ -56,9 +63,9 @@
   <button type="button" class="topbar-brand text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show recent media" onclick={resetAll}>Grokive</button>
 
   <div class="topbar-search order-3 w-full min-w-0 sm:order-none sm:w-auto sm:max-w-[460px] sm:flex-1">
-    <input
-      class="w-full rounded-full border border-line bg-[var(--surface-2)] px-4 py-2 text-sm outline-none placeholder:text-muted"
-      type="search" placeholder="Search prompts, tags, models…" value={q} oninput={onInput} />
+    <SearchField bind:value={q} oninput={onInput} onclear={clearSearch}
+      placeholder="Search prompts, tags, models…" wrapperClass="w-full"
+      inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-4 pr-10 text-sm outline-none placeholder:text-muted" />
   </div>
 
   <nav class="topbar-views flex max-w-full gap-1 overflow-x-auto rounded-full border border-line bg-[var(--surface-2)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">

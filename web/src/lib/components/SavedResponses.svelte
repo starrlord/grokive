@@ -7,6 +7,7 @@
   import { auditPromptLabels, autotagPrompt, enhancePrompt, importLibraryPrompts } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import SearchField from './SearchField.svelte';
 
   let { llmReady = false, onRemix = null } = $props(); // llmReady -> auto-tag affordances; onRemix -> load a saved prompt back into the Compose composer
 
@@ -630,8 +631,9 @@
       </div>
 
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center lg:flex-1">
-        <input type="search" placeholder="Search saved responses…" bind:value={q}
-          class="w-full rounded-full border border-line bg-[var(--surface-2)] px-3.5 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)] sm:min-w-0 sm:flex-1" />
+        <SearchField bind:value={q} placeholder="Search saved responses…" ariaLabel="saved responses"
+          wrapperClass="w-full sm:min-w-0 sm:flex-1"
+          inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
 
         <!-- All action buttons sit in one no-wrap, no-shrink cluster so they always stay on a
              single line; the search above flexes to give up width instead of letting these wrap. -->
