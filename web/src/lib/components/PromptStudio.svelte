@@ -10,7 +10,7 @@
   import SceneBuilder from './SceneBuilder.svelte';
   import Freeform from './Freeform.svelte';
   import SavedResponses from './SavedResponses.svelte';
-  import { addSavedResponse, loadSavedResponses } from '$lib/state.js';
+  import { addSavedResponse, loadSavedResponses, studioTab } from '$lib/state.js';
 
   // Grok Imagine is two-stage: a detailed still (text-to-image) is then animated with a SHORT
   // motion prompt (image-to-video). So the composer emits TWO prompts — Image and Motion — that
@@ -25,7 +25,8 @@
   let composeTimer;
   let remixBusy = $state(false);
   let focused = $state(null);
-  let studioMode = $state('compose'); // 'compose' | 'scene' | 'freeform' | 'saved'
+  // The active sub-tab lives in a shared store (state.js) so the top-bar island can jump
+  // straight to a tab (Prompts → Saved) and reflect which is showing: compose | scene | freeform | saved.
 
   // Phase 1 browse state.
   let embed = $state({ configured: false, embedded: 0, total_unique: 0, missing: 0, running: false, done: 0, total: 0, error: null });
@@ -187,9 +188,13 @@ Rules you MUST follow:
   }
 
   onMount(async () => {
+    // Kick off the saved-library fetch first, in parallel with vocab, so the store is
+    // populated before the Saved tab can render — including when the top-bar Prompts
+    // button lands you straight on it. Saving against an unloaded store would persist a
+    // stale/empty list over your real library (persist writes the whole local store).
+    loadSavedResponses();
     vocab = await fetchPromptVocabulary();
     loading = false;
-    loadSavedResponses();
     initPersonas();
     await refreshEmbed();
     if (embed.configured && embed.embedded > 0) loadThemes();
@@ -264,7 +269,7 @@ Rules you MUST follow:
     }
   }
   async function remix(text) {
-    studioMode = 'compose';
+    studioTab.set('compose');
     await loadIntoFields(text);
     if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
     toast('Loaded into the composer', { type: 'success' });
@@ -337,23 +342,23 @@ Rules you MUST follow:
     <div class="flex shrink-0 items-center gap-3">
       {#if remixBusy}<span class="text-xs font-semibold text-[var(--accent)]">Decomposing…</span>{/if}
       <div class="flex shrink-0 rounded-lg border border-line p-0.5">
-        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'compose' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'compose')}>Compose</button>
-        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'scene' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'scene')}>Scene</button>
-        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'freeform' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'freeform')}>Freeform</button>
-        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {studioMode === 'saved' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => (studioMode = 'saved')}>Saved</button>
+        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {$studioTab === 'compose' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => studioTab.set('compose')}>Compose</button>
+        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {$studioTab === 'scene' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => studioTab.set('scene')}>Scene</button>
+        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {$studioTab === 'freeform' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => studioTab.set('freeform')}>Freeform</button>
+        <button type="button" class="rounded-md px-3 py-1.5 text-sm font-semibold transition {$studioTab === 'saved' ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-muted hover:text-ink'}" onclick={() => studioTab.set('saved')}>Saved</button>
       </div>
       <!-- Always in the layout (just hidden off Compose) so the toggle never shifts/reflows when
            switching modes — a button appearing/disappearing was moving the bar and even wrapping
            the row, which made tabs like Saved hard to click. -->
       <button type="button"
-        class="shrink-0 rounded-lg border border-line px-3 py-2 text-sm font-semibold disabled:opacity-40 {studioMode === 'compose' ? '' : 'invisible'}"
-        disabled={isEmpty || studioMode !== 'compose'} aria-hidden={studioMode !== 'compose'}
-        tabindex={studioMode === 'compose' ? 0 : -1} onclick={clearAll}>Clear</button>
+        class="shrink-0 rounded-lg border border-line px-3 py-2 text-sm font-semibold disabled:opacity-40 {$studioTab === 'compose' ? '' : 'invisible'}"
+        disabled={isEmpty || $studioTab !== 'compose'} aria-hidden={$studioTab !== 'compose'}
+        tabindex={$studioTab === 'compose' ? 0 : -1} onclick={clearAll}>Clear</button>
     </div>
   </div>
 
   <!-- Persona editing is for Scene/Freeform; Compose has a separate opt-in selector. -->
-  {#if llmReady && (studioMode === 'scene' || studioMode === 'freeform')}
+  {#if llmReady && ($studioTab === 'scene' || $studioTab === 'freeform')}
     <div class="mb-4 rounded-card border border-line bg-[var(--surface-2)]/40">
       <button type="button" class="flex w-full items-center justify-between px-3 py-2 text-left"
         title="Persona applies only to Scene and Freeform. Compose uses its own No Persona dropdown."
@@ -398,11 +403,11 @@ Rules you MUST follow:
 
   {#if loading}
     <p class="py-16 text-center text-sm text-muted">Reading your prompt library…</p>
-  {:else if studioMode === 'scene'}
+  {:else if $studioTab === 'scene'}
     <SceneBuilder base={combined} {llmReady} {persona} personaAnchor={activeCard?.anchor || ''} />
-  {:else if studioMode === 'freeform'}
+  {:else if $studioTab === 'freeform'}
     <Freeform {persona} {llmReady} />
-  {:else if studioMode === 'saved'}
+  {:else if $studioTab === 'saved'}
     <SavedResponses {llmReady} onRemix={remix} />
   {:else}
     {#snippet fieldGrid(keys)}

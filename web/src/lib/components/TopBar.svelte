@@ -1,5 +1,5 @@
 <script>
-  import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight } from '$lib/state.js';
+  import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
 
   let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {} } = $props();
@@ -72,13 +72,22 @@
 
   <div class="topbar-workspace-group flex shrink-0 items-center gap-1.5">
     <button type="button"
-      class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
+      class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' && $studioTab !== 'saved' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
       aria-label="Open Prompt Studio"
-      aria-current={$filters.view === 'studio' ? 'page' : undefined}
+      aria-current={$filters.view === 'studio' && $studioTab !== 'saved' ? 'page' : undefined}
       title="Open Prompt Studio"
-      onclick={() => setView('studio')}>
+      onclick={() => openStudio()}>
       <span aria-hidden="true">✦</span>
       <span aria-hidden="true" class="topbar-workspace-label"></span>
+    </button>
+    <button type="button"
+      class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' && $studioTab === 'saved' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
+      aria-label="Open saved prompts"
+      aria-current={$filters.view === 'studio' && $studioTab === 'saved' ? 'page' : undefined}
+      title="Saved prompts"
+      onclick={() => openStudio('saved')}>
+      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      <span aria-hidden="true" class="hidden sm:inline">Prompts</span>
     </button>
     <button type="button"
       class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'imagine' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"

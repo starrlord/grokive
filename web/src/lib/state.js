@@ -85,6 +85,19 @@ export function setView(view) {
 export function setQuery(query) {
   filters.update((f) => ({ ...f, query }));
 }
+
+// Which Prompt Studio sub-tab is active. Lifted out of the component so the top-bar
+// island can jump straight to a tab (the "Prompts" → Saved button) and reflect which
+// one is showing. compose | scene | freeform are the authoring tabs; 'saved' is the library.
+export const studioTab = writable('compose');
+// Enter Prompt Studio. Pass a tab to land on it ('saved' powers the Prompts button);
+// with no arg, keep your current authoring tab but never land on Saved — so the ✦ Studio
+// button always opens the composer/authoring area, not the library.
+export function openStudio(tab) {
+  if (tab) studioTab.set(tab);
+  else studioTab.update((t) => (t === 'saved' ? 'compose' : t));
+  setView('studio');
+}
 export function toggleTag(tag) {
   filters.update((f) => ({
     ...f,
