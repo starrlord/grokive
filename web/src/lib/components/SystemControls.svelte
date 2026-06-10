@@ -6,6 +6,7 @@
   import { toast } from '$lib/toast.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfigModal from './ConfigModal.svelte';
+  import Popover from './Popover.svelte';
 
   let { onrefresh = () => {} } = $props();
 
@@ -61,7 +62,12 @@
   const pillText = $derived(
     status.running ? `${status.job === 'subtitles' ? 'Subtitles' : 'Syncing'}: ${status.step}`
       : status.step === 'error' ? (status.auth_hint ? 'Auth failed' : 'Failed')
-      : status.step === 'done' ? `Synced ${status.finished_at || ''}` : 'Ready'
+      : status.step === 'done' ? 'Synced' : 'Ready'
+  );
+  // The exact finish time moves to the hover so the pill stays compact (it was the
+  // longest thing in the top bar).
+  const pillTitle = $derived(
+    status.step === 'done' && status.finished_at ? `Synced ${status.finished_at} · view job log` : 'View job log'
   );
   const statusTone = $derived(
     status.running ? 'status-info'
@@ -145,33 +151,44 @@
 <div class="system-controls flex flex-wrap items-center gap-1.5">
   <!-- Status pill is hidden on phones to keep the top bar tidy; progress still
        surfaces via the disabled Sync button + a toast on finish. -->
-  <button class="status-btn hidden max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold md:inline-flex {statusTone}" onclick={() => (showLog = !showLog)} title="View job log">
+  <button class="status-btn hidden max-w-[min(16rem,48vw)] truncate rounded-full px-3 py-1.5 text-xs font-semibold md:inline-flex {statusTone}" onclick={() => (showLog = !showLog)} title={pillTitle}>
     <span class="status-dot" aria-hidden="true"></span>
     <span class="truncate">{logLabel}</span>
   </button>
   <span class="mx-0.5 hidden h-6 w-px self-center bg-line md:block" aria-hidden="true"></span>
   <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
-  {#if $settings.whisper_configured}
-    <button class="subtitle-btn grid h-9 w-9 place-items-center rounded-lg border text-[0.6875rem] font-black tracking-tight disabled:opacity-50" onclick={doSubs} disabled={status.running} title="Generate subtitles" aria-label="Generate subtitles">
-      CC
-    </button>
-  {/if}
-  <button class="grid h-9 w-9 place-items-center rounded-lg border border-line" title="Config" onclick={() => (showConfig = true)}>⚙</button>
+  <Popover align="right" ariaLabel="Settings" title="Settings"
+    triggerClass="grid h-9 w-9 place-items-center rounded-lg border border-line bg-[var(--surface-2)] text-base transition hover:border-[var(--accent)]">
+    {#snippet trigger()}<span aria-hidden="true">⚙</span>{/snippet}
+    {#snippet children(close)}
+      <div class="w-56 max-w-[calc(100vw-1rem)] rounded-card border border-line bg-[var(--surface-solid)] p-1.5 shadow-[0_18px_44px_-14px_rgba(0,0,0,0.6)]">
+        {#if $settings.whisper_configured}
+          <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-50"
+            disabled={status.running} onclick={() => { close(); doSubs(); }}>
+            <span aria-hidden="true" class="text-xs font-black tracking-tight text-[var(--accent)]">CC</span>
+            Generate subtitles
+          </button>
+        {/if}
+        <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)]"
+          onclick={() => { close(); showConfig = true; }}>
+          <span aria-hidden="true">⚙</span>
+          Configuration…
+        </button>
+      </div>
+    {/snippet}
+  </Popover>
 </div>
 
 <style>
-  .secondary-btn,
-  .subtitle-btn,
   .status-btn {
+    align-items: center;
+    gap: 0.45rem;
+    border: 1px solid var(--line);
     background: color-mix(in srgb, var(--surface-2) 72%, transparent);
     box-shadow: inset 0 1px 0 var(--surface-highlight);
     transition: background 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
   }
 
-  .secondary-btn:hover:not(:disabled),
-  .secondary-btn:focus-visible,
-  .subtitle-btn:hover:not(:disabled),
-  .subtitle-btn:focus-visible,
   .status-btn:hover,
   .status-btn:focus-visible {
     background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
@@ -180,17 +197,6 @@
     box-shadow:
       inset 0 1px 0 var(--surface-highlight),
       0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
-  }
-
-  .subtitle-btn {
-    border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
-    color: color-mix(in srgb, var(--accent) 84%, var(--ink) 16%);
-  }
-
-  .status-btn {
-    align-items: center;
-    border: 1px solid var(--line);
-    gap: 0.45rem;
   }
 
   .status-dot {

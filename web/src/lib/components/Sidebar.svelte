@@ -1,34 +1,18 @@
 <script>
-  import { filters, toggleTag, toggleModel, toggleResolution, setMediaType, clearFilters } from '$lib/state.js';
-  import PlaylistsPanel from './PlaylistsPanel.svelte';
+  import { filters, toggleTag, toggleModel, toggleResolution, clearFilters } from '$lib/state.js';
+  import Collapsible from './Collapsible.svelte';
 
-  let { facets = { tags: [], models: [] }, onplay = () => {}, onedit = () => {}, onbrowse = () => {} } = $props();
+  let { facets = { tags: [], models: [] }, onbrowse = () => {} } = $props();
 
   const topTags = $derived((facets.tags || []).slice(0, 12));
-  const types = [
-    { id: 'all', label: 'All' },
-    { id: 'image', label: 'Images' },
-    { id: 'video', label: 'Videos' }
-  ];
 </script>
 
-<!-- Just the content: the wrapper (desktop <aside> or mobile drawer) owns
-     width, scrolling and visibility so this can be reused in both. -->
+<!-- Filters only. Media type lives in the grid header (high-frequency, applies everywhere) and
+     Playlists moved to the Library page — so the sidebar is now a single-purpose: refine the grid.
+     The wrapper (desktop <aside> or mobile drawer) owns width, scrolling and visibility. -->
 <div class="p-4">
-  <div class="mb-5">
-    <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Media type</div>
-    <div class="grid grid-cols-3 gap-1 rounded-lg border border-line bg-[var(--surface-2)] p-1">
-      {#each types as t (t.id)}
-        <button type="button"
-          class="rounded-md py-1.5 text-sm font-semibold {$filters.mediaType === t.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted'}"
-          onclick={() => setMediaType(t.id)}>{t.label}</button>
-      {/each}
-    </div>
-  </div>
-
   {#if facets.resolutions?.length}
-    <div class="mb-5">
-      <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Resolution</div>
+    <Collapsible title="Resolution" count={facets.resolutions.length} open={false}>
       <div class="flex flex-wrap gap-1.5">
         {#each facets.resolutions as r (`${r.height}-${r.orientation}`)}
           {@const key = `${r.height}-${r.orientation}`}
@@ -37,15 +21,10 @@
             onclick={() => toggleResolution(key)}>{r.height}p {r.orientation} <span class="opacity-70">{r.count}</span></button>
         {/each}
       </div>
-    </div>
+    </Collapsible>
   {/if}
 
-  <div class="mb-5">
-    <div class="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
-      <span>Tags</span>
-      <button class="font-semibold normal-case text-[var(--accent)] hover:underline" onclick={onbrowse}>Browse all {facets.tags?.length || 0} →</button>
-    </div>
-
+  <Collapsible title="Tags">
     {#if $filters.tags.length}
       <div class="mb-2 flex flex-wrap gap-1.5">
         {#each $filters.tags as t (t)}
@@ -53,7 +32,6 @@
         {/each}
       </div>
     {/if}
-
     <div class="flex flex-wrap gap-1.5">
       {#each topTags as t (t.name)}
         {#if !$filters.tags.includes(t.name)}
@@ -61,13 +39,11 @@
         {/if}
       {/each}
     </div>
-  </div>
-
-  <PlaylistsPanel {onplay} {onedit} />
+    <button class="mt-2.5 text-xs font-semibold text-[var(--accent)] hover:underline" onclick={onbrowse}>Browse all {facets.tags?.length || 0} tags →</button>
+  </Collapsible>
 
   {#if facets.models?.length}
-    <div class="mb-5">
-      <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Models</div>
+    <Collapsible title="Models" count={facets.models.length}>
       <div class="flex flex-col gap-1">
         {#each facets.models as m (m.name)}
           <button type="button"
@@ -77,8 +53,8 @@
           </button>
         {/each}
       </div>
-    </div>
+    </Collapsible>
   {/if}
 
-  <button type="button" class="w-full rounded-lg border border-line py-2 text-sm font-semibold" onclick={clearFilters}>Clear filters</button>
+  <button type="button" class="w-full rounded-lg border border-line py-2 text-sm font-semibold transition hover:border-[var(--accent)]" onclick={clearFilters}>Clear filters</button>
 </div>

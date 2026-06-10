@@ -47,8 +47,7 @@
 {:else}
   <!-- Toolbar: title + count, name filter, ordering. -->
   <div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
-    <h1 class="text-lg font-extrabold tracking-tight text-ink">Collections</h1>
-    <span class="rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-xs font-semibold text-muted">{$collections.length}</span>
+    <span class="text-sm text-muted">{$collections.length} collection{$collections.length === 1 ? '' : 's'}</span>
     <div class="ml-auto flex w-full items-center gap-2 sm:w-auto">
       <SearchField bind:value={q} placeholder="Search collections…" ariaLabel="collection search"
         wrapperClass="min-w-0 flex-1 sm:w-60 sm:flex-none"

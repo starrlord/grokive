@@ -70,6 +70,9 @@ export const filters = writable({
 });
 
 export function setView(view) {
+  // Any top-level nav click exits an open collection — including re-clicking the section
+  // you're already in (e.g. tapping "Library" while inside a collection returns to its root).
+  activeCollectionId.set(null);
   filters.update((f) => {
     const changed = f.view !== view;
     return {

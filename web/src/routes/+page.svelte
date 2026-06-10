@@ -19,7 +19,8 @@
   import Lightbox from '$lib/components/Lightbox.svelte';
   import SelectBar from '$lib/components/SelectBar.svelte';
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
-  import CollectionsGrid from '$lib/components/CollectionsGrid.svelte';
+  import LibraryView from '$lib/components/LibraryView.svelte';
+  import MediaTypeTabs from '$lib/components/MediaTypeTabs.svelte';
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
@@ -346,21 +347,27 @@
        playlists) doesn't apply there, so hide it for that view. -->
   {#if $filters.view !== 'studio' && $filters.view !== 'imagine' && !onCollectionsLanding}
     <aside class="hidden w-80 shrink-0 overflow-y-auto border-r border-line lg:block" style="height: calc(100dvh - 56px)">
-      <Sidebar {facets} onplay={playPlaylist} onedit={(pl) => (editing = pl)} onbrowse={() => (showFilters = true)} />
+      <Sidebar {facets} onbrowse={() => (showFilters = true)} />
     </aside>
   {/if}
 
   <main class="min-w-0 flex-1 p-3 sm:p-4" style="padding-bottom: {$selectMode ? '5rem' : 'max(1rem, env(safe-area-inset-bottom))'}">
     {#if $filters.view === 'collections' && !activeCollection}
-      <CollectionsGrid onopen={openCollection} onplay={playCollection} onmovie={montageCollection} />
+      <LibraryView
+        onopencollection={openCollection} onplaycollection={playCollection} onmoviecollection={montageCollection}
+        onplayplaylist={playPlaylist} oneditplaylist={(pl) => (editing = pl)} />
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
-        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={() => ($activeCollectionId = null)}>Back</button>
+        <button type="button" class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)]" onclick={() => ($activeCollectionId = null)}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          Back
+        </button>
         <div class="min-w-[12rem] flex-1 sm:max-w-md">
           <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
             aria-label="Collection name" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
         </div>
         <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
+        <MediaTypeTabs class="ml-auto" />
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
@@ -383,11 +390,15 @@
       {#if loading}<p class="py-6 text-center text-sm text-muted">Loading…</p>{/if}
     {:else if $filters.view === 'canvases' && $filters.canvas}
       <div class="mb-3 flex flex-wrap items-center gap-2">
-        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold" onclick={closeCanvas}>Back</button>
+        <button type="button" class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)]" onclick={closeCanvas}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          Back
+        </button>
         <div class="min-w-0 flex-1">
           <h1 class="line-clamp-2 text-base font-extrabold text-ink sm:text-lg" title={activeCanvasTitle}>{activeCanvasTitle}</h1>
           <p class="text-sm text-muted">{displayTotal.toLocaleString()} items</p>
         </div>
+        <MediaTypeTabs class="ml-auto" />
         {#if hasCanvasRefinements}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={clearCanvasRefinements}>Reset filters ✕</button>
         {/if}
@@ -440,6 +451,7 @@
         {#if hasActiveFilters($filters)}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={resetAll}>Reset filters ✕</button>
         {/if}
+        <MediaTypeTabs class="ml-auto" />
       </div>
 
       {#if displayItems.length === 0 && !loading}
@@ -526,8 +538,6 @@
       </div>
       <div class="min-h-0 flex-1 overflow-y-auto">
         <Sidebar {facets}
-          onplay={(pl) => { menuOpen = false; playPlaylist(pl); }}
-          onedit={(pl) => { menuOpen = false; editing = pl; }}
           onbrowse={() => { menuOpen = false; showFilters = true; }} />
       </div>
     </div>
