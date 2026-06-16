@@ -285,18 +285,22 @@ def query_media(
     favorites: Iterable[str] = (),
     stashed: Iterable[str] = (),
     collection_ids: Iterable[str] = (),
+    hidden: Iterable[str] = (),
     start: str | None = None,
     end: str | None = None,
 ) -> dict[str, Any]:
     """Paginated, filtered media query. ``favorites``/``stashed`` are id sets the
     caller supplies (from library.json); they drive Favorites/Archive and the
     global "hide archived from Recent" rule. ``all`` intentionally bypasses that
-    hiding so users can find anything that still exists on disk."""
+    hiding so users can find anything that still exists on disk. ``hidden`` is the
+    media of locked collections — excluded from EVERY view (including ``all`` and
+    search) until the collection is unlocked."""
     conn = _connect(db_path)
     try:
         has_stash = _temp_id_table(conn, "_stash", stashed)
         has_fav = _temp_id_table(conn, "_fav", favorites)
         has_collection = _temp_id_table(conn, "_collection", collection_ids)
+        has_hidden = _temp_id_table(conn, "_hidden", hidden)
 
         where: list[str] = []
         params: list[Any] = []
@@ -304,6 +308,9 @@ def query_media(
 
         if has_collection:
             where.append("m.id IN (SELECT id FROM _collection)")
+        # Locked-collection media are hidden everywhere (no view opts out) until unlocked.
+        if has_hidden:
+            where.append("m.id NOT IN (SELECT id FROM _hidden)")
 
         if q.strip():
             match = _fts_query(q)
@@ -506,19 +513,25 @@ def facets(
     favorites: Iterable[str] = (),
     stashed: Iterable[str] = (),
     collection_ids: Iterable[str] = (),
+    hidden: Iterable[str] = (),
     start: str | None = None,
     end: str | None = None,
 ) -> dict[str, Any]:
-    """Tag / model / canvas / resolution counts for the current browsing scope."""
+    """Tag / model / canvas / resolution counts for the current browsing scope.
+    ``hidden`` (locked-collection media) is excluded so counts never leak them."""
     conn = _connect(db_path)
     try:
         has_stash = _temp_id_table(conn, "_stash", stashed)
         has_fav = _temp_id_table(conn, "_fav", favorites)
         has_collection = _temp_id_table(conn, "_collection", collection_ids)
+        has_hidden = _temp_id_table(conn, "_hidden", hidden)
 
         where: list[str] = []
         params: list[Any] = []
         joins = ""
+
+        if has_hidden:
+            where.append("m.id NOT IN (SELECT id FROM _hidden)")
 
         if q.strip():
             match = _fts_query(q)

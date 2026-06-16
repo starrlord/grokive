@@ -10,7 +10,7 @@
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
     collections, activeCollectionId, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
-    galleryReload
+    galleryReload, basket, enqueueBasket
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -25,6 +25,8 @@
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
   import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
+  import MontageBasketChip from '$lib/components/MontageBasketChip.svelte';
+  import ImportModal from '$lib/components/ImportModal.svelte';
   import ScrollToTop from '$lib/components/ScrollToTop.svelte';
   import PromptStudio from '$lib/components/PromptStudio.svelte';
   import ImagineStudio from '$lib/components/ImagineStudio.svelte';
@@ -48,6 +50,7 @@
   let showCollectionPicker = $state(false);
   let showMovie = $state(false);
   let movieVideoIds = $state([]); // video ids fed to the Montage panel (selection or a collection)
+  let importFiles = $state(null); // FileList from a folder Import picker (drives ImportModal)
   let showFilters = $state(false);
   let menuOpen = $state(false); // mobile sidebar drawer
   let sentinel = $state(null);
@@ -270,19 +273,46 @@
   function openCollection(c) {
     $activeCollectionId = c.id;
   }
+  // After a folder import lands its new collection, refresh the list and (if the user
+  // clicked "Open collection") drill straight into it. The Library view is already
+  // active — the Import picker lives on the collections landing — so no view switch.
+  async function onImportCreated(result, open) {
+    await loadCollections();
+    if (open && result?.collection_id) $activeCollectionId = result.collection_id;
+  }
   async function playCollection(c, orderedItems = null) {
     const source = Array.isArray(orderedItems) ? orderedItems : await mediaByIds(c.ids);
     const list = source.filter((v) => v.media_type === 'video');
     if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
-  async function montageCollection(c) {
-    // Feed every video in the collection to the Montage panel — same as selecting
-    // them all, but without entering select mode.
+  async function enqueueCollectionToBasket(c) {
+    // The collection card's music icon pours every montage-eligible video in the
+    // collection into the cross-library queue (basket) — so several collections can
+    // be stacked into one montage. Launch happens from the basket chip. Even a single
+    // video is worth adding (you may add more from elsewhere); the launch enforces >=2.
     const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
-    if (list.length < 2) { toast('A montage needs at least 2 non-montage videos in the collection.', { type: 'error' }); return; }
+    if (!list.length) { toast('This collection has no montage-eligible videos.', { type: 'error' }); return; }
+    enqueueBasket(list.map((v) => v.id));
+    toast(`Added ${list.length} video${list.length === 1 ? '' : 's'} to the montage queue`, { type: 'success' });
+  }
+  // Fire a montage from the cross-library queue (basket). Resolves ids server-side
+  // (NOT the grid-scoped `byId` map) so clips queued from collections we've since
+  // navigated away from are still found. Hands off to the montage panel the same way
+  // a collection does; the basket itself is left intact so an aborted launch keeps the picks.
+  async function launchBasketMontage() {
+    const list = (await mediaByIds($basket)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
+    if (list.length < 2) { toast('A montage needs at least 2 non-montage videos in the queue.', { type: 'error' }); return; }
     movieVideoIds = list.map((v) => v.id);
     showMovie = true;
+  }
+  // Pour the current (montage-eligible) multi-select into the cross-library queue,
+  // without leaving select mode — so you can keep selecting elsewhere and add more.
+  function enqueueSelectionToBasket() {
+    const ids = montageVideoIds;
+    if (!ids.length) { toast('Select some videos to queue for montage.', { type: 'error' }); return; }
+    enqueueBasket(ids);
+    toast(`Added ${ids.length} to montage queue`, { type: 'success' });
   }
   function saveCollectionName() {
     if (!activeCollection) return;
@@ -393,7 +423,8 @@
   <main class="min-w-0 flex-1 p-3 sm:p-4" style="padding-bottom: {$selectMode ? '5rem' : 'max(1rem, env(safe-area-inset-bottom))'}">
     {#if $filters.view === 'collections' && !activeCollection}
       <LibraryView
-        onopencollection={openCollection} onplaycollection={playCollection} onmoviecollection={montageCollection}
+        onopencollection={openCollection} onplaycollection={playCollection} onqueuecollection={enqueueCollectionToBasket}
+        onimportcollection={(files) => (importFiles = files)}
         onplayplaylist={playPlaylist} oneditplaylist={(pl) => (editing = pl)} />
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
@@ -523,6 +554,7 @@
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
     onmovie={() => { movieVideoIds = montageVideoIds; showMovie = true; }}
+    onbasket={enqueueSelectionToBasket}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
 
@@ -547,9 +579,17 @@
   <GenerateMovie videoIds={movieVideoIds} onclose={() => { showMovie = false; setSelectMode(false); clearSelection(); }} />
 {/if}
 
+{#if importFiles}
+  <ImportModal files={importFiles} onclose={() => (importFiles = null)} oncreated={onImportCreated} />
+{/if}
+
 <!-- Always-on background-task indicator for the montage render: persists across
      views/select-mode until the result is committed or dismissed; click reopens. -->
 <MontageStatusChip onopen={() => { movieVideoIds = montageVideoIds; showMovie = true; }} />
+
+<!-- Cross-library Montage queue: floating chip (bottom-left) that surfaces clips
+     gathered across collections/views and launches the montage from them. -->
+<MontageBasketChip onmontage={launchBasketMontage} />
 
 <!-- Back-to-top: appears after scrolling down a long grid. Lifted above the bottom
      SelectBar (select mode) and the montage chip so it never sits under either. -->

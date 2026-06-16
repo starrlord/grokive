@@ -92,11 +92,20 @@ _STAGE_ORDER = ["analyzing_audio", "analyzing_motion", "planning", "rendering"]
 # is its calm sibling — letterboxed, phrase-paced calm footage, slow push-in.
 PRESETS: dict[str, dict] = {
     "classic":   {"enhanced_analysis": False, "rhythm": "density", "motion_weight": W_MOTION,
-                  "transitions": "none",    "fill": "fit",   "push_in": 0.0,  "punch": 0.0},
+                  "transitions": "none",    "fill": "fit",   "push_in": 0.0,  "punch": 0.0,
+                  "overuse_w": W_OVERUSE, "overuse_p": 1.0},
     "cinematic": {"enhanced_analysis": True,  "rhythm": "density", "motion_weight": W_MOTION,
-                  "transitions": "accents", "fill": "cover", "push_in": 0.08, "punch": 0.12},
+                  "transitions": "accents", "fill": "cover", "push_in": 0.08, "punch": 0.12,
+                  # Strong, super-linear reuse penalty. With dozens of source clips the
+                  # default soft 0.5·(use/cap) lets a few uniformly-busy clips win again and
+                  # again while many clips go unused (they never crack the top candidates).
+                  # Squaring the ratio and raising the weight keeps reuse mild up to a clip's
+                  # fair share, then steep past it — forcing the planner to spread across the
+                  # whole library. See overuse_p in plan_cuts.
+                  "overuse_w": 1.0, "overuse_p": 2.0},
     "moody":     {"enhanced_analysis": True,  "rhythm": "phrase",  "motion_weight": 0.0,
-                  "transitions": "accents", "fill": "fit",   "push_in": 0.12, "punch": 0.0},
+                  "transitions": "accents", "fill": "fit",   "push_in": 0.12, "punch": 0.0,
+                  "overuse_w": W_OVERUSE, "overuse_p": 1.0},
 }
 DEFAULT_PRESET = "classic"
 
@@ -876,6 +885,7 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
               tightness: float, target_duration: float | None,
               seed: int | None = None, transitions: str = "none",
               rhythm: str = "density", motion_weight: float = W_MOTION,
+              overuse_w: float = W_OVERUSE, overuse_p: float = 1.0,
               forced_speech: list[SpeechMoment] | None = None) -> EDL:
     """Turn a beat grid + motion curves into an ordered cut list.
 
@@ -1016,6 +1026,16 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
         for c in curves:
             if c.duration < d - 1e-3:
                 continue  # too short to fill this interval
+            # Reuse penalties are per-clip (constant across its windows/anchors), so
+            # compute them once. Recency blocks a near-back-to-back repeat; overuse
+            # spreads usage across the library. overuse_p > 1 makes the overuse penalty
+            # super-linear — mild up to a clip's fair share, then steep past it. At
+            # overuse_p == 1.0 this is exactly the original soft penalty (classic/moody,
+            # byte-for-byte unchanged); cinematic raises both for real coverage.
+            recent_pen = W_RECENT if c.clip_id in recent[-RECENT_K:] else 0.0
+            overuse_ratio = use_count[c.clip_id] / max_uses
+            overuse_pen = overuse_w * (overuse_ratio ** overuse_p
+                                       if overuse_p != 1.0 else overuse_ratio)
             for _, peak, window_start in c.top_windows(d, TOP_WINDOWS_K):
                 for anchor_offset, anchor_bonus in anchors:
                     desired = peak - anchor_offset
@@ -1029,8 +1049,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
                              + W_BEAT_ALIGN * align_score
                              + anchor_bonus
                              - W_WINDOW_FIT * window_fit
-                             - (W_RECENT if c.clip_id in recent[-RECENT_K:] else 0.0)
-                             - W_OVERUSE * (use_count[c.clip_id] / max_uses))
+                             - recent_pen
+                             - overuse_pen)
                     scored.append((score, c, in_point))
 
         if not scored:  # no clip long enough; use the longest, full length
@@ -1431,7 +1451,10 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     progress("planning", _overall("planning", 0.0), 0.0, "Planning cuts…")
     edl = plan_cuts(grid, curves, tightness=tightness, target_duration=target,
                     seed=seed, transitions=transitions, rhythm=rhythm,
-                    motion_weight=motion_weight, forced_speech=forced_speech)
+                    motion_weight=motion_weight,
+                    overuse_w=float(cfg.get("overuse_w", W_OVERUSE)),
+                    overuse_p=float(cfg.get("overuse_p", 1.0)),
+                    forced_speech=forced_speech)
     (work_dir / "edl.json").write_text(edl.to_json(), encoding="utf-8")
     n_trans = sum(1 for e in edl.entries if e.transition_dur > 0)
     n_speak = sum(1 for e in edl.entries if e.speak)

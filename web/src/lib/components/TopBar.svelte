@@ -59,6 +59,11 @@
     if (v.id === 'archive' && $counts.archived) return `Archive (${$counts.archived})`;
     return v.label;
   }
+
+  // Mobile/tablet (<lg) collapses the pill row into a single "current view" menu — the active
+  // view object backs its trigger label. studio/imagine aren't in `views` (entered via the
+  // workspace icons), so the trigger falls back to "Browse" while one of those is open.
+  const activeView = $derived(views.find((v) => v.id === $filters.view));
 </script>
 
 <header class="topbar glass sticky top-0 z-30 flex flex-col gap-2 px-4 py-2.5" style="padding-top: max(0.625rem, env(safe-area-inset-top))">
@@ -129,7 +134,33 @@
 
   <!-- Tier 2 — navigation · workspaces · select. The "where you go" row. -->
   <div class="flex items-center gap-2">
-    <nav class="flex min-w-0 flex-1 gap-1 overflow-x-auto rounded-full border border-line bg-[var(--surface-2)] p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+    <!-- Below lg the six view-pills would starve inside an invisible horizontal scroll, so they
+         collapse into one full-width "current view" menu (iPhone + iPad-portrait). The pill nav
+         returns at lg, where the persistent sidebar appears and there's room for it. -->
+    <div class="min-w-0 flex-1 lg:hidden">
+      <Popover align="left" title="Switch view"
+        triggerClass="inline-flex min-h-[44px] w-full items-center justify-between gap-2 rounded-full border border-line bg-[var(--surface-2)] px-4 text-sm font-semibold text-ink">
+        {#snippet trigger()}
+          <span class="truncate">{activeView ? label(activeView) : 'Browse'}</span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        {/snippet}
+        {#snippet children(close)}
+          <div class="w-[14rem] max-w-[calc(100vw-1rem)] rounded-card border border-line bg-[var(--surface-solid)] p-1.5 shadow-[0_18px_44px_-14px_rgba(0,0,0,0.6)]">
+            {#each views as v (v.id)}
+              <button type="button"
+                class="flex min-h-[44px] w-full items-center justify-between gap-3 rounded-lg px-3 text-left text-sm font-semibold transition {$filters.view === v.id ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'text-ink hover:bg-[var(--surface-2)]'}"
+                aria-current={$filters.view === v.id ? 'page' : undefined}
+                onclick={() => { setView(v.id); close(); }}>
+                <span class="truncate">{label(v)}</span>
+                {#if $filters.view === v.id}<svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>{/if}
+              </button>
+            {/each}
+          </div>
+        {/snippet}
+      </Popover>
+    </div>
+
+    <nav class="hidden min-w-0 flex-1 gap-1 rounded-full border border-line bg-[var(--surface-2)] p-1 lg:flex lg:overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {#each views as v (v.id)}
         <button type="button"
           class="shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-sm font-semibold transition {$filters.view === v.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted hover:text-ink'}"

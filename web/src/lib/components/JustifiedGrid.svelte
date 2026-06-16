@@ -1,6 +1,6 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -232,16 +232,25 @@
           {#if !selectMode}
             {@const isStashed = $stashed.has(it.id)}
             <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1.5">
+              <button type="button" aria-label="Favorite" title="Favorite"
+                class="card-action-btn {fav ? 'text-[var(--favorite)]' : ''}"
+                onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
               {#if it.media_type !== 'video'}
                 <button type="button" aria-label="Use as Imagine source" title="Use as source for Grok Imagine"
                   class="card-action-btn"
                   onclick={(e) => { e.stopPropagation(); sendToImagine(it); }}>
                   <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
                 </button>
+              {:else if !isMontage}
+                <!-- Add this video to the cross-library Montage queue. Music-note glyph
+                     ties it to the montage feature; accent-filled when already queued. -->
+                {@const queued = basketMembers.has(it.id)}
+                <button type="button" aria-label={queued ? 'Remove from montage queue' : 'Add to montage queue'} title={queued ? 'In montage queue — click to remove' : 'Add to montage queue'} aria-pressed={queued}
+                  class="card-action-btn {queued ? 'card-action-active' : ''}"
+                  onclick={(e) => { e.stopPropagation(); toggleBasket(it.id); }}>
+                  <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                </button>
               {/if}
-              <button type="button" aria-label="Favorite" title="Favorite"
-                class="card-action-btn {fav ? 'text-[var(--favorite)]' : ''}"
-                onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
               <button type="button" aria-label={isStashed ? 'Restore' : 'Archive'} title={isStashed ? 'Restore' : 'Archive'}
                 class="card-action-btn {isStashed ? 'card-action-active' : ''}"
                 onclick={(e) => { e.stopPropagation(); setStashed([it.id], !isStashed); }}>

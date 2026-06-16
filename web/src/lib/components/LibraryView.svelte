@@ -7,8 +7,8 @@
   import { playlists, collections } from '$lib/state.js';
 
   let {
-    onopencollection = () => {}, onplaycollection = () => {}, onmoviecollection = () => {},
-    onplayplaylist = () => {}, oneditplaylist = () => {}
+    onopencollection = () => {}, onplaycollection = () => {}, onqueuecollection = () => {},
+    onimportcollection = () => {}, onplayplaylist = () => {}, oneditplaylist = () => {}
   } = $props();
 
   let tab = $state('collections'); // collections | playlists
@@ -30,7 +30,7 @@
 </div>
 
 {#if tab === 'collections'}
-  <CollectionsGrid onopen={onopencollection} onplay={onplaycollection} onmovie={onmoviecollection} />
+  <CollectionsGrid onopen={onopencollection} onplay={onplaycollection} onqueue={onqueuecollection} onimport={onimportcollection} />
 {:else}
   <PlaylistsGrid onplay={onplayplaylist} onedit={oneditplaylist} />
 {/if}

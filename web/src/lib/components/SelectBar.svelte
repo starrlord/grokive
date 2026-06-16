@@ -11,7 +11,7 @@
   const movieRunning = $derived($movieJob.running);
   const moviePct = $derived(Math.round(($movieJob.progress || 0) * 100));
 
-  let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {} } = $props();
+  let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
@@ -126,6 +126,11 @@
           <span class="text-xs">⇩</span>
           <span>Export</span>
         {/if}
+      </button>
+      <button class="select-btn" disabled={!videoIds.length} onclick={() => onbasket()}
+              title="Add the selected videos to the cross-library Montage queue">
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+        + Queue
       </button>
       <button class="select-btn montage-btn" class:montage-running={movieRunning}
               disabled={videoIds.length < 2 && !movieRunning} onclick={() => onmovie()}

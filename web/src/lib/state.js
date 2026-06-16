@@ -268,6 +268,7 @@ export async function removeMedia(ids) {
       cover_id: idSet.has(String(coll.cover_id)) ? '' : coll.cover_id
     })));
     selection.update((sel) => sel.filter((id) => !idSet.has(String(id))));
+    basket.update((b) => b.filter((id) => !idSet.has(String(id))));
     toast(list.length === 1 ? 'Deleted' : `Deleted ${list.length} items`, { type: 'success' });
   } catch (e) {
     deleted.update((s) => new Set([...s].filter((id) => !idSet.has(id)))); // revert hide
@@ -324,6 +325,49 @@ selection.subscribe((ids) => {
   for (const id of selectionMembers) if (!next.has(id)) selectionMembers.delete(id);
   for (const id of ids) selectionMembers.add(id); // add() no-ops on existing keys
 });
+
+// --- Montage basket (cross-library queue) -----------------------------------
+// A SECOND ordered-id store, deliberately separate from `selection`: nothing in
+// setSelectMode / clearSelection / the page's context-scoped clearing effect ever
+// touches it, so videos gathered across different collections, canvases and views
+// survive navigation. That separation IS the feature — it's solved by construction,
+// not by a guard that could rot. Add-order is the montage order. localStorage-backed
+// (same LS/persist tier as theme/mode) so an accidental reload mid-gather doesn't
+// lose the picks; it's a scratch tray, so it intentionally isn't server-synced.
+export const basket = writable(LS('basket', []));
+basket.subscribe((ids) => persist('basket', ids));
+
+// Per-card membership mirror — same per-key reactive trick as selectionMembers, so
+// toggling one card only re-renders that card, not every visible cell.
+export const basketMembers = new SvelteSet();
+basket.subscribe((ids) => {
+  const next = new Set(ids.map(String));
+  for (const id of basketMembers) if (!next.has(id)) basketMembers.delete(id);
+  for (const id of next) basketMembers.add(id);
+});
+
+export function toggleBasket(id) {
+  const s = String(id);
+  basket.update((b) => (b.includes(s) ? b.filter((x) => x !== s) : [...b, s]));
+}
+// Add many ids at once (e.g. pouring an in-context multi-select into the basket),
+// preserving order and skipping dupes — same shape as addSelection.
+export function enqueueBasket(ids) {
+  basket.update((b) => {
+    const next = [...b];
+    const seen = new Set(next);
+    for (const raw of ids || []) {
+      const id = String(raw);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      next.push(id);
+    }
+    return next;
+  });
+}
+export function clearBasket() {
+  basket.set([]);
+}
 
 // --- Playlists --------------------------------------------------------------
 export const playlists = writable([]);

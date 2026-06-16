@@ -19,7 +19,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -319,6 +319,15 @@
           title="Use as source for Grok Imagine" aria-label="Use as Imagine source"
           onclick={() => { sendToImagine(item); close(); }}>
           <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+        </button>
+      {:else if item.model !== 'Beat Montage'}
+        <!-- Add this video to the cross-library Montage queue. Stays open (no close())
+             so you can keep browsing and queueing across collections. -->
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg {basketMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
+          title={basketMembers.has(item.id) ? 'In montage queue — click to remove' : 'Add to montage queue'}
+          aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add to montage queue'} aria-pressed={basketMembers.has(item.id)}
+          onclick={() => toggleBasket(item.id)}>
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
         </button>
       {/if}
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"

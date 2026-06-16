@@ -44,6 +44,7 @@ from flask import (
     send_from_directory,
     session,
 )
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import db
 import moviegen
@@ -190,9 +191,11 @@ if not _session_secret:
 app.secret_key = _session_secret
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-# Hard cap on any request body so oversized uploads (Imagine image upload, montage song)
-# are rejected (413) during parsing — before a handler can read them into memory.
-app.config["MAX_CONTENT_LENGTH"] = 128 * 1024 * 1024
+# Hard cap on any request body. Raised to 2 GB so the folder Import can take large
+# source videos (it streams each upload straight to disk, one file per request, never
+# buffering it in memory). Stricter per-route limits still apply where wanted (e.g. the
+# Imagine image upload caps itself at 30 MB) — this is only the outer backstop.
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024
 # SESSION_COOKIE_SECURE: true | false | auto (default). 'auto' = secure when behind an
 # HTTPS-terminating proxy (TRUST_PROXY on). Never forced on plain HTTP, or the login
 # cookie would be dropped and you could never stay signed in.
@@ -804,11 +807,17 @@ def index() -> Response:
 
 @app.get("/media/<path:relpath>")
 def media(relpath: str) -> Response:
+    # Locked-collection media must not be reachable by direct URL either (the filename
+    # stem is the media id). 404 keeps a locked id indistinguishable from a missing one.
+    if _is_media_hidden(Path(relpath).stem):
+        abort(404)
     return send_from_directory(MEDIA_DIR, relpath, conditional=True)
 
 
 @app.get("/thumbnails/<path:relpath>")
 def thumbnails(relpath: str) -> Response:
+    if _is_media_hidden(Path(relpath).stem):
+        abort(404)
     return send_from_directory(THUMBS_DIR, relpath, conditional=True)
 
 
@@ -1114,7 +1123,7 @@ def _clean_collection(entry: dict) -> dict | None:
     if not name:
         return None
     now = time.strftime("%Y-%m-%d")
-    return {
+    out = {
         "id": str(entry.get("id") or "")[:64] or name,
         "name": name,
         "ids": ids,
@@ -1122,6 +1131,15 @@ def _clean_collection(entry: dict) -> dict | None:
         "created_at": str(entry.get("created_at") or now)[:32],
         "updated_at": str(entry.get("updated_at") or now)[:32],
     }
+    # Password-lock state rides through every write. It's server-authoritative: the
+    # bulk /api/collections POST re-supplies it from disk, and the dedicated lock
+    # endpoints set it — so a normal client save can never forge or clear a lock here.
+    if entry.get("locked") and entry.get("pass_hash"):
+        out["locked"] = True
+        out["pass_hash"] = str(entry.get("pass_hash"))[:512]
+        if entry.get("locked_at"):
+            out["locked_at"] = str(entry.get("locked_at"))[:32]
+    return out
 
 
 def _load_collections(strict: bool = False) -> list[dict]:
@@ -1146,20 +1164,125 @@ def _load_collections(strict: bool = False) -> list[dict]:
     return clean
 
 
+# --------------------------------------------------------------------------- #
+# Collection locks — password-gate a collection so its media disappear from every
+# listing (All Media / Archive / search / facets), the collection card's cover, and
+# direct file/thumbnail URLs until unlocked. Unlock is per-browser-session and lasts
+# 24 h. This gates ACCESS within the already-authenticated app — it is NOT encryption;
+# the files stay on disk in the clear.
+# --------------------------------------------------------------------------- #
+
+UNLOCK_TTL = 24 * 3600  # seconds a successful unlock lasts (per session)
+_locked_cache: dict = {"mtime": None, "map": {}}
+_locked_cache_lock = threading.Lock()
+
+
+def _locked_collections_map() -> dict[str, frozenset]:
+    """{collection_id: frozenset(media_ids)} for every password-locked collection,
+    cached on collections.json mtime so the per-file gates stay cheap (a library with
+    no locks pays nothing)."""
+    try:
+        mtime = COLLECTIONS_FILE.stat().st_mtime if COLLECTIONS_FILE.exists() else 0.0
+    except OSError:
+        mtime = 0.0
+    with _locked_cache_lock:
+        if _locked_cache["mtime"] == mtime:
+            return _locked_cache["map"]
+    built: dict[str, frozenset] = {}
+    for coll in _load_collections():
+        if coll.get("locked") and coll.get("pass_hash"):
+            built[str(coll.get("id"))] = frozenset(str(i) for i in coll.get("ids", []))
+    with _locked_cache_lock:
+        _locked_cache["mtime"] = mtime
+        _locked_cache["map"] = built
+    return built
+
+
+def _session_unlocked(prune: bool = True) -> set[str]:
+    """Collection ids unlocked in THIS session, expired grants dropped. ``prune`` is
+    False on the hot file-serving path so it never rewrites the session cookie."""
+    grants = session.get("unlocked")
+    if not isinstance(grants, dict) or not grants:
+        return set()
+    now = time.time()
+    valid = {cid: exp for cid, exp in grants.items() if isinstance(exp, (int, float)) and exp > now}
+    if prune and len(valid) != len(grants):
+        session["unlocked"] = valid
+    return set(valid)
+
+
+def _grant_unlock(cid: str) -> None:
+    grants = dict(session.get("unlocked") or {})
+    grants[str(cid)] = time.time() + UNLOCK_TTL
+    session["unlocked"] = grants
+    session.permanent = True
+
+
+def _drop_unlock(cid: str) -> None:
+    grants = dict(session.get("unlocked") or {})
+    if grants.pop(str(cid), None) is not None:
+        session["unlocked"] = grants
+
+
+def _hidden_media_ids() -> set[str]:
+    """All media ids in a locked collection this session hasn't unlocked."""
+    locked = _locked_collections_map()
+    if not locked:
+        return set()
+    unlocked = _session_unlocked()
+    out: set[str] = set()
+    for cid, ids in locked.items():
+        if cid not in unlocked:
+            out |= ids
+    return out
+
+
+def _is_media_hidden(media_id: str) -> bool:
+    """Per-file membership check for the /media + /thumbnails gates (no session write)."""
+    locked = _locked_collections_map()
+    if not locked:
+        return False
+    unlocked = _session_unlocked(prune=False)
+    mid = str(media_id)
+    return any(cid not in unlocked and mid in ids for cid, ids in locked.items())
+
+
 def _collection_summaries(collections: list[dict]) -> list[dict]:
     if not DB_FILE.exists():
         rebuild_db()
+    unlocked = _session_unlocked()
+    grants = session.get("unlocked") or {}
     summaries = []
     for coll in collections:
+        cid = str(coll.get("id"))
+        is_locked = bool(coll.get("locked") and coll.get("pass_hash"))
+        is_unlocked = cid in unlocked
         media = db.media_by_ids(DB_FILE, coll.get("ids", []))
+        # Never leak the password hash to the client.
+        base = {k: v for k, v in coll.items() if k != "pass_hash"}
+        if is_locked and not is_unlocked:
+            # Sealed card: size counts only — no thumbnails, no member ids.
+            summaries.append({
+                **base, "ids": [], "cover_id": "", "cover": None, "covers": [],
+                "item_count": len(media),
+                "video_count": sum(1 for it in media if it.get("media_type") == "video"),
+                "image_count": sum(1 for it in media if it.get("media_type") == "image"),
+                "locked": True, "unlocked": False, "unlock_expires": None,
+            })
+            continue
         ids = [it["id"] for it in media]
-        cover_id = coll.get("cover_id") if coll.get("cover_id") in ids else (ids[0] if ids else "")
+        # Covers reflect the collection's MOST-RECENT content, not the first items
+        # ever added: media_by_ids preserves insertion order (oldest-first), so sort
+        # by created_at desc just for the cover/mosaic. `ids` stays in insertion order
+        # (it drives playback / montage). An explicitly-set cover_id still wins.
+        recent = sorted(media, key=lambda it: it.get("created_at") or "", reverse=True)
+        cover_id = coll.get("cover_id") if coll.get("cover_id") in ids else (recent[0]["id"] if recent else "")
         cover_item = next((it for it in media if it["id"] == cover_id), None)
-        covers = [it.get("thumb") for it in media if it.get("thumb")][:4]
+        covers = [it.get("thumb") for it in recent if it.get("thumb")][:4]
         videos = sum(1 for it in media if it.get("media_type") == "video")
         images = sum(1 for it in media if it.get("media_type") == "image")
         summaries.append({
-            **coll,
+            **base,
             "ids": ids,
             "cover_id": cover_id,
             "cover": cover_item.get("thumb") if cover_item else (covers[0] if covers else None),
@@ -1167,6 +1290,9 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
             "item_count": len(media),
             "video_count": videos,
             "image_count": images,
+            "locked": is_locked,
+            "unlocked": is_unlocked if is_locked else False,
+            "unlock_expires": (grants.get(cid) if (is_locked and is_unlocked) else None),
         })
     return summaries
 
@@ -1184,15 +1310,260 @@ def api_collections_post() -> Response:
     incoming = payload.get("collections")
     if not isinstance(incoming, list):
         return jsonify(ok=False, error="Expected a 'collections' array."), 400
+    # Lock state is server-authoritative: a bulk client save can never set or clear it.
+    # Re-supply each collection's lock fields from disk (and strip any the client sent).
+    existing = {str(c.get("id")): c for c in _load_collections()}
     clean = []
     for entry in incoming[:1000]:
         if not isinstance(entry, dict):
             continue
+        prior = existing.get(str(entry.get("id")))
+        if prior and prior.get("locked") and prior.get("pass_hash"):
+            entry = {**entry, "locked": True, "pass_hash": prior["pass_hash"], "locked_at": prior.get("locked_at")}
+        else:
+            entry = {k: v for k, v in entry.items() if k not in ("locked", "pass_hash", "locked_at")}
         coll = _clean_collection(entry)
         if coll:
             clean.append(coll)
     _atomic_write_json(COLLECTIONS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
+
+
+@app.post("/api/collections/<cid>/lock")
+def api_collection_lock(cid: str) -> Response:
+    """Set (or change) a collection's password and lock it. Allowed only when the
+    collection is currently accessible (not locked, or already unlocked this session),
+    so a locked collection can't be silently re-passworded by someone without access."""
+    pw = str((request.get_json(silent=True) or {}).get("password") or "")
+    if not pw:
+        return jsonify(ok=False, error="A password is required."), 400
+    collections = _load_collections(strict=True)
+    coll = next((c for c in collections if str(c.get("id")) == cid), None)
+    if coll is None:
+        return jsonify(ok=False, error="Collection not found."), 404
+    if (coll.get("locked") and coll.get("pass_hash")) and cid not in _session_unlocked():
+        return jsonify(ok=False, error="Unlock the collection before changing its password."), 403
+    coll["locked"] = True
+    coll["pass_hash"] = generate_password_hash(pw)
+    coll["locked_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+    _drop_unlock(cid)  # locking takes effect immediately
+    return jsonify(ok=True, locked=True)
+
+
+@app.post("/api/collections/<cid>/unlock")
+def api_collection_unlock(cid: str) -> Response:
+    """Verify a collection's password; on success unlock it for this session for 24 h."""
+    ip = request.remote_addr or "?"
+    wait = _login_retry_after(ip)
+    if wait:
+        return jsonify(ok=False, error=f"Too many attempts. Try again in {wait} s."), 429
+    pw = str((request.get_json(silent=True) or {}).get("password") or "")
+    coll = next((c for c in _load_collections() if str(c.get("id")) == cid), None)
+    if coll is None or not (coll.get("locked") and coll.get("pass_hash")):
+        return jsonify(ok=False, error="Collection is not locked."), 400
+    if not check_password_hash(coll["pass_hash"], pw):
+        _record_login_fail(ip)
+        return jsonify(ok=False, error="Incorrect password."), 403
+    _clear_login_fails(ip)
+    _grant_unlock(cid)
+    return jsonify(ok=True, unlocked=True, expires=(session.get("unlocked") or {}).get(cid))
+
+
+@app.post("/api/collections/<cid>/relock")
+def api_collection_relock(cid: str) -> Response:
+    """Re-lock now: revoke this session's unlock grant for the collection."""
+    _drop_unlock(cid)
+    return jsonify(ok=True, locked=True)
+
+
+@app.post("/api/collections/relock-all")
+def api_collections_relock_all() -> Response:
+    """Panic re-lock: revoke every active unlock grant in this session."""
+    session["unlocked"] = {}
+    return jsonify(ok=True)
+
+
+@app.post("/api/collections/<cid>/remove-lock")
+def api_collection_remove_lock(cid: str) -> Response:
+    """Remove password protection entirely. Requires the collection's current password
+    (forgotten? use force-unlock with the admin password, then remove)."""
+    pw = str((request.get_json(silent=True) or {}).get("password") or "")
+    collections = _load_collections(strict=True)
+    coll = next((c for c in collections if str(c.get("id")) == cid), None)
+    if coll is None:
+        return jsonify(ok=False, error="Collection not found."), 404
+    # Already unlocked in this session (incl. via admin force-unlock) ⇒ no need to retype
+    # the password to remove protection; otherwise the current password is required.
+    if coll.get("locked") and coll.get("pass_hash"):
+        if cid not in _session_unlocked() and not check_password_hash(coll["pass_hash"], pw):
+            return jsonify(ok=False, error="Incorrect password."), 403
+    for k in ("locked", "pass_hash", "locked_at"):
+        coll.pop(k, None)
+    _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+    _drop_unlock(cid)
+    return jsonify(ok=True, locked=False)
+
+
+@app.post("/api/collections/<cid>/force-unlock")
+def api_collection_force_unlock(cid: str) -> Response:
+    """Recovery for a forgotten collection password: re-enter the MAIN admin password to
+    unlock the collection for this session. Re-asking for the master secret means an
+    over-the-shoulder viewer on a logged-in session still can't bypass a collection lock."""
+    if not _admin_configured():
+        return jsonify(ok=False, error="No admin password is configured for recovery."), 400
+    ip = request.remote_addr or "?"
+    wait = _login_retry_after(ip)
+    if wait:
+        return jsonify(ok=False, error=f"Too many attempts. Try again in {wait} s."), 429
+    if not secrets.compare_digest(str((request.get_json(silent=True) or {}).get("admin_password") or ""), ADMIN_PASSWORD):
+        _record_login_fail(ip)
+        return jsonify(ok=False, error="Incorrect admin password."), 403
+    _clear_login_fails(ip)
+    if not any(str(c.get("id")) == cid for c in _load_collections()):
+        return jsonify(ok=False, error="Collection not found."), 404
+    _grant_unlock(cid)
+    return jsonify(ok=True, unlocked=True, expires=(session.get("unlocked") or {}).get(cid))
+
+
+# --------------------------------------------------------------------------- #
+# Folder Import — upload a local folder of videos/images into a new collection
+# --------------------------------------------------------------------------- #
+# The browser reads a chosen folder (webkitdirectory) and POSTs each file to
+# /api/import/file, which streams it into the gallery, makes a thumbnail and buffers
+# a metadata record under an import id. /api/import/commit then writes all records at
+# once, creates a new collection named after the top folder and rebuilds the index.
+# /api/import/cancel discards a buffered, never-committed run. Each file gets a fresh
+# random id (never the original filename), so duplicate names across imports can't
+# collide on disk or in the index.
+
+_IMPORT_VIDEO_EXT = {"mp4", "webm", "m4v", "mov"}
+_IMPORT_IMAGE_EXT = {"jpg", "jpeg", "png", "webp", "gif", "avif"}
+_imports_lock = threading.Lock()
+_imports: dict[str, list[dict]] = {}   # import_id -> buffered records (with disk paths)
+_IMPORT_MAX = 5000                      # per-import file ceiling (runaway guard)
+
+
+def _import_kind(ext: str) -> str | None:
+    ext = ext.lower().lstrip(".")
+    if ext in _IMPORT_VIDEO_EXT:
+        return "video"
+    if ext in _IMPORT_IMAGE_EXT:
+        return "image"
+    return None
+
+
+@app.post("/api/import/file")
+def api_import_file() -> Response:
+    """Stream one uploaded media file into the gallery and buffer its record under
+    ``import_id``. Multipart: ``import_id``, ``file``, optional ``rel`` (the file's
+    path within the picked folder, for display) and ``mtime`` (ms epoch)."""
+    import_id = str(request.form.get("import_id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", import_id):
+        return jsonify(ok=False, error="Bad import id."), 400
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(ok=False, error="No file uploaded."), 400
+    ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    kind = _import_kind(ext)
+    if kind is None:
+        return jsonify(ok=False, error=f"Unsupported file type: .{ext[:10]}"), 415
+    if ext == "jpeg":
+        ext = "jpg"
+    with _imports_lock:
+        if len(_imports.get(import_id, [])) >= _IMPORT_MAX:
+            return jsonify(ok=False, error="Too many files in one import."), 413
+
+    mid = "import_" + secrets.token_hex(8)
+    sub = "videos" if kind == "video" else "images"
+    rel = f"media/{sub}/{media_shard(mid)}/{mid}.{ext}"
+    dest = GALLERY_DIR / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    f.save(str(dest))  # streams to disk — never reads the (up to 2 GB) file into memory
+
+    try:
+        thumb_dest = thumbgen.thumb_path({"id": mid}, THUMBS_DIR)
+        thumb_dest.parent.mkdir(parents=True, exist_ok=True)
+        if kind == "video":
+            thumbgen.make_video_thumb(dest, thumb_dest)
+        else:
+            thumbgen.make_image_thumb(dest, thumb_dest)
+    except Exception as exc:  # pragma: no cover - thumbnail is best-effort
+        print(f"import thumbnail failed: {exc}")
+
+    # created_at from the file's own modified time (so imports sort by their real date),
+    # falling back to now. Original name is kept for search + display.
+    orig = Path(str(request.form.get("rel") or f.filename)).name
+    try:
+        ts = float(request.form.get("mtime") or 0) / 1000.0
+        created = (datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+                   if ts > 0 else datetime.datetime.now(datetime.timezone.utc))
+    except (TypeError, ValueError, OSError, OverflowError):
+        created = datetime.datetime.now(datetime.timezone.utc)
+    record = {
+        "id": mid,
+        "media_type": kind,
+        "local_path": rel,
+        "created_at": created.strftime("%Y-%m-%dT%H:%M:%S"),
+        "prompt": orig.rsplit(".", 1)[0][:200],
+        "model": "Imported",
+        "imported": True,
+        "orig_filename": orig[:255],
+    }
+    with _imports_lock:
+        _imports.setdefault(import_id, []).append(record)
+    return jsonify(ok=True, id=mid, media_type=kind,
+                   thumb=f"/thumbnails/{media_shard(mid)}/{mid}.jpg")
+
+
+@app.post("/api/import/commit")
+def api_import_commit() -> Response:
+    """Finalize an import: append all buffered records to metadata.json, create a new
+    collection named after the folder, and rebuild the index once. Body: {import_id, name}."""
+    payload = request.get_json(silent=True) or {}
+    import_id = str(payload.get("import_id") or "").strip()
+    name = (str(payload.get("name") or "").strip() or "Imported")[:80]
+    with _imports_lock:
+        records = _imports.pop(import_id, None)
+    if not records:
+        return jsonify(ok=False, error="Nothing to import."), 400
+
+    loaded = _load_json_strict(METADATA_FILE, [])
+    items = loaded if isinstance(loaded, list) else []
+    items.extend(records)
+    _atomic_write_json(METADATA_FILE, items)
+
+    ids = [r["id"] for r in records]
+    today = time.strftime("%Y-%m-%d")
+    coll_id = "col-" + secrets.token_hex(8)
+    collections = _load_collections(strict=True)
+    collections.insert(0, {
+        "id": coll_id, "name": name, "ids": ids,
+        "cover_id": ids[0] if ids else "", "created_at": today, "updated_at": today,
+    })
+    _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+
+    rebuild_db()
+    return jsonify(ok=True, collection_id=coll_id, name=name, count=len(ids))
+
+
+@app.post("/api/import/cancel")
+def api_import_cancel() -> Response:
+    """Discard a buffered, never-committed import: delete its on-disk files + thumbs."""
+    payload = request.get_json(silent=True) or {}
+    import_id = str(payload.get("import_id") or "").strip()
+    with _imports_lock:
+        records = _imports.pop(import_id, None) or []
+    for r in records:
+        try:
+            (GALLERY_DIR / r["local_path"]).unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            thumbgen.thumb_path({"id": r["id"]}, THUMBS_DIR).unlink(missing_ok=True)
+        except OSError:
+            pass
+    return jsonify(ok=True, removed=len(records))
 
 
 # --------------------------------------------------------------------------- #
@@ -1647,6 +2018,29 @@ def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, de
 _MOVIEGEN_PY = str(Path(moviegen.__file__).resolve())
 
 
+def _purge_movie_scratch(keep: Path) -> None:
+    """Drop everything in MOVIE_DIR except ``keep`` (the finished movie) — the per-cut
+    segments, video_only.mp4, edl.json, the uploaded song and the stderr log. Called
+    after a successful render so the bulk of the scratch (the segments) is freed at
+    once instead of lingering until the next generation wipes the dir. Best-effort:
+    never raises into the worker, and only the finished movie is preserved (still
+    needed for preview / download / commit)."""
+    try:
+        keep = keep.resolve()
+        for entry in MOVIE_DIR.iterdir():
+            if entry.resolve() == keep:
+                continue
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict) -> None:
     """Drive one montage render in a separate process and mirror its streamed
     progress into the shared job state. The child reads a JSON spec on stdin and
@@ -1701,6 +2095,11 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict
                     **result,
                 }
             _movie_progress("done", 1.0, 1.0, "Done")
+            # The final movie is assembled — the per-cut segments and other intermediates
+            # are now dead weight, so reclaim that space immediately (keep only the movie
+            # for preview/download/commit). On error we fall through and keep everything,
+            # including the stderr log, for diagnostics.
+            _purge_movie_scratch(keep=out_path)
         else:
             # No result line: the child raised (error set) or was killed before it
             # could report (OOM/segfault). Prefer its own message, then the kill
@@ -2859,6 +3258,7 @@ def api_media() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
+        hidden=_hidden_media_ids(),
         start=start,
         end=end,
     )
@@ -2888,6 +3288,7 @@ def api_facets() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
+        hidden=_hidden_media_ids(),
         start=start,
         end=end,
     ))
@@ -2901,7 +3302,9 @@ def api_media_by_ids() -> Response:
     ids = (request.get_json(silent=True) or {}).get("ids")
     if not isinstance(ids, list):
         return jsonify(items=[])
-    return jsonify(items=db.media_by_ids(DB_FILE, ids))
+    hidden = _hidden_media_ids()
+    items = [it for it in db.media_by_ids(DB_FILE, ids) if str(it.get("id")) not in hidden]
+    return jsonify(items=items)
 
 
 @app.get("/api/media/related")
@@ -2912,7 +3315,13 @@ def api_media_related() -> Response:
     media_id = str(request.args.get("id") or "").strip()
     if not media_id:
         return jsonify(base=None, generated=[])
-    return jsonify(db.media_related(DB_FILE, media_id))
+    data = db.media_related(DB_FILE, media_id)
+    hidden = _hidden_media_ids()
+    if hidden and isinstance(data, dict):
+        if data.get("base") and str(data["base"].get("id")) in hidden:
+            data["base"] = None
+        data["generated"] = [g for g in (data.get("generated") or []) if str(g.get("id")) not in hidden]
+    return jsonify(data)
 
 
 # --------------------------------------------------------------------------- #

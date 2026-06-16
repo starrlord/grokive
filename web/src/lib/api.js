@@ -111,6 +111,64 @@ export const deleteMedia = (ids) =>
     return r.json();
   });
 
+// --- Collection locks -------------------------------------------------------
+async function postLock(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || `Request failed (HTTP ${res.status}).`);
+  return data;
+}
+export const lockCollection = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/lock`, { password });
+export const unlockCollection = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/unlock`, { password });
+export const relockCollection = (id) => postLock(`/api/collections/${encodeURIComponent(id)}/relock`, {});
+export const relockAllCollections = () => postLock('/api/collections/relock-all', {});
+export const removeCollectionLock = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/remove-lock`, { password });
+export const forceUnlockCollection = (id, adminPassword) => postLock(`/api/collections/${encodeURIComponent(id)}/force-unlock`, { admin_password: adminPassword });
+
+// --- Folder import (upload a local folder into a new collection) ------------
+// One file per request with byte-level upload progress (XHR — fetch can't report
+// upload progress). Pass an AbortSignal to cancel an in-flight upload.
+export function importFile(importId, file, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append('import_id', importId);
+    fd.append('file', file);
+    fd.append('rel', file.webkitRelativePath || file.name);
+    fd.append('mtime', String(file.lastModified || 0));
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/import/file');
+    if (onProgress) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* non-JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300 && data.ok) resolve(data);
+      else reject(new Error(data.error || `Upload failed (HTTP ${xhr.status}).`));
+    };
+    xhr.onerror = () => reject(new Error('Network error during upload.'));
+    xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+    if (signal) {
+      if (signal.aborted) { xhr.abort(); return; }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    }
+    xhr.send(fd);
+  });
+}
+export async function importCommit(importId, name) {
+  const res = await fetch('/api/import/commit', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ import_id: importId, name })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) throw new Error(data.error || `Import failed (HTTP ${res.status}).`);
+  return data; // { ok, collection_id, name, count }
+}
+export function importCancel(importId) {
+  return fetch('/api/import/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ import_id: importId })
+  }).catch(() => {});
+}
+
 // --- Generate Movie (beat-synced montage; own background job slot) ----------
 export async function generateMovie({ ids, song, options }) {
   const fd = new FormData();
