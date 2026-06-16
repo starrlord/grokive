@@ -336,11 +336,50 @@
     if (!list.length) { toast('No playable videos in this canvas.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name || 'Canvas' };
   }
+  async function playRandomLibrary() {
+    // "Play" in the top bar: shuffle every video on disk into a random queue and hand
+    // it to the same Lightbox we use for collections. view 'all' deliberately includes
+    // archived (db.query_media), so this spans the whole library.
+    const randomFilters = {
+      ...$filters,
+      view: 'all',
+      canvas: null,
+      mediaType: 'video',
+      query: '',
+      tags: [],
+      models: [],
+      resolutions: [],
+      period: 'all'
+    };
+    const PAGE = 500;
+    let nextPage = 1;
+    let loaded = [];
+    let expected = Infinity;
+    // Same bounded-pagination shape as playCanvas: stop at `total`, bail on a short
+    // page, and hard-cap pages so a mismatched `total` can't spin into an endless fetch.
+    while (loaded.length < expected) {
+      const res = await fetchMedia(randomFilters, nextPage, PAGE);
+      const batch = res.items || [];
+      loaded = [...loaded, ...batch];
+      expected = res.total || loaded.length;
+      nextPage += 1;
+      if (batch.length < PAGE) break;
+      if (nextPage > Math.ceil(expected / PAGE) + 1) break;
+    }
+    const list = loaded.filter((it) => it.media_type === 'video');
+    if (!list.length) { toast('No videos to play yet.', { type: 'error' }); return; }
+    // Fisher–Yates shuffle for an unbiased random order.
+    for (let i = list.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [list[i], list[j]] = [list[j], list[i]];
+    }
+    lb = { list, index: 0, autoAdvance: true, title: `Random (${list.length})` };
+  }
 </script>
 
 <svelte:head><title>Grokive</title></svelte:head>
 
-<TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} />
+<TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} onplay={playRandomLibrary} />
 
 <div class="flex">
   <!-- Studio is its own full-width workspace; the media-browsing sidebar (filters,

@@ -4,7 +4,7 @@
   import SearchField from './SearchField.svelte';
   import Popover from './Popover.svelte';
 
-  let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {} } = $props();
+  let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {}, onplay = () => {} } = $props();
 
   const periods = [
     { id: 'all', label: 'All time' },
@@ -140,6 +140,14 @@
 
     <div class="flex shrink-0 items-center gap-1.5">
       <div class="flex shrink-0 items-center gap-1.5">
+        <button type="button"
+          class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-line px-3 py-1.5 text-sm font-bold text-muted transition"
+          aria-label="Play random videos from your library"
+          title="Play random videos across your library"
+          onclick={() => onplay()}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+          <span aria-hidden="true" class="hidden sm:inline">Play</span>
+        </button>
         <button type="button"
           class="topbar-workspace inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm font-bold transition {$filters.view === 'studio' && $studioTab !== 'saved' ? 'topbar-workspace-active border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted'}"
           aria-label="Open Prompt Studio"
