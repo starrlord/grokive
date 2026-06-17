@@ -19,7 +19,12 @@
   onMount(loadCollections);
 
   const selected = $derived((ids || []).map(String).filter(Boolean));
-  const shown = $derived(($collections || []).filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));
+  // Sealed (password-locked + not unlocked this session) collections are hidden from
+  // the picker — same predicate the Collections grid uses — so you can't add to one
+  // without first unlocking it. A collection unlocked this session stays addable.
+  const isSealed = (c) => c.locked && !c.unlocked;
+  const available = $derived(($collections || []).filter((c) => !isSealed(c)));
+  const shown = $derived(available.filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));
 
   function finish(collectionName) {
     const selectedNow = [...selected];
@@ -73,7 +78,7 @@
       <div>
         <div class="mb-2 flex items-center justify-between gap-3 text-xs font-bold uppercase tracking-wider text-muted">
           <span>Existing collections</span>
-          <span>{$collections.length}</span>
+          <span>{available.length}</span>
         </div>
         <SearchField bind:value={q} placeholder="Search collections..." ariaLabel="collection search"
           wrapperClass="mb-2 w-full"

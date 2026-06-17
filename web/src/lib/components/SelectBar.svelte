@@ -16,6 +16,19 @@
   let busy = $state(false);
   let confirmingDelete = $state(false);
 
+  // Both dropdowns are position:fixed so they escape the dock's overflow-x clip —
+  // which means they have to be placed by hand. `left: 50%` pinned them to the
+  // viewport centre (nowhere near the button); instead, measure the trigger when the
+  // menu opens and anchor the popover just above it, clamped so a wide one never
+  // spills off the right edge. Null when closed (the popover is display:none then).
+  let selectPos = $state(null);
+  let playlistPos = $state(null);
+  function anchorAbove(detailsEl, estWidth) {
+    const r = detailsEl.querySelector('summary').getBoundingClientRect();
+    const left = Math.max(8, Math.min(Math.round(r.left), window.innerWidth - estWidth - 8));
+    return { left, bottom: Math.round(window.innerHeight - r.top + 8) };
+  }
+
   function doDelete() {
     const ids = [...$selection];
     confirmingDelete = false;
@@ -79,13 +92,17 @@
     </div>
 
     <div class="select-cluster">
-      <details class="select-menu relative">
-        <summary class="select-btn cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-          Select…
+      <details class="select-menu relative"
+               ontoggle={(e) => { selectPos = e.currentTarget.open ? anchorAbove(e.currentTarget, 208) : null; }}>
+        <summary class="select-btn select-trigger cursor-pointer list-none [&::-webkit-details-marker]:hidden"
+                 title="Select visible or batch items">
+          <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="m9 12 2 2 4-4"/></svg>
+          <span>Select</span>
+          <svg viewBox="0 0 24 24" class="select-caret h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </summary>
-        <!-- Fixed (not absolute) so it escapes the dock's overflow-x clipping,
-             mirroring the Playlist popover below. -->
-        <div class="select-popover">
+        <!-- Fixed (not absolute) so it escapes the dock's overflow-x clipping;
+             anchored to the trigger via anchorAbove() on open (see script). -->
+        <div class="select-popover" style={selectPos ? `left:${selectPos.left}px;bottom:${selectPos.bottom}px` : ''}>
           <button type="button" class="block w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--surface-2)] disabled:opacity-45"
             disabled={!unselectedVisibleIds.length} onclick={(e) => { selectVisible(); e.currentTarget.closest('details').open = false; }}>Visible ({unselectedVisibleIds.length})</button>
           <button type="button" class="block w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--surface-2)] disabled:opacity-45"
@@ -108,11 +125,12 @@
     </div>
 
     <div class="select-cluster">
-      <details class="playlist-menu relative">
+      <details class="playlist-menu relative"
+               ontoggle={(e) => { playlistPos = e.currentTarget.open ? anchorAbove(e.currentTarget, 280) : null; }}>
         <summary class="select-btn cursor-pointer list-none [&::-webkit-details-marker]:hidden">
           Playlist
         </summary>
-        <div class="playlist-popover">
+        <div class="playlist-popover" style={playlistPos ? `left:${playlistPos.left}px;bottom:${playlistPos.bottom}px` : ''}>
           <input class="playlist-input" placeholder="Playlist name" bind:value={name} maxlength="80" />
           <button class="select-btn select-primary" disabled={!name.trim() || !videoIds.length} onclick={save} title="Save playlist">Save</button>
         </div>
@@ -280,6 +298,40 @@
     color: var(--on-accent);
   }
 
+  /* The Select dropdown trigger. The flat .select-btn made it vanish into the
+     bar, so it gets a chip treatment: accent-tinted fill + border that echoes
+     the "N selected" count pill (so count + trigger read as one selection
+     zone), plus an icon and a caret that mark it as a menu. */
+  .select-trigger {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+    color: var(--ink);
+    gap: 0.45rem;
+    padding-left: 0.62rem;
+    padding-right: 0.58rem;
+  }
+
+  .select-trigger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  }
+
+  /* Filled while the menu is open, so the trigger clearly owns the popover. */
+  .select-menu[open] .select-trigger {
+    background: var(--accent);
+    border-color: transparent;
+    color: var(--on-accent);
+  }
+
+  .select-caret {
+    opacity: 0.85;
+    transition: transform 180ms ease;
+  }
+
+  .select-menu[open] .select-caret {
+    transform: rotate(180deg);
+  }
+
   .select-danger {
     border-color: color-mix(in srgb, var(--danger) 52%, transparent);
     color: var(--danger-ink);
@@ -308,10 +360,8 @@
     box-shadow: var(--shadow);
     display: flex;
     gap: 0.45rem;
-    left: 50%;
     padding: 0.5rem;
     position: fixed;
-    transform: translateX(-50%);
     z-index: 55;
   }
 
@@ -330,11 +380,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.15rem;
-    left: 50%;
     min-width: 12rem;
     padding: 0.4rem;
     position: fixed;
-    transform: translateX(-50%);
     z-index: 55;
   }
 

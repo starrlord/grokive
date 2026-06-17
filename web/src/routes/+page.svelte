@@ -21,6 +21,7 @@
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
   import LibraryView from '$lib/components/LibraryView.svelte';
   import MediaTypeTabs from '$lib/components/MediaTypeTabs.svelte';
+  import SortSelect from '$lib/components/SortSelect.svelte';
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
@@ -145,14 +146,16 @@
     }
   });
 
-  // Selection is scoped to the current browsing context: switching view, opening a
-  // canvas, or drilling into a collection clears it so the action bar never carries
-  // items from a place you've navigated away from. Within-view refinement (search,
-  // tags, models) keeps the selection. Select mode itself stays on.
+  // Select mode is scoped to the current browsing context: switching view (the
+  // All Media / Favorites / Library tabs), opening a canvas, or drilling into — or
+  // backing out of — a collection exits select mode entirely, so the bottom action
+  // bar auto-hides instead of lingering over a place you've navigated away from
+  // (setSelectMode(false) also clears the selection). Within-view refinement (search,
+  // tags, models) is NOT a context change — it keeps both the selection and the bar.
   let ctxSig = '';
   $effect(() => {
     const next = `${$filters.view}|${$filters.canvas ?? ''}|${$activeCollectionId ?? ''}`;
-    if (ctxSig !== '' && next !== ctxSig) clearSelection();
+    if (ctxSig !== '' && next !== ctxSig) setSelectMode(false);
     ctxSig = next;
   });
   async function refreshFacets() {
@@ -438,6 +441,7 @@
         </div>
         <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
         <MediaTypeTabs class="ml-auto" />
+        <SortSelect />
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
@@ -469,6 +473,7 @@
           <p class="text-sm text-muted">{displayTotal.toLocaleString()} items</p>
         </div>
         <MediaTypeTabs class="ml-auto" />
+        <SortSelect />
         {#if hasCanvasRefinements}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={clearCanvasRefinements}>Reset filters ✕</button>
         {/if}
@@ -522,6 +527,7 @@
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={resetAll}>Reset filters ✕</button>
         {/if}
         <MediaTypeTabs class="ml-auto" />
+        <SortSelect />
       </div>
 
       {#if displayItems.length === 0 && !loading}
