@@ -4302,9 +4302,12 @@ def api_media_delete() -> Response:
     if removed:
         _atomic_write_json(METADATA_FILE, kept)
 
-    # Blocklist every requested id — even ones not (yet) in metadata — so an item
-    # that's mid-flight or appears on a later sync page can't slip back in.
-    _atomic_write_json(DELETED_FILE, sorted(_load_deleted() | ids))
+    # deleted_ids.json only stops the Grok downloader from re-pulling synced media.
+    # Locally-originated items (imports, montages) have no Grok source, so blocklisting
+    # them is pointless bloat — skip those prefixes. Unknown / not-yet-in-metadata ids
+    # are still blocklisted, so a Grok item mid-sync can't slip back in on a later page.
+    blocklist_ids = {i for i in ids if not i.startswith(("import_", "montage_"))}
+    _atomic_write_json(DELETED_FILE, sorted(_load_deleted() | blocklist_ids))
 
     _purge_ids_from_library(ids)
     _purge_ids_from_playlists(ids)
@@ -4314,7 +4317,7 @@ def api_media_delete() -> Response:
     except Exception as exc:  # pragma: no cover - defensive
         print(f"index delete failed: {exc}")
 
-    return jsonify(ok=True, deleted=removed, blocklisted=len(ids))
+    return jsonify(ok=True, deleted=removed, blocklisted=len(blocklist_ids))
 
 
 @app.get("/healthz")
