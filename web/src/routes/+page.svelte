@@ -477,6 +477,9 @@
         {#if hasCanvasRefinements}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={clearCanvasRefinements}>Reset filters ✕</button>
         {/if}
+        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
+          disabled={!(activeCanvas?.videos || displayItems.some((it) => it.media_type === 'video'))}
+          onclick={() => playCanvas(activeCanvas || { id: $filters.canvas, name: activeCanvasTitle, videos: displayTotal })}>Play videos</button>
       </div>
 
       {#if displayItems.length === 0 && !loading}
@@ -501,7 +504,7 @@
         {#each facets.canvases || [] as c (c.id)}
           <article class="group overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
             <button type="button" class="relative block aspect-square w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => openCanvas(c)}>
-              {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover transition group-hover:scale-105" />{/if}
+              {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-105" />{/if}
               <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim)] to-transparent px-3 pb-2.5 pt-8 text-[var(--media-control-ink)]">
                 <span class="block truncate text-sm font-bold" title={c.name}>{c.name}</span>
                 <span class="block text-xs opacity-80">{c.count} items · {c.videos} video</span>
