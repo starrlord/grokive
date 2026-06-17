@@ -4211,6 +4211,9 @@ def _delete_media_files(item: dict) -> None:
             targets += [media, media.with_suffix(".srt"), media.with_suffix(".vtt")]
     mid = str(item.get("id") or "")
     if mid:
+        # Thumbnails are stored sharded (thumbnails/<shard>/<id>.jpg); delete that, and
+        # keep the legacy flat path as a fallback so older thumbnails are cleaned too.
+        targets.append(thumbgen.thumb_path({"id": mid}, THUMBS_DIR))
         targets.append(THUMBS_DIR / f"{mid}.jpg")
     for p in targets:
         try:
