@@ -191,11 +191,11 @@ if not _session_secret:
 app.secret_key = _session_secret
 app.config["PERMANENT_SESSION_LIFETIME"] = datetime.timedelta(days=30)
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-# Hard cap on any request body. Raised to 2 GB so the folder Import can take large
-# source videos (it streams each upload straight to disk, one file per request, never
-# buffering it in memory). Stricter per-route limits still apply where wanted (e.g. the
-# Imagine image upload caps itself at 30 MB) — this is only the outer backstop.
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024
+# Hard cap on any request body. 5 GB so the folder Import can take large source videos
+# (it streams each upload straight to disk, one file per request, never buffering it in
+# memory). Stricter per-route limits still apply where wanted (e.g. the Imagine image
+# upload caps itself at 30 MB) — this is only the outer backstop. Set to None to uncap.
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024 * 1024
 # SESSION_COOKIE_SECURE: true | false | auto (default). 'auto' = secure when behind an
 # HTTPS-terminating proxy (TRUST_PROXY on). Never forced on plain HTTP, or the login
 # cookie would be dropped and you could never stay signed in.
@@ -1225,7 +1225,9 @@ def _drop_unlock(cid: str) -> None:
 
 
 def _hidden_media_ids() -> set[str]:
-    """All media ids in a locked collection this session hasn't unlocked."""
+    """All media ids in a locked collection this session hasn't unlocked. Used by the
+    per-id / file paths (by-ids, related, /media, /thumbnails) where unlocking a collection
+    grants access to its files."""
     locked = _locked_collections_map()
     if not locked:
         return set()
@@ -1234,6 +1236,23 @@ def _hidden_media_ids() -> set[str]:
     for cid, ids in locked.items():
         if cid not in unlocked:
             out |= ids
+    return out
+
+
+def _list_hidden_media_ids(reveal_ids=None) -> set[str]:
+    """Hidden set for GLOBAL list views (Recent / All Media / Archive / search / facets):
+    EVERY locked collection's media, whether or not it's unlocked — unlocking lets you OPEN
+    a collection, not surface its contents in the global browse. ``reveal_ids`` (the ids of
+    the collection the request is scoped to, when the session has unlocked it) are exempted
+    so that collection's own grid still shows its items."""
+    locked = _locked_collections_map()
+    if not locked:
+        return set()
+    out: set[str] = set()
+    for ids in locked.values():
+        out |= ids
+    if reveal_ids:
+        out -= {str(i) for i in reveal_ids}
     return out
 
 
@@ -1311,15 +1330,26 @@ def api_collections_post() -> Response:
     if not isinstance(incoming, list):
         return jsonify(ok=False, error="Expected a 'collections' array."), 400
     # Lock state is server-authoritative: a bulk client save can never set or clear it.
-    # Re-supply each collection's lock fields from disk (and strip any the client sent).
+    # CRITICAL: a SEALED collection (locked + not unlocked this session) has its ids and
+    # cover suppressed in the summary the client holds, so the client's copy is a hollow
+    # placeholder. For such a collection we keep the ENTIRE server record and ignore the
+    # client's version — otherwise a routine save (e.g. editing some other collection)
+    # would write the empty ids back and silently wipe it. A collection unlocked in this
+    # session keeps its lock fields server-side but may have its (real, client-held) ids
+    # edited. Unlocked/normal collections are handled as before.
     existing = {str(c.get("id")): c for c in _load_collections()}
+    unlocked = _session_unlocked()
     clean = []
     for entry in incoming[:1000]:
         if not isinstance(entry, dict):
             continue
-        prior = existing.get(str(entry.get("id")))
+        cid = str(entry.get("id"))
+        prior = existing.get(cid)
         if prior and prior.get("locked") and prior.get("pass_hash"):
-            entry = {**entry, "locked": True, "pass_hash": prior["pass_hash"], "locked_at": prior.get("locked_at")}
+            if cid in unlocked:
+                entry = {**entry, "locked": True, "pass_hash": prior["pass_hash"], "locked_at": prior.get("locked_at")}
+            else:
+                entry = prior  # sealed for this client — trust nothing it sends
         else:
             entry = {k: v for k, v in entry.items() if k not in ("locked", "pass_hash", "locked_at")}
         coll = _clean_collection(entry)
@@ -1467,6 +1497,7 @@ def api_import_file() -> Response:
     ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
     kind = _import_kind(ext)
     if kind is None:
+        print(f"import: skipped '{f.filename}' — unsupported type .{ext[:10]}")
         return jsonify(ok=False, error=f"Unsupported file type: .{ext[:10]}"), 415
     if ext == "jpeg":
         ext = "jpg"
@@ -1534,6 +1565,7 @@ def api_import_commit() -> Response:
     _atomic_write_json(METADATA_FILE, items)
 
     ids = [r["id"] for r in records]
+    _archive_ids(ids)  # imported media start archived (kept out of Recent), per design
     today = time.strftime("%Y-%m-%d")
     coll_id = "col-" + secrets.token_hex(8)
     collections = _load_collections(strict=True)
@@ -1564,6 +1596,17 @@ def api_import_cancel() -> Response:
         except OSError:
             pass
     return jsonify(ok=True, removed=len(records))
+
+
+@app.errorhandler(413)
+def _payload_too_large(_e):
+    """An upload exceeded MAX_CONTENT_LENGTH — log it (so import skips are diagnosable
+    from the container logs) and return a clear reason for the client to surface."""
+    size = request.content_length
+    limit = app.config.get("MAX_CONTENT_LENGTH")
+    pretty = f"{size / 1048576:.0f} MB" if size else "unknown size"
+    print(f"413 payload too large on {request.path}: {pretty} (limit {limit and limit // 1048576} MB)")
+    return jsonify(ok=False, error=f"File is larger than the {limit and limit // (1024**3)} GB upload limit."), 413
 
 
 # --------------------------------------------------------------------------- #
@@ -3171,6 +3214,16 @@ def api_imagine_staged_thumb(gen_id: str) -> Response:
     return send_file(path, conditional=True)
 
 
+def _archive_ids(ids) -> None:
+    """Add ids to the archive (stashed) set in library.json, leaving favorites intact.
+    Used to auto-archive freshly imported media so it doesn't land in Recent."""
+    add = {str(i) for i in ids}
+    if not add:
+        return
+    fav, stash = _library_sets()
+    _atomic_write_json(LIBRARY_FILE, {"favorites": sorted(fav), "stashed": sorted(stash | add)})
+
+
 def _library_sets() -> tuple[set, set]:
     favorites: set = set()
     stashed: set = set()
@@ -3258,7 +3311,7 @@ def api_media() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_hidden_media_ids(),
+        hidden=_list_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
         start=start,
         end=end,
     )
@@ -3288,7 +3341,7 @@ def api_facets() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_hidden_media_ids(),
+        hidden=_list_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
         start=start,
         end=end,
     ))

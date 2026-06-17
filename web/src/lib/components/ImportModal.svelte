@@ -31,6 +31,18 @@
   const videoCount = queue.filter((f) => VIDEO.includes(ext(f.name))).length;
   const imageCount = queue.length - videoCount;
   const skipped = all.length - queue.length;
+  // Why files were dropped before upload (disjoint: unsupported = wrong extension;
+  // skippedDir = supported but inside a Training/Archive sub-folder).
+  const skippedDir = all.filter((f) => ALLOWED.has(ext(f.name)) && inSkippedDir(f));
+  const unsupported = all.filter((f) => !ALLOWED.has(ext(f.name)));
+  const unsupportedExts = [...new Set(unsupported.map((f) => `.${ext(f.name) || '(none)'}`))].sort();
+  if (skippedDir.length || unsupported.length) {
+    // Full per-file detail in devtools, complementing the server log for upload-time skips.
+    console.warn('[import] skipping before upload', {
+      unsupported: unsupported.map((f) => f.webkitRelativePath || f.name),
+      inTrainingOrArchive: skippedDir.map((f) => f.webkitRelativePath || f.name),
+    });
+  }
 
   let name = $state(topFolder);
   let phase = $state('confirm'); // confirm | running | committing | done | error
@@ -46,6 +58,12 @@
   let ctrl = null;
 
   const overallPct = $derived(queue.length ? Math.round((doneCount / queue.length) * 100) : 0);
+  // Group upload failures by reason (e.g. "3× File is larger than the 5 GB upload limit").
+  const errorSummary = $derived.by(() => {
+    const m = new Map();
+    for (const e of errors) m.set(e.message, (m.get(e.message) || 0) + 1);
+    return [...m.entries()].map(([msg, n]) => `${n}× ${msg}`);
+  });
 
   async function start() {
     if (!queue.length) { errMsg = 'That folder has no supported videos or images.'; phase = 'error'; return; }
@@ -123,7 +141,10 @@
             </span>
             <div class="min-w-0">
               <p class="font-semibold text-ink">Create a new collection from this folder</p>
-              <p class="text-sm text-muted">{queue.length} supported file{queue.length === 1 ? '' : 's'} found{skipped ? ` · ${skipped} skipped (unsupported or in Training/Archive folders)` : ''}.</p>
+              <p class="text-sm text-muted">{queue.length} supported file{queue.length === 1 ? '' : 's'} found.</p>
+              {#if skipped}
+                <p class="mt-1 text-xs text-muted">{skipped} skipped — {#if unsupported.length}{unsupported.length} unsupported ({unsupportedExts.join(', ')}){/if}{#if unsupported.length && skippedDir.length} · {/if}{#if skippedDir.length}{skippedDir.length} in Training/Archive folders{/if}.</p>
+              {/if}
             </div>
           </div>
           <div>
@@ -162,7 +183,10 @@
             </div>
           {/if}
           {#if errors.length}
-            <p class="text-xs text-[var(--danger-ink-soft)]">{errors.length} file{errors.length === 1 ? '' : 's'} couldn’t be imported and were skipped.</p>
+            <div class="text-xs text-[var(--danger-ink-soft)]">
+              <p class="font-semibold">{errors.length} couldn’t be imported:</p>
+              <ul class="mt-0.5 list-disc pl-4">{#each errorSummary as line (line)}<li>{line}</li>{/each}</ul>
+            </div>
           {/if}
         </div>
       {:else if phase === 'done'}
@@ -173,6 +197,9 @@
           <div>
             <p class="text-lg font-extrabold text-ink">Imported {result?.count} item{result?.count === 1 ? '' : 's'}</p>
             <p class="text-sm text-muted">into the “{result?.name}” collection{errors.length ? ` · ${errors.length} skipped` : ''}.</p>
+            {#if errors.length}
+              <ul class="mt-2 inline-block list-disc pl-5 text-left text-xs text-[var(--danger-ink-soft)]">{#each errorSummary as line (line)}<li>{line}</li>{/each}</ul>
+            {/if}
           </div>
         </div>
       {:else}
