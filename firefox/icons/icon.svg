@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Grokive Prompt Studio">
+  <!-- Violet rounded square on the dark Grokive palette -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b7bff"/>
+      <stop offset="1" stop-color="#7c6cff"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#14181d" stroke="#262b33" stroke-width="2"/>
+  <rect x="20" y="20" width="88" height="88" rx="20" fill="url(#g)"/>
+  <!-- Spark / four-point star glyph in white -->
+  <path d="M64 34
+           C66 50 78 62 94 64
+           C78 66 66 78 64 94
+           C62 78 50 66 34 64
+           C50 62 62 50 64 34 Z"
+        fill="#ffffff"/>
+  <!-- Small accent dot (dice / spark motif) -->
+  <circle cx="64" cy="64" r="6" fill="#7c6cff"/>
+</svg>

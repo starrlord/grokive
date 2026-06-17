@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grokive Prompt Studio — Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <main class="gks-wrap">
+    <header class="gks-head">
+      <div class="gks-brand">
+        <img class="gks-logo" src="../icons/icon.svg" alt="" width="32" height="32" />
+        <div class="gks-titles">
+          <h1>Prompt Studio</h1>
+          <p class="gks-sub">Settings for the Grokive Firefox companion</p>
+        </div>
+      </div>
+    </header>
+
+    <form id="gks-form" autocomplete="off" novalidate>
+      <!-- Server -->
+      <section class="gks-card">
+        <h2 class="gks-card-title">Server</h2>
+
+        <div class="gks-field">
+          <label for="baseUrl">Server URL</label>
+          <input
+            type="url"
+            id="baseUrl"
+            name="baseUrl"
+            placeholder="http://localhost:8080"
+            spellcheck="false"
+            autocapitalize="off" />
+          <p class="gks-hint">Origin of your Grokive server. No trailing slash needed — it's trimmed automatically.</p>
+        </div>
+
+        <div class="gks-field">
+          <button type="button" id="testBtn" class="gks-btn gks-btn-ghost">Test connection</button>
+          <div id="testResult" class="gks-test" hidden></div>
+        </div>
+      </section>
+
+      <!-- Authentication -->
+      <section class="gks-card">
+        <h2 class="gks-card-title">Authentication</h2>
+        <p class="gks-card-note">
+          Only needed if your server requires login.
+          <strong>Tip:</strong> run with <code>AUTH_DISABLED=true</code> on a trusted LAN for zero-config.
+        </p>
+
+        <div class="gks-row">
+          <div class="gks-field">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" spellcheck="false" autocapitalize="off" autocomplete="off" />
+          </div>
+          <div class="gks-field">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="new-password" />
+          </div>
+        </div>
+      </section>
+
+      <!-- Prompts & AI -->
+      <section class="gks-card">
+        <h2 class="gks-card-title">Prompts &amp; AI</h2>
+
+        <div class="gks-field">
+          <label for="saveFolder">Save folder</label>
+          <input type="text" id="saveFolder" name="saveFolder" placeholder="Firefox" spellcheck="false" />
+          <p class="gks-hint">New prompts you save from the extension land in this folder.</p>
+        </div>
+
+        <div class="gks-field">
+          <label for="dialogueLevel">Default dialogue level</label>
+          <select id="dialogueLevel" name="dialogueLevel">
+            <option value="normal">Natural (normal)</option>
+            <option value="dirtier">Suggestive (dirtier)</option>
+            <option value="filthier">Unfiltered (filthier)</option>
+          </select>
+          <p class="gks-hint">Used when Enhance rewrites a prompt's dialogue.</p>
+        </div>
+      </section>
+
+      <!-- Integration -->
+      <section class="gks-card">
+        <h2 class="gks-card-title">grok.com</h2>
+        <label class="gks-check">
+          <input type="checkbox" id="injectOnGrok" name="injectOnGrok" />
+          <span>Show the toolbar on grok.com</span>
+        </label>
+        <p class="gks-hint">A floating pill with Random / Enhance / Save while you're generating on Grok.</p>
+      </section>
+
+      <div class="gks-actions">
+        <button type="submit" id="saveBtn" class="gks-btn gks-btn-primary">Save settings</button>
+        <span id="saveStatus" class="gks-save-status" role="status" aria-live="polite"></span>
+      </div>
+    </form>
+
+    <footer class="gks-foot">
+      <span>Grokive Prompt Studio</span>
+      <span class="gks-dot-sep">•</span>
+      <span>All traffic stays between this browser and your self-hosted server.</span>
+    </footer>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>

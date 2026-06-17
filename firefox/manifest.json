@@ -1,0 +1,51 @@
+{
+  "manifest_version": 2,
+  "name": "Grokive Prompt Studio",
+  "version": "1.0.0",
+  "description": "Pull, enhance, and save Grok Imagine prompts from your self-hosted Grokive Prompt Studio.",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "grokive-promptstudio@local",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "storage",
+    "clipboardWrite",
+    "notifications",
+    "<all_urls>"
+  ],
+  "browser_action": {
+    "default_title": "Grokive Prompt Studio",
+    "default_popup": "popup/popup.html",
+    "default_icon": "icons/icon.svg"
+  },
+  "background": {
+    "scripts": ["lib/api.js", "background/background.js"],
+    "persistent": false
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://grok.com/*", "*://*.grok.com/*"],
+      "js": ["content/grok.js"],
+      "css": ["content/grok.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "random-prompt": {
+      "suggested_key": {
+        "default": "Alt+Shift+R"
+      },
+      "description": "Copy a random Grokive prompt"
+    }
+  }
+}

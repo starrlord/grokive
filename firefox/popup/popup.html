@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prompt Studio</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="gks-popup">
+    <!-- 1. Header -->
+    <header class="gks-header">
+      <h1 class="gks-title">Prompt Studio</h1>
+      <div class="gks-header-right">
+        <span class="gks-status" id="statusWrap" title="">
+          <span class="gks-dot gks-dot--offline" id="statusDot" aria-hidden="true"></span>
+          <span class="gks-status-label" id="statusLabel">Connecting…</span>
+        </span>
+        <button class="gks-iconbtn" id="gearBtn" type="button" title="Open settings" aria-label="Open settings">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0 6a2 2 0 1 1 0-4 2 2 0 0 1 0 4Zm8.94-2a7.6 7.6 0 0 0-.13-1.27l2.03-1.58-2-3.46-2.39.96a7.8 7.8 0 0 0-2.2-1.27L15.9 2h-3.8l-.35 2.55a7.8 7.8 0 0 0-2.2 1.27l-2.39-.96-2 3.46 2.03 1.58a7.7 7.7 0 0 0 0 2.54l-2.03 1.58 2 3.46 2.39-.96a7.8 7.8 0 0 0 2.2 1.27L12.1 22h3.8l.35-2.55a7.8 7.8 0 0 0 2.2-1.27l2.39.96 2-3.46-2.03-1.58c.08-.41.13-.84.13-1.27Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Global toast/status line -->
+    <div class="gks-toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+    <!-- 2. Source folder -->
+    <section class="gks-section">
+      <label class="gks-label" for="sourceFolder">Source folder</label>
+      <select class="gks-select" id="sourceFolder" disabled>
+        <option value="__all">All</option>
+      </select>
+    </section>
+
+    <!-- 3. Random prompt buttons -->
+    <section class="gks-section gks-row gks-row--random">
+      <button class="gks-btn gks-btn--primary gks-btn--grow" id="randomBtn" type="button">
+        <span aria-hidden="true">🎲</span> Random prompt
+      </button>
+      <button class="gks-btn gks-btn--ghost" id="anotherBtn" type="button" title="Re-roll" disabled>
+        ↻ Another
+      </button>
+    </section>
+
+    <!-- 4. Editable prompt textarea -->
+    <section class="gks-section">
+      <textarea class="gks-textarea" id="promptText" rows="5"
+        placeholder="Pull a random prompt, or type your own here…" spellcheck="true"></textarea>
+      <div class="gks-meta">
+        <span class="gks-charcount" id="charCount">0 chars</span>
+        <span class="gks-pool" id="poolInfo"></span>
+      </div>
+    </section>
+
+    <!-- 5. Action row -->
+    <section class="gks-section gks-actions">
+      <div class="gks-actionrow">
+        <button class="gks-btn gks-btn--ghost" id="copyBtn" type="button">Copy</button>
+        <button class="gks-btn gks-btn--ghost" id="undoBtn" type="button" hidden>↶ Undo</button>
+      </div>
+
+      <div class="gks-enhance">
+        <div class="gks-seg" id="dialogueSeg" role="group" aria-label="Enhance intensity">
+          <button class="gks-seg-btn" type="button" data-level="normal">Natural</button>
+          <button class="gks-seg-btn" type="button" data-level="dirtier">Suggestive</button>
+          <button class="gks-seg-btn" type="button" data-level="filthier">Unfiltered</button>
+        </div>
+        <label class="gks-check">
+          <input type="checkbox" id="dialogueOnly" />
+          <span>Dialogue only</span>
+        </label>
+      </div>
+
+      <div class="gks-actionrow">
+        <button class="gks-btn gks-btn--accent gks-btn--grow" id="enhanceBtn" type="button">
+          <span aria-hidden="true">✨</span> Enhance
+        </button>
+        <button class="gks-btn gks-btn--ghost" id="variationsBtn" type="button">Variations</button>
+        <button class="gks-btn gks-btn--ok" id="saveBtn" type="button">
+          <span aria-hidden="true">💾</span> <span id="saveBtnFolder">Save</span>
+        </button>
+      </div>
+
+      <!-- Variations list -->
+      <ul class="gks-variations" id="variationsList" hidden></ul>
+    </section>
+
+    <hr class="gks-divider" />
+
+    <!-- 6. New prompt -->
+    <section class="gks-section">
+      <label class="gks-label" for="newPromptText">New prompt</label>
+      <textarea class="gks-textarea gks-textarea--sm" id="newPromptText" rows="3"
+        placeholder="Write a brand-new prompt to save…" spellcheck="true"></textarea>
+      <button class="gks-btn gks-btn--ok gks-btn--block" id="saveNewBtn" type="button">
+        <span aria-hidden="true">💾</span> <span id="saveNewBtnLabel">Save to Firefox</span>
+      </button>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

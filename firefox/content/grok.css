@@ -1,0 +1,186 @@
+/* Grokive Prompt Studio — content styles (grok.com).
+ *
+ * Scoped with the .gks- prefix to avoid clashing with grok.com's own CSS.
+ * Dark Grokive palette: near-black surfaces, light text, violet accent.
+ * Everything is fixed/floating and must never block the underlying page.
+ */
+
+.gks-toolbar {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483646; /* just under the toast */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  background: #14181d;
+  border: 1px solid #262b33;
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1;
+  color: #e6e9ee;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.gks-toolbar.gks-hidden {
+  display: none !important;
+}
+
+/* The "G" handle — violet pill. Always visible; toggles collapse. */
+.gks-handle {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: #7c6cff;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 15px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+
+.gks-handle:hover {
+  background: #8b7bff;
+}
+
+.gks-handle:active {
+  transform: scale(0.94);
+}
+
+/* Button group hides when collapsed, leaving only the handle. */
+.gks-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  max-width: 200px;
+  opacity: 1;
+  transition: max-width 0.18s ease, opacity 0.14s ease, margin 0.18s ease;
+}
+
+.gks-toolbar.gks-collapsed .gks-group {
+  max-width: 0;
+  opacity: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
+.gks-toolbar.gks-collapsed .gks-close {
+  display: none;
+}
+
+.gks-btn {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #262b33;
+  border-radius: 10px;
+  background: #0b0d10;
+  color: #e6e9ee;
+  font-size: 16px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.gks-btn:hover {
+  background: #1b2129;
+  border-color: #3a4250;
+}
+
+.gks-btn:active {
+  transform: scale(0.92);
+}
+
+.gks-btn:disabled,
+.gks-btn.gks-busy {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+.gks-btn.gks-busy {
+  animation: gks-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes gks-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.85; }
+}
+
+.gks-close {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0 0 2px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a93a0;
+  font-size: 18px;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.gks-close:hover {
+  color: #e6e9ee;
+  background: #1b2129;
+}
+
+/* Toast — bottom-right, above the toolbar. */
+.gks-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 60px;
+  z-index: 2147483647;
+  max-width: 320px;
+  padding: 9px 13px;
+  background: #14181d;
+  border: 1px solid #262b33;
+  border-left: 3px solid #7c6cff;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #e6e9ee;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.gks-toast.gks-toast-show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.gks-toast.gks-toast-ok {
+  border-left-color: #34d399;
+}
+
+.gks-toast.gks-toast-err {
+  border-left-color: #f87171;
+}
