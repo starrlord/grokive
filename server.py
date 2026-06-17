@@ -4376,9 +4376,12 @@ def main() -> None:
     from waitress import serve
 
     # channel_timeout is generous so long exports (merge + optional burn re-encode)
-    # and subtitle jobs aren't cut off mid-request.
+    # and subtitle jobs aren't cut off mid-request. max_request_body_size MUST track
+    # MAX_CONTENT_LENGTH: waitress enforces its OWN body cap (its default is 1 GB) and
+    # rejects an oversized upload with a bare 413 BEFORE Flask sees it — so a folder
+    # import of large videos fails unless this matches the app-level limit.
     serve(app, host="0.0.0.0", port=PORT, threads=8, channel_timeout=3600,
-          max_request_body_size=128 * 1024 * 1024)
+          max_request_body_size=app.config["MAX_CONTENT_LENGTH"])
 
 
 if __name__ == "__main__":
