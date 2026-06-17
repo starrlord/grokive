@@ -47,7 +47,8 @@
   font-weight: 700;
   font-size: 15px;
   font-family: inherit;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none; /* let the handle own touch gestures (drag) instead of scrolling */
   transition: background 0.12s ease, transform 0.12s ease;
 }
 
@@ -57,6 +58,17 @@
 
 .gks-handle:active {
   transform: scale(0.94);
+}
+
+/* While dragging: grabbing cursor, and suppress the press-shrink so the bar
+   tracks the pointer cleanly. */
+.gks-toolbar.gks-dragging,
+.gks-toolbar.gks-dragging .gks-handle {
+  cursor: grabbing;
+}
+
+.gks-toolbar.gks-dragging .gks-handle:active {
+  transform: none;
 }
 
 /* Button group hides when collapsed, leaving only the handle. */

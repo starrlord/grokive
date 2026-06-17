@@ -278,6 +278,52 @@
   // ---- Toolbar construction ----------------------------------------------------
   let toolbarEl = null;
 
+  // Saved position lives under its OWN storage key (not `settings`, which the
+  // background validates/strips to known keys). Values are viewport px (left/top).
+  function loadPos() {
+    return new Promise((resolve) => {
+      try {
+        ext.storage.local.get('toolbarPos')
+          .then((r) => resolve((r && r.toolbarPos) || null))
+          .catch(() => resolve(null));
+      } catch (e) { resolve(null); }
+    });
+  }
+  function savePos(pos) {
+    try { ext.storage.local.set({ toolbarPos: pos }); } catch (e) { /* noop */ }
+  }
+
+  // Keep the bar fully on-screen; switches it to left/top anchoring. Returns {left,top}.
+  function clampToViewport(bar) {
+    if (!bar) return null;
+    const rect = bar.getBoundingClientRect();
+    const margin = 6;
+    const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+    let left = parseFloat(bar.style.left);
+    let top = parseFloat(bar.style.top);
+    if (isNaN(left)) left = rect.left;
+    if (isNaN(top)) top = rect.top;
+    left = Math.min(Math.max(margin, left), maxLeft);
+    top = Math.min(Math.max(margin, top), maxTop);
+    bar.style.left = left + 'px';
+    bar.style.top = top + 'px';
+    bar.style.right = 'auto';
+    bar.style.bottom = 'auto';
+    return { left: left, top: top };
+  }
+
+  async function applySavedPos(bar) {
+    const pos = await loadPos();
+    if (pos && typeof pos.left === 'number' && typeof pos.top === 'number') {
+      bar.style.left = pos.left + 'px';
+      bar.style.top = pos.top + 'px';
+      bar.style.right = 'auto';
+      bar.style.bottom = 'auto';
+      clampToViewport(bar);
+    }
+  }
+
   function buildToolbar() {
     const bar = document.createElement('div');
     bar.className = 'gks-toolbar gks-collapsed-no';
@@ -288,7 +334,7 @@
     const handle = document.createElement('button');
     handle.className = 'gks-handle';
     handle.type = 'button';
-    handle.title = 'Grokive Prompt Studio — click to collapse/expand';
+    handle.title = 'Grokive Prompt Studio — drag to move, click to collapse';
     handle.textContent = 'G';
 
     const group = document.createElement('div');
@@ -331,10 +377,64 @@
       bar.classList.add('gks-hidden');
     });
 
+    // --- Drag-to-move (the handle is the grip) -------------------------------
+    // Pointer events cover mouse + touch. A movement threshold distinguishes a
+    // drag from a click, so nudging the handle doesn't accidentally collapse it.
+    let dragging = false;
+    let justDragged = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    const DRAG_THRESHOLD = 5;
+
+    function onMove(ev) {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      if (!dragging && (Math.abs(dx) + Math.abs(dy)) < DRAG_THRESHOLD) return;
+      if (!dragging) {
+        dragging = true;
+        bar.classList.add('gks-dragging');
+        bar.style.right = 'auto';
+        bar.style.bottom = 'auto';
+      }
+      bar.style.left = (startLeft + dx) + 'px';
+      bar.style.top = (startTop + dy) + 'px';
+      ev.preventDefault();
+    }
+    function onUp(ev) {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      handle.removeEventListener('pointercancel', onUp);
+      try { handle.releasePointerCapture(ev.pointerId); } catch (e) { /* noop */ }
+      if (dragging) {
+        dragging = false;
+        bar.classList.remove('gks-dragging');
+        const pos = clampToViewport(bar);
+        if (pos) savePos(pos);
+        justDragged = true;              // suppress the click that trails a drag
+        setTimeout(() => { justDragged = false; }, 0);
+      }
+    }
+    handle.addEventListener('pointerdown', (ev) => {
+      if (ev.button != null && ev.button !== 0) return;   // primary button / touch only
+      const rect = bar.getBoundingClientRect();
+      startX = ev.clientX; startY = ev.clientY;
+      startLeft = rect.left; startTop = rect.top;
+      dragging = false;
+      try { handle.setPointerCapture(ev.pointerId); } catch (e) { /* noop */ }
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onUp);
+      handle.addEventListener('pointercancel', onUp);
+    });
+
     handle.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
+      if (justDragged) return;           // this "click" was just the end of a drag
       bar.classList.toggle('gks-collapsed');
+      // Width changes on collapse/expand — re-clamp a custom-positioned bar so it
+      // can't overflow off-screen after growing.
+      if (bar.style.left && bar.style.left !== 'auto') {
+        setTimeout(() => clampToViewport(bar), 200);
+      }
     });
 
     bar.appendChild(handle);
@@ -348,6 +448,7 @@
     if (!document.body) return;
     toolbarEl = buildToolbar();
     document.body.appendChild(toolbarEl);
+    applySavedPos(toolbarEl);   // restore where the user last dragged it
   }
 
   function removeToolbar() {
@@ -381,6 +482,15 @@
       else mountToolbar();
     });
   } catch (e) { /* storage.onChanged not critical */ }
+
+  // Keep a custom-positioned toolbar on-screen when the window/viewport resizes.
+  try {
+    window.addEventListener('resize', () => {
+      if (toolbarEl && toolbarEl.style.left && toolbarEl.style.left !== 'auto') {
+        clampToViewport(toolbarEl);
+      }
+    });
+  } catch (e) { /* noop */ }
 
   init();
 })();

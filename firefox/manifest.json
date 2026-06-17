@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Grokive Prompt Studio",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Pull, enhance, and save Grok Imagine prompts from your self-hosted Grokive Prompt Studio.",
   "icons": {
     "48": "icons/icon.svg",

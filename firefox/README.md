@@ -121,6 +121,10 @@ On `grok.com`, a compact floating pill appears (bottom-right) with three buttons
 - **✨ Enhance** — enhances the current field text in place, using your default dialogue level.
 - **💾 Save** — saves the current field text to your save folder.
 
+**Move it:** drag the violet **G** handle to reposition the pill anywhere on the page — it
+stays on-screen and remembers where you put it across page loads. A quick **click** (no drag)
+on the G collapses/expands it; the **✕** hides it until the next reload.
+
 You can turn this toolbar off in Options.
 
 
