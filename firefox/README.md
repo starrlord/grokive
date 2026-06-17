@@ -68,9 +68,50 @@ firefox/
 ```
 
 > **Temporary add-ons clear when Firefox restarts.** You'll need to load it again after a
-> restart. For a permanent install, package the `firefox/` folder as a ZIP/XPI and sign it
-> through [Mozilla Add-ons (AMO)](https://addons.mozilla.org/developers/) — either listed,
-> or unlisted for a self-distributed signed build.
+> restart — unless you package and sign it for a permanent install (next section).
+
+## Packaging & making it permanent
+
+A temporary add-on is gone on the next Firefox restart. To install it permanently you need a
+packaged `.xpi`. Build one with the included script (no Node required):
+
+```powershell
+pwsh -File firefox/package.ps1
+# -> firefox/dist/grokive-promptstudio-<version>.xpi
+```
+
+The script zips only the runtime files (manifest at the archive root) and names the output
+after the manifest `version`. It's **unsigned**. From there, pick one:
+
+**Option A — Sign it via AMO (works in normal Firefox, recommended).**
+Firefox release/Beta only installs *signed* extensions permanently. Mozilla will sign an
+**unlisted** (self-distributed) build for you — automated, not publicly listed or reviewed:
+
+1. Create a free account at [addons.mozilla.org](https://addons.mozilla.org/developers/) and
+   generate API credentials under **Manage API Keys**.
+2. Sign with [`web-ext`](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/)
+   (run via `npx`, nothing to install):
+   ```powershell
+   npx web-ext sign --channel=unlisted --source-dir=firefox `
+     --api-key=YOUR_JWT_ISSUER --api-secret=YOUR_JWT_SECRET
+   ```
+   It uploads, signs, and downloads a signed `.xpi` into `web-ext-artifacts/`.
+   *(Or upload `firefox/dist/<name>.xpi` manually: AMO → Submit a New Add-on → “On your own”.)*
+3. Install the signed `.xpi`: `about:addons` → the gear ⚙ → **Install Add-on From File…**.
+   Because the manifest sets a stable id (`grokive-promptstudio@local`), updates keep the same
+   add-on and your settings.
+
+**Option B — Unsigned, on an unsigned-capable build (no AMO account).**
+Only **Firefox Developer Edition, Nightly, or ESR** can disable signature enforcement:
+
+1. `about:config` → set **`xpinstall.signatures.required` = `false`**.
+2. `about:addons` → gear ⚙ → **Install Add-on From File…** → pick the `.xpi` from `package.ps1`.
+
+> Regular release / Beta Firefox **cannot** disable signature checks — use Option A there.
+
+**Develop without rebuilding:** `npx web-ext run --source-dir=firefox` launches a throwaway
+Firefox profile with the extension auto-loaded and live-reloading on file changes;
+`npx web-ext lint --source-dir=firefox` validates the manifest and code.
 
 ## Configuration
 

@@ -1,0 +1,8 @@
+# Build artifacts from package.ps1 / web-ext
+dist/
+web-ext-artifacts/
+*.xpi
+*.zip
+
+# Node tooling (only if you use web-ext locally)
+node_modules/
