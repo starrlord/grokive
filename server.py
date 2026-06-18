@@ -4000,6 +4000,13 @@ def _library_unique_prompts() -> dict:
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict):
             continue
+        # Only import prompts from media that came from Grok (synced/downloaded) or
+        # was generated in-app — never from items UPLOADED to Grokive, whose "prompt"
+        # is just a filename (folder import) or empty (uploaded original). Folder
+        # imports carry `imported: True`; uploaded originals carry `api_generated: False`
+        # (use `is False`, not a bare `not` — Grok records have no api_generated key).
+        if it.get("imported") or it.get("api_generated") is False:
+            continue
         text = str(it.get("prompt") or "").strip()
         if not text:
             continue
