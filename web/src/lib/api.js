@@ -419,13 +419,23 @@ export const saveSavedResponses = (responses) => saveJSON('/api/prompts/response
 // Append ONE saved response server-side (read-modify-write) and get the full list back. Use
 // this from any context that hasn't loaded the full list (e.g. the lightbox) — the full-list
 // POST above would otherwise overwrite the server with whatever the client happens to hold.
-export async function addSavedResponseRemote(text, folder = '') {
+export async function addSavedResponseRemote(text, folder = '', starred = false) {
   const res = await fetch('/api/prompts/responses/add', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, folder })
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, folder, starred })
   });
   const d = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(d.error || 'Could not save.');
   return d; // { ok, added, responses }
+}
+// Star / unstar ONE saved response by id (server read-modify-write) and get the full list back.
+// By-id so it never clobbers the user's other saved prompts the way a full-list POST would.
+export async function starResponseRemote(id, starred) {
+  const res = await fetch('/api/prompts/responses/star', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, starred })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Could not save.');
+  return d; // { ok, responses }
 }
 // Merge media-library prompts (metadata.json) into Saved, server-side: backed up first, deduped,
 // can only grow the list. preview:true returns only counts ({missing, library_unique, saved});

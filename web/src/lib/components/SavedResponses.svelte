@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import {
-    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses, importLibraryIntoSaved
+    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses, importLibraryIntoSaved, toggleStarred
   } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import { auditPromptLabels, autotagPrompt, enhancePrompt, importLibraryPrompts } from '$lib/api.js';
@@ -17,6 +17,7 @@
   // of cross-cutting TAGS. Drag-to-reorder works in a plain folder view (no tag/search filter active).
   const ALL = '__all';
   const UNFILED = '__unfiled';
+  const STARRED = '__starred'; // virtual view: starred items across every folder (never a real folder)
   const ENHANCED_FOLDER = 'Enhanced';
   const LAST_FOLDER_KEY = 'ga.savedResponses.activeFolder';
   const DIALOGUE_LEVELS = [
@@ -52,6 +53,7 @@
     return [...names].sort((a, b) => a.localeCompare(b));
   });
   const unfiledCount = $derived(items.filter((r) => !folderOf(r)).length);
+  const starredCount = $derived(items.filter((r) => r.starred).length);
   const largestFolder = $derived.by(() => {
     let best = '';
     let bestCount = 0;
@@ -72,6 +74,7 @@
   // Filter pipeline: folder → tags (OR) → text search. Array order is preserved throughout.
   const inFolder = $derived(items.filter((r) => {
     if (activeFolder === ALL) return true;
+    if (activeFolder === STARRED) return !!r.starred;
     if (activeFolder === UNFILED) return !folderOf(r);
     return folderOf(r) === activeFolder;
   }));
@@ -95,8 +98,8 @@
 
   // Reordering is only unambiguous when the view isn't sparsely filtered — i.e. no tag filter and no
   // search. A single folder (or All) is fine: the visible rows map cleanly back onto their slots.
-  const canReorder = $derived(activeTags.length === 0 && !q.trim());
-  const activeFolderLabel = $derived(activeFolder === ALL ? 'All' : activeFolder === UNFILED ? 'Unfiled' : activeFolder);
+  const canReorder = $derived(activeFolder !== STARRED && activeTags.length === 0 && !q.trim());
+  const activeFolderLabel = $derived(activeFolder === ALL ? 'All' : activeFolder === STARRED ? 'Starred' : activeFolder === UNFILED ? 'Unfiled' : activeFolder);
 
   function chooseDefaultFolder() {
     if (unfiledCount) return UNFILED;
@@ -121,6 +124,8 @@
   });
   $effect(() => {
     if (!defaultFolderChosen || activeFolder === ALL || activeFolder === UNFILED) return;
+    // Stay on Starred while it still has items; only fall back once the last star is removed.
+    if (activeFolder === STARRED) { if (!starredCount) activeFolder = chooseDefaultFolder(); return; }
     if (!folderNames.includes(activeFolder)) activeFolder = chooseDefaultFolder();
   });
 
@@ -148,7 +153,8 @@
     toast(ok ? 'Copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
   }
   function add() {
-    const folder = activeFolder === ALL || activeFolder === UNFILED ? '' : activeFolder;
+    // ALL / UNFILED / STARRED are virtual views, not real folders — a hand-add from them is Unfiled.
+    const folder = activeFolder === ALL || activeFolder === UNFILED || activeFolder === STARRED ? '' : activeFolder;
     if (addSavedResponse(draft, { folder })) draft = ''; // clear only when it actually saved (not on dupe/empty)
   }
   // Ctrl/⌘+Enter saves without reaching for the button.
@@ -578,6 +584,9 @@
         </li>
       {/snippet}
       {@render folderBtn(ALL, 'All', items.length)}
+      {#if starredCount}
+        {@render folderBtn(STARRED, '★ Starred', starredCount)}
+      {/if}
       {#each folderNames as f (f)}
         <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
           {#if renamingFolder === f}
@@ -679,7 +688,7 @@
         class="w-full resize-y rounded-md border border-line bg-[var(--surface-2)]/70 px-3 py-2 text-sm leading-relaxed text-ink outline-none placeholder:text-muted focus:border-[var(--accent)]"></textarea>
       <div class="mt-2 flex items-center justify-between gap-2">
         <span class="text-[0.6875rem] text-muted">
-          ⌘/Ctrl + Enter to save{#if activeFolder !== ALL && activeFolder !== UNFILED} · to <strong class="font-semibold text-ink">{activeFolder}</strong>{/if}
+          ⌘/Ctrl + Enter to save{#if activeFolder !== ALL && activeFolder !== UNFILED && activeFolder !== STARRED} · to <strong class="font-semibold text-ink">{activeFolder}</strong>{/if}
         </span>
         <div class="flex shrink-0 items-center gap-2">
           {#if llmReady}
@@ -796,6 +805,9 @@
               </div>
 
               <div class="flex shrink-0 flex-row items-center gap-1">
+                <button type="button" onclick={() => toggleStarred(id)} aria-pressed={!!r.starred}
+                  aria-label={r.starred ? 'Unstar prompt' : 'Star prompt'} title={r.starred ? 'Unstar' : 'Star'}
+                  class="grid h-7 w-7 shrink-0 place-items-center rounded-md border text-[0.8125rem] transition {r.starred ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line text-muted hover:border-[var(--accent)] hover:text-ink'}">{r.starred ? '★' : '☆'}</button>
                 {#if llmReady}
                   <button type="button" onclick={() => openEnhance(r)} disabled={enhance.loading} title="Enhance prompt"
                     class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">

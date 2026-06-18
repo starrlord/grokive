@@ -4,7 +4,7 @@ import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
   getSettings, deleteMedia, movieStatus, dismissMovie,
-  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, importLibraryPrompts,
+  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, starResponseRemote, importLibraryPrompts,
   getImagineSessions, imagineJobsAll
 } from './api.js';
 import { toast } from './toast.js';
@@ -623,4 +623,20 @@ export function setSavedResponses(list) {
 export function removeSavedResponse(id) {
   savedResponses.update((r) => r.filter((x) => x.id !== id));
   persistSavedResponses();
+}
+// Toggle the `starred` flag on one saved response. Optimistically flip it in the store, then persist
+// by-id (NOT the full-list save — that would clobber concurrent edits). Revert + toast on failure.
+export async function toggleStarred(id) {
+  let next = false;
+  savedResponses.update((r) => r.map((x) => {
+    if (x.id !== id) return x;
+    next = !x.starred;
+    return { ...x, starred: next };
+  }));
+  try {
+    await starResponseRemote(id, next);
+  } catch {
+    savedResponses.update((r) => r.map((x) => (x.id === id ? { ...x, starred: !next } : x)));
+    toast("Couldn't save your change — check your connection.", { type: 'error' });
+  }
 }

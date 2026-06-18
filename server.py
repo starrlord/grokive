@@ -3948,6 +3948,7 @@ def api_prompts_responses_post() -> Response:
             "created_at": str(entry.get("created_at", ""))[:32],
             "folder": str(entry.get("folder", "")).strip()[:40],
             "tags": tags,
+            "starred": bool(entry.get("starred")),
         })
     _atomic_write_json(RESPONSES_FILE, clean)
     return jsonify(ok=True, count=len(clean))
@@ -3965,6 +3966,7 @@ def api_prompts_responses_add() -> Response:
     if not text:
         return jsonify(ok=False, error="No text provided.", responses=[]), 400
     folder = str(payload.get("folder") or "").strip()[:40]
+    starred = bool(payload.get("starred"))
     current: list = []
     if RESPONSES_FILE.exists():
         try:
@@ -3973,18 +3975,50 @@ def api_prompts_responses_add() -> Response:
                 current = [x for x in loaded if isinstance(x, dict)]
         except Exception:
             current = []
-    if any(str(x.get("text", "")).strip() == text for x in current):
-        return jsonify(ok=True, added=False, responses=current)  # already saved — leave as-is
+    existing = next((x for x in current if str(x.get("text", "")).strip() == text), None)
+    if existing is not None:
+        # already saved — leave folder/tags as-is, but UPGRADE to starred if requested.
+        if starred and not existing.get("starred"):
+            existing["starred"] = True
+            _atomic_write_json(RESPONSES_FILE, current)
+            return jsonify(ok=True, added=False, starred=True, responses=current)
+        return jsonify(ok=True, added=False, responses=current)
     entry = {
         "id": "rs-" + secrets.token_hex(6),
         "text": text,
         "created_at": datetime.date.today().isoformat(),
         "folder": folder,
         "tags": [],
+        "starred": starred,
     }
     current = [entry] + current
     _atomic_write_json(RESPONSES_FILE, current)
     return jsonify(ok=True, added=True, responses=current)
+
+
+@app.post("/api/prompts/responses/star")
+def api_prompts_responses_star() -> Response:
+    """Set the ``starred`` flag on ONE saved response by id (read-modify-write) and return the
+    full list. Starring is independent of folder — only the boolean changes. Backward compatible:
+    a missing ``starred`` on a record reads as False."""
+    payload = request.get_json(silent=True) or {}
+    rid = str(payload.get("id") or "").strip()
+    if not rid:
+        return jsonify(ok=False, error="No prompt id provided.", responses=[]), 400
+    current: list = []
+    if RESPONSES_FILE.exists():
+        try:
+            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                current = [x for x in loaded if isinstance(x, dict)]
+        except Exception:
+            current = []
+    record = next((x for x in current if str(x.get("id", "")) == rid), None)
+    if record is None:
+        return jsonify(ok=False, error="Unknown prompt id.", responses=current), 404
+    record["starred"] = bool(payload.get("starred"))
+    _atomic_write_json(RESPONSES_FILE, current)
+    return jsonify(ok=True, responses=current)
 
 
 def _library_unique_prompts() -> dict:
