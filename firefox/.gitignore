@@ -6,3 +6,7 @@ web-ext-artifacts/
 
 # Node tooling (only if you use web-ext locally)
 node_modules/
+
+# AMO signing state (account/add-on-specific; web-ext writes this on `sign`).
+# Keep it locally so re-signs map to the same add-on, but don't publish it.
+.amo-upload-uuid

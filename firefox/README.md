@@ -89,14 +89,20 @@ Firefox release/Beta only installs *signed* extensions permanently. Mozilla will
 
 1. Create a free account at [addons.mozilla.org](https://addons.mozilla.org/developers/) and
    generate API credentials under **Manage API Keys**.
-2. Sign with [`web-ext`](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/)
-   (run via `npx`, nothing to install):
+2. Set the two credentials as environment variables and run the included helper, which wraps
+   [`web-ext`](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/)
+   (via `npx`, nothing to install) with the right flags and fails fast if anything's missing:
    ```powershell
-   npx web-ext sign --channel=unlisted --source-dir=firefox `
-     --api-key=YOUR_JWT_ISSUER --api-secret=YOUR_JWT_SECRET
+   $env:WEB_EXT_API_KEY    = "user:1234567:89"     # JWT issuer
+   $env:WEB_EXT_API_SECRET = "your-long-secret"    # JWT secret
+   pwsh -File firefox/sign.ps1
    ```
-   It uploads, signs, and downloads a signed `.xpi` into `web-ext-artifacts/`.
-   *(Or upload `firefox/dist/<name>.xpi` manually: AMO → Submit a New Add-on → “On your own”.)*
+   It uploads, AMO signs it, and the signed `.xpi` is downloaded into `firefox/dist/`.
+   *(The helper just adds the right flags. Equivalent raw command: `npx web-ext sign
+   --channel=unlisted --source-dir=firefox --artifacts-dir=firefox/dist
+   --ignore-files=README.md --ignore-files=package.ps1 --ignore-files=sign.ps1 --ignore-files=dist/**`
+   — web-ext reads the two env vars automatically. Or upload the signed `.xpi`
+   manually: AMO → Submit a New Add-on → “On your own”.)*
 3. Install the signed `.xpi`: `about:addons` → the gear ⚙ → **Install Add-on From File…**.
    Because the manifest sets a stable id (`grokive-promptstudio@local`), updates keep the same
    add-on and your settings.
