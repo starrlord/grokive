@@ -1218,24 +1218,33 @@ def assemble(segments: list[Path], song_path: Path, out_path: Path,
 def assemble_transitions(segments: list[Path], durations: list[float],
                          joins: list[tuple[str, float]], song_path: Path,
                          out_path: Path, *, video_encode_args: list[str],
-                         mux_audio: bool = True) -> None:
-    """Assemble segments with xfade accent transitions, muxing the song over them.
+                         fps: int, mux_audio: bool = True) -> None:
+    """Assemble segments with crossfade accent transitions, muxing the song over them.
 
-    ``durations[i]`` is the rendered length of segment ``i`` (including its
-    handles). ``joins[i]`` is the (transition_type, transition_dur) describing the
-    join *into* segment ``i`` (``joins[0]`` is unused). Runs of consecutive hard
-    cuts are first concatenated losslessly with the concat *demuxer* into one
-    intermediate file each; only the genuine transition boundaries then meet in an
-    ``xfade`` filtergraph. This keeps the number of simultaneously-open ffmpeg
-    inputs equal to the number of runs (≈ transitions + 1) rather than the total
-    segment count — a 256-clip timeline opens a few dozen decoders, not hundreds,
-    which is the difference between fitting in RAM and being OOM-killed mid-render.
-    Because each transition's handles add exactly its duration back across the two
-    neighbours, the overlaps net out and the final video length equals the planned
-    timeline, keeping the muxed song in sync.
+    ``durations[i]`` is the rendered length of segment ``i`` (including its handles).
+    ``joins[i]`` is the (transition_type, transition_dur) describing the join *into*
+    segment ``i`` (``joins[0]`` is unused).
+
+    Consecutive hard cuts are first concatenated losslessly (concat demuxer) into one
+    run file each, so only genuine transition boundaries need a crossfade. Each
+    crossfade is then rendered in ISOLATION (one reliable two-input ``xfade``): the
+    td-second tail of a run is blended with the td-second head of the next into a
+    td-second clip, and every run is trimmed to the body between its bordering
+    transitions. Concatenating bodies + transition clips reproduces exactly the same
+    overlap (length = sum(run durations) - sum(td) = the planned timeline) and blends
+    the same frames, so it is visually identical to a correct xfade.
+
+    This deliberately AVOIDS a single N-deep ``xfade`` filtergraph: past ~2 chained
+    stages ffmpeg silently drops everything after an early transition even when every
+    offset is in range, which collapsed dense cinematic montages to ~12s. Isolated
+    single-stage xfades don't hit that.
     """
     n = len(segments)
     work_dir = out_path.parent
+
+    def _safe(p) -> str:
+        return str(Path(p).resolve()).replace("'", "'\\''")
+
     # Partition into runs of consecutive hard cuts; a transition starts a new run.
     runs: list[list[int]] = []
     cur = [0]
@@ -1247,68 +1256,80 @@ def assemble_transitions(segments: list[Path], durations: list[float],
             cur.append(i)
     runs.append(cur)
 
-    # Materialise each hard-cut run to a single file with the concat *demuxer*
-    # (stream copy — every segment is rendered with identical encode params, so
-    # this is lossless and uses near-zero memory, exactly like ``assemble``). A
-    # length-1 run is already its own file and needs no copy.
+    # Materialise each hard-cut run to a single file (concat demuxer, stream copy —
+    # lossless and near-zero memory). A length-1 run is already its own file.
     run_files: list[Path] = []
     run_durs: list[float] = []
     for ri, run in enumerate(runs):
-        run_durs.append(sum(durations[i] for i in run))
         if len(run) == 1:
-            run_files.append(segments[run[0]])
+            run_files.append(Path(segments[run[0]]))
+            run_durs.append(durations[run[0]])
             continue
         listfile = work_dir / f"run_{ri:04d}.txt"
-        lines = []
-        for i in run:
-            safe = str(Path(segments[i]).resolve()).replace("'", "'\\''")
-            lines.append(f"file '{safe}'\n")
-        listfile.write_text("".join(lines), encoding="utf-8")
+        listfile.write_text("".join(f"file '{_safe(segments[i])}'\n" for i in run), encoding="utf-8")
         rf = work_dir / f"run_{ri:04d}.mp4"
         _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
               "-i", str(listfile), "-c", "copy", "-movflags", "+faststart", str(rf)],
              f"transition run {ri} concat")
         run_files.append(rf)
+        run_durs.append(probe_duration(rf))
 
-    inputs: list[str] = []
-    for p in run_files:
-        inputs += ["-i", str(p)]
+    # td consumed from each run's head (transition into it) and tail (out of it).
+    K = len(runs)
+    td_in = [0.0] * K
+    for ri in range(1, K):
+        td_in[ri] = joins[runs[ri][0]][1]
+    td_out = [0.0] * K
+    for ri in range(K - 1):
+        td_out[ri] = td_in[ri + 1]
 
-    # Every run is normalised to a common timebase (and pixel format / SAR) before
-    # it reaches xfade. xfade outputs at AVTB (1/1000000) but raw inputs carry
-    # their own container timebase, and xfade refuses to configure when a chained
-    # xfade output meets a fresh input with a different timebase — so the whole
-    # graph must speak one timebase end to end.
-    fc: list[str] = []
-    run_labels: list[str] = []
-    norm = "settb=AVTB,format=yuv420p,setsar=1"
-    for ri in range(len(runs)):
-        lbl = f"run{ri}"
-        fc.append(f"[{ri}:v]{norm}[{lbl}]")
-        run_labels.append(lbl)
+    # Every piece is re-encoded to the same W/H/fps/SAR/pixfmt so the final concat is a
+    # lossless stream copy. xfade needs CFR inputs, so the trims force fps explicitly.
+    norm = f"fps={fps},format=yuv420p,setsar=1"
+    pieces: list[Path] = []
+    for ri in range(K):
+        src, d = run_files[ri], run_durs[ri]
+        body_len = max(0.0, d - td_in[ri] - td_out[ri])
+        if body_len > 1e-3:
+            body = work_dir / f"body_{ri:04d}.mp4"
+            _run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                  "-ss", f"{td_in[ri]:.4f}", "-t", f"{body_len:.4f}",
+                  "-vf", norm, "-an", *video_encode_args, "-movflags", "+faststart", str(body)],
+                 f"transition body {ri}")
+            pieces.append(body)
+        if ri < K - 1:
+            ttype, td = joins[runs[ri + 1][0]]
+            tail = work_dir / f"tail_{ri:04d}.mp4"
+            head = work_dir / f"head_{ri:04d}.mp4"
+            _run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                  "-ss", f"{max(0.0, d - td):.4f}", "-t", f"{td:.4f}",
+                  "-vf", norm, "-an", *video_encode_args, "-movflags", "+faststart", str(tail)],
+                 f"transition tail {ri}")
+            _run(["ffmpeg", "-y", "-v", "error", "-i", str(run_files[ri + 1]),
+                  "-t", f"{td:.4f}", "-vf", norm, "-an", *video_encode_args,
+                  "-movflags", "+faststart", str(head)],
+                 f"transition head {ri}")
+            xc = work_dir / f"xfade_{ri:04d}.mp4"
+            _run(["ffmpeg", "-y", "-v", "error", "-i", str(tail), "-i", str(head),
+                  "-filter_complex",
+                  f"[0:v]{norm}[a];[1:v]{norm}[b];"
+                  f"[a][b]xfade=transition={ttype}:duration={td:.4f}:offset=0[v]",
+                  "-map", "[v]", *video_encode_args, "-movflags", "+faststart", str(xc)],
+                 f"transition xfade {ri}")
+            pieces.append(xc)
 
-    cur_label = run_labels[0]
-    running = run_durs[0]
-    for ri in range(1, len(runs)):
-        ttype, td = joins[runs[ri][0]]
-        offset = max(0.0, running - td)
-        out_label = f"x{ri}"
-        fc.append(f"[{cur_label}][{run_labels[ri]}]"
-                  f"xfade=transition={ttype}:duration={td:.4f}:offset={offset:.4f}[{out_label}]")
-        running = running + run_durs[ri] - td
-        cur_label = out_label
+    # Concat all bodies + transition clips (uniform encode params -> lossless copy).
+    catlist = work_dir / "pieces.txt"
+    catlist.write_text("".join(f"file '{_safe(p)}'\n" for p in pieces), encoding="utf-8")
+    joined = work_dir / "video_joined.mp4" if mux_audio else out_path
+    _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(catlist),
+          "-c", "copy", "-movflags", "+faststart", str(joined)], "concat transition pieces")
 
-    nf = len(run_files)
-    cmd = ["ffmpeg", "-y", "-v", "error", *inputs]
     if mux_audio:
-        cmd += ["-i", str(song_path), "-filter_complex", ";".join(fc),
-                "-map", f"[{cur_label}]", "-map", f"{nf}:a:0",
-                *video_encode_args, "-c:a", "aac", "-b:a", "192k", "-shortest"]
-    else:
-        cmd += ["-filter_complex", ";".join(fc), "-map", f"[{cur_label}]",
-                *video_encode_args]
-    cmd += ["-movflags", "+faststart", str(out_path)]
-    _run(cmd, "final assembly (transitions)")
+        _run(["ffmpeg", "-y", "-v", "error", "-i", str(joined), "-i", str(song_path),
+              "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+              "-shortest", "-movflags", "+faststart", str(out_path)],
+             "mux song over transitions")
 
 
 def _duck_expr(a: float, p: float, b: float, c: float, gain: float) -> str:
@@ -1531,20 +1552,28 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         tmp_video = work_dir / "video_only.mp4"
         if n_trans:
             assemble_transitions(segments, durations, joins, song_path, tmp_video,
-                                 video_encode_args=video_encode_args, mux_audio=False)
+                                 video_encode_args=video_encode_args, fps=fps, mux_audio=False)
         else:
             assemble(segments, song_path, tmp_video, mux_audio=False)
         _duck_and_mux(tmp_video, song_path, duck_windows, out_path)
     elif n_trans:
         assemble_transitions(segments, durations, joins, song_path, out_path,
-                             video_encode_args=video_encode_args)
+                             video_encode_args=video_encode_args, fps=fps)
     else:
         assemble(segments, song_path, out_path)
 
+    # Safety net + honest duration: a silent xfade overshoot used to ship a stub
+    # (e.g. 12s of a 240s plan). Probe the real file; fail loudly if it came out wildly
+    # short rather than committing garbage, and report the ACTUAL length, not the plan.
+    actual = probe_duration(out_path)
+    if actual > 0 and actual < 0.5 * edl.timeline_duration:
+        raise RuntimeError(
+            f"assembled montage is {actual:.0f}s but the plan was "
+            f"{edl.timeline_duration:.0f}s — transition assembly dropped clips")
     size = out_path.stat().st_size
     return {
         "width": width, "height": height, "fps": fps,
-        "duration": round(edl.timeline_duration, 3),
+        "duration": round(actual if actual > 0 else edl.timeline_duration, 3),
         "size_bytes": size, "cuts": len(edl.entries), "seed": seed,
         "preset": preset, "transitions": n_trans, "spoken": len(duck_windows),
     }
