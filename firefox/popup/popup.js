@@ -14,7 +14,7 @@
  *   - randomPrompt   { folder }
  *   - enhance        { prompt, dialogueLevel, dialogueOnly }
  *   - generate       { prompt, mode, n }
- *   - savePrompt     { text, folder? }
+ *   - savePrompt     { text, folder?, starred? }
  *   - copyToClipboard { text }
  */
 
@@ -40,7 +40,7 @@ function bindElements() {
     'sourceFolder', 'randomBtn', 'anotherBtn',
     'promptText', 'charCount', 'poolInfo',
     'copyBtn', 'undoBtn', 'dialogueSeg', 'dialogueOnly',
-    'enhanceBtn', 'variationsBtn', 'saveBtn', 'saveBtnFolder', 'variationsList',
+    'enhanceBtn', 'variationsBtn', 'saveBtn', 'saveBtnFolder', 'starBtn', 'variationsList',
     'newPromptText', 'saveNewBtn', 'saveNewBtnLabel',
   ];
   for (const id of ids) el[id] = document.getElementById(id);
@@ -175,6 +175,12 @@ function populateFolders(data) {
   allOpt.value = '__all';
   allOpt.textContent = 'All' + (total ? ' (' + total + ')' : '');
   sel.appendChild(allOpt);
+
+  const starred = (data && typeof data.starred === 'number') ? data.starred : 0;
+  const starOpt = document.createElement('option');
+  starOpt.value = '__starred';
+  starOpt.textContent = '★ Starred' + (starred ? ' (' + starred + ')' : '');
+  sel.appendChild(starOpt);
 
   if (unfiled > 0) {
     const u = document.createElement('option');
@@ -350,6 +356,23 @@ async function doSaveCurrent() {
   }
 }
 
+async function doStarCurrent() {
+  const text = el.promptText.value.trim();
+  if (!text) { toast('Nothing to star.', 'info'); return; }
+  const folder = settings.saveFolder || DEFAULT_SETTINGS.saveFolder;
+  setBusy(el.starBtn, true, 'Starring…');
+  const res = await send('savePrompt', { text, folder, starred: true });
+  setBusy(el.starBtn, false);
+
+  if (!res.ok) {
+    toast(res.error || 'Save failed.', 'error');
+    return;
+  }
+  toast('Saved & starred ★', 'ok');
+  // Refresh folder counts in the background-backed select.
+  refreshFolders();
+}
+
 async function doSaveNew() {
   const text = el.newPromptText.value.trim();
   if (!text) { toast('Write a prompt to save.', 'info'); return; }
@@ -434,6 +457,7 @@ async function init() {
   el.enhanceBtn?.addEventListener('click', doEnhance);
   el.variationsBtn?.addEventListener('click', doVariations);
   el.saveBtn?.addEventListener('click', doSaveCurrent);
+  el.starBtn?.addEventListener('click', doStarCurrent);
   el.saveNewBtn?.addEventListener('click', doSaveNew);
   el.dialogueSeg?.addEventListener('click', onSegClick);
   el.sourceFolder?.addEventListener('change', onSourceChange);

@@ -278,6 +278,7 @@
         responses: responses,
         folders: folders,
         unfiled: unfiled,
+        starred: responses.filter((r) => r && r.starred).length,
         total: responses.length
       });
     } catch (e) {
@@ -286,7 +287,7 @@
   }
 
   // { type:'randomPrompt', folder } — background does the pick.
-  // folder: '__all' | '__unfiled' | a folder name
+  // folder: '__all' | '__unfiled' | '__starred' | a folder name
   async function randomPrompt(folder) {
     try {
       const s = await getSettingsRaw();
@@ -302,6 +303,8 @@
         pool = all;
       } else if (sel === '__unfiled') {
         pool = all.filter((r) => !(r && typeof r.folder === 'string' && r.folder.trim()));
+      } else if (sel === '__starred') {
+        pool = all.filter((r) => r && r.starred);
       } else {
         pool = all.filter((r) => r && typeof r.folder === 'string' && r.folder.trim() === sel);
       }
@@ -368,20 +371,38 @@
     }
   }
 
-  // { type:'savePrompt', text, folder } — folder defaults to settings.saveFolder.
+  // { type:'savePrompt', text, folder, starred } — folder defaults to settings.saveFolder.
   // Uses the server's append+dedupe endpoint so it never clobbers other items.
-  async function savePrompt(text, folder) {
+  async function savePrompt(text, folder, starred) {
     try {
       const s = await getSettingsRaw();
       const t = (text || '').trim();
       if (!t) return { ok: false, error: 'Nothing to save — the prompt is empty.' };
       const target = (folder && String(folder).trim()) ? String(folder).trim() : s.saveFolder;
-      const body = { text: t, folder: target };
+      const body = { text: t, folder: target, starred: !!starred };
       const { res, json } = await withAuth(s, (ss) => postJson(ss.baseUrl, '/api/prompts/responses/add', body));
       if (!res.ok || !json || json.ok === false) {
         return { ok: false, error: extractError(res, json, 'Save failed') };
       }
-      return ok({ added: !!json.added, folder: target });
+      return ok({ added: !!json.added, folder: target, starred: !!json.starred });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // { type:'starPrompt', id, starred } — flip the starred flag on a saved prompt.
+  // Uses the server's by-id endpoint so it never clobbers other items.
+  async function starPrompt(id, starred) {
+    try {
+      const s = await getSettingsRaw();
+      const pid = (id == null) ? '' : String(id).trim();
+      if (!pid) return { ok: false, error: 'Nothing to star — missing prompt id.' };
+      const body = { id: pid, starred: !!starred };
+      const { res, json } = await withAuth(s, (ss) => postJson(ss.baseUrl, '/api/prompts/responses/star', body));
+      if (!res.ok || !json || json.ok === false) {
+        return { ok: false, error: extractError(res, json, 'Star failed') };
+      }
+      return ok({ starred: !!starred });
     } catch (e) {
       return fail(e);
     }
@@ -428,6 +449,7 @@
     enhance: enhance,
     generate: generate,
     savePrompt: savePrompt,
+    starPrompt: starPrompt,
     copyToClipboard: copyToClipboard,
     // Internal helper reused by the 'random-prompt' command in background.js:
     getSettingsRaw: getSettingsRaw

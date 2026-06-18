@@ -275,6 +275,24 @@
     toast(added ? ('Saved to ' + folder + ' ✓') : ('Already in ' + folder), 'ok');
   }
 
+  async function doStar(btn) {
+    const field = findPromptField();
+    if (!field) { toast('No prompt field found to save.', 'error'); return; }
+    const current = getFieldText(field).trim();
+    if (!current) { toast('Field is empty — nothing to save.', 'error'); return; }
+
+    setBusy(btn, true);
+    // folder omitted -> background defaults to settings.saveFolder; starred upgrades
+    // an existing entry too (background dedupes by text and bumps the star flag).
+    const res = await send({ type: 'savePrompt', text: current, starred: true });
+    setBusy(btn, false);
+    if (!res.ok) { toast(res.error || 'Save failed.', 'error'); return; }
+
+    const folder = (res.data && res.data.folder) ? res.data.folder : 'Firefox';
+    const added = res.data && res.data.added;
+    toast(added ? ('Saved & starred ★ to ' + folder) : ('Starred ★ in ' + folder), 'ok');
+  }
+
   // ---- Toolbar construction ----------------------------------------------------
   let toolbarEl = null;
 
@@ -360,10 +378,13 @@
     const btnRandom = mkBtn('🎲', 'Random prompt from your library (Grokive)', doRandom);
     const btnEnhance = mkBtn('✨', 'Enhance the current prompt with AI', doEnhance);
     const btnSave = mkBtn('💾', 'Save the current prompt to your saveFolder', doSave);
+    const btnStar = mkBtn('⭐', 'Save & star the current prompt (Grokive favorites)', doStar);
+    btnStar.classList.add('gks-btn-star');
 
     group.appendChild(btnRandom);
     group.appendChild(btnEnhance);
     group.appendChild(btnSave);
+    group.appendChild(btnStar);
 
     // Close button hides the toolbar for this page session.
     const close = document.createElement('button');

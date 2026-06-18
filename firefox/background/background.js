@@ -51,7 +51,10 @@
         return API.generate(msg.prompt, msg.mode, msg.n, msg.instruction);
 
       case 'savePrompt':
-        return API.savePrompt(msg.text, msg.folder);
+        return API.savePrompt(msg.text, msg.folder, msg.starred);
+
+      case 'starPrompt':
+        return API.starPrompt(msg.id, msg.starred);
 
       case 'getSettings':
         return API.getSettings();

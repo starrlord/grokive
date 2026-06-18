@@ -77,7 +77,7 @@
   align-items: center;
   gap: 6px;
   overflow: hidden;
-  max-width: 200px;
+  max-width: 260px;
   opacity: 1;
   transition: max-width 0.18s ease, opacity 0.14s ease, margin 0.18s ease;
 }
@@ -119,6 +119,11 @@
 
 .gks-btn:active {
   transform: scale(0.92);
+}
+
+/* Star (save & favorite) — warm amber accent to set it apart from plain Save. */
+.gks-btn-star:hover {
+  border-color: #b08a2e;
 }
 
 .gks-btn:disabled,

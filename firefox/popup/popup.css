@@ -213,6 +213,14 @@ html, body {
 }
 .gks-btn--ok:hover { background: rgba(54, 179, 126, 0.26); }
 
+.gks-btn--star {
+  background: rgba(224, 162, 59, 0.16);
+  border-color: rgba(224, 162, 59, 0.5);
+  color: #f3d59b;
+  font-weight: 600;
+}
+.gks-btn--star:hover { background: rgba(224, 162, 59, 0.26); }
+
 .gks-btn--ghost { background: var(--gks-bg-2); }
 
 /* ---------- Action area ---------- */
