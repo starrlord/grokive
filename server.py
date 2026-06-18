@@ -2173,6 +2173,37 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict
             _movie["running"] = False
 
 
+def _auto_canvas_from_sources(ids: list, default_wh: tuple[int, int] = (1920, 1080)) -> tuple[int, int]:
+    """Canvas size matching the largest (by pixel area) source video, so clips of that
+    shape render edge-to-edge instead of being cropped/letterboxed to a mismatched
+    frame. Montages and rows without known dimensions are ignored; the result is scaled
+    down (never up) to fit the renderer's 3840x2160 ceiling, clamped to its floor, and
+    forced to even dimensions (H.264). Falls back to ``default_wh`` when nothing is
+    probeable (e.g. an index that predates dimension capture)."""
+    try:
+        rows = db.media_by_ids(DB_FILE, [str(i) for i in ids])
+    except Exception:
+        rows = []
+    best = None  # (area, w, h)
+    for r in rows:
+        if r.get("media_type") != "video" or r.get("model") == "Beat Montage":
+            continue
+        w, h = r.get("media_w"), r.get("media_h")
+        if not (w and h):
+            continue
+        area = int(w) * int(h)
+        if best is None or area > best[0]:
+            best = (area, int(w), int(h))
+    if not best:
+        return default_wh
+    _, w, h = best
+    scale = min(1.0, 3840 / w, 2160 / h)  # shrink to fit the ceiling; never upscale
+    w, h = round(w * scale), round(h * scale)
+    w = max(160, min(3840, w)); w -= w % 2
+    h = max(160, min(2160, h)); h -= h % 2
+    return (w, h)
+
+
 @app.post("/api/movie/generate")
 def api_movie_generate() -> Response:
     """Start a beat-synced montage render. Multipart: ``video_ids`` (JSON array),
@@ -2215,12 +2246,20 @@ def api_movie_generate() -> Response:
     speak_raw = (request.form.get("speak_moments") or "auto").strip().lower()
     speak_moments = speak_raw if speak_raw == "auto" else (
         str(max(1, min(6, int(speak_raw)))) if speak_raw.isdigit() else "auto")
+    # Resolution: "auto" (or no explicit width sent) sizes the canvas to the largest
+    # source clip so footage isn't cropped/letterboxed to a mismatched frame; an
+    # explicit width/height from the manual picker overrides it.
+    if (request.form.get("resolution") or "").strip().lower() == "auto" or not request.form.get("width"):
+        canvas_w, canvas_h = _auto_canvas_from_sources(ids)
+    else:
+        canvas_w = int(_num("width", 1920, 160, 3840, int))
+        canvas_h = int(_num("height", 1080, 160, 2160, int))
     options = {
         "name": (request.form.get("name") or "movie")[:80],
         "preset": preset,
         "tightness": _num("tightness", 0.5, 0.0, 1.0),
-        "width": int(_num("width", 1920, 160, 3840, int)),
-        "height": int(_num("height", 1080, 160, 2160, int)),
+        "width": canvas_w,
+        "height": canvas_h,
         "fps": int(_num("fps", 30, 12, 60, int)),
         "target_duration": (max(1.0, float(target)) if target else None),
         # Each run sends a fresh seed so successive renders differ; absent/invalid

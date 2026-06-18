@@ -13,6 +13,9 @@
   let { videoIds = [], onclose = () => {} } = $props();
 
   const RES = [
+    // Auto (default): the server sizes the canvas to the largest source clip so
+    // footage isn't cropped to a mismatched frame. w/h null => send resolution:'auto'.
+    { id: 'auto', label: 'Auto', w: null, h: null },
     { id: 'land1080', label: '1080p · 16:9', w: 1920, h: 1080 },
     { id: 'land720', label: '720p · 16:9', w: 1280, h: 720 },
     { id: 'vert', label: 'Vertical · 9:16', w: 1080, h: 1920 },
@@ -36,7 +39,7 @@
   // dialogue (from their subtitles) in the song's quiet spots and dip the music.
   let letClipsSpeak = $state(false);
   let speakMoments = $state('auto'); // 'auto' | '1'..'4'
-  let resId = $state('land1080');
+  let resId = $state('auto');
   let fps = $state(30);
   let targetDuration = $state('');
   let name = $state('movie');
@@ -128,8 +131,8 @@
           name: name.trim() || 'movie',
           preset,
           tightness,
-          width: res.w,
-          height: res.h,
+          // Auto (res.w/h null) lets the server match the largest clip; otherwise pin the picked size.
+          ...(res.w && res.h ? { width: res.w, height: res.h } : { resolution: 'auto' }),
           fps,
           target_duration: targetDuration,
           let_clips_speak: letClipsSpeak,
@@ -341,6 +344,11 @@
                     onclick={() => (resId = r.id)}>{r.label}</button>
                 {/each}
               </div>
+              <p class="mt-2 text-xs leading-relaxed text-muted">
+                {resId === 'auto'
+                  ? 'Matches the largest selected clip so nothing gets cropped to a mismatched frame.'
+                  : 'Fixed frame — clips of a different shape are cropped (Cinematic) or letterboxed (Classic/Moody).'}
+              </p>
             </div>
             <div class="space-y-4">
               <div>
