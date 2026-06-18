@@ -9,7 +9,7 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, activeCollectionId, updateCollection, removeFromCollection, ensureMoviePolling, movieChip,
+    collections, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
     galleryReload, basket, enqueueBasket
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
@@ -122,6 +122,12 @@
     const nextPage = reset ? 1 : page + 1;
     const pageSize = Math.max(PAGE_SIZE, Math.min(collection.ids?.length || PAGE_SIZE, 500));
     try {
+      // The server resolves `collection` to its ids from collections.json, so a reload
+      // triggered by a local mutation (e.g. Remove from collection) must wait for that
+      // mutation's save to land — otherwise it reads the pre-save list and the change
+      // appears to revert. settled() is already-resolved for a plain open, so no delay.
+      await collectionsSettled();
+      if (mine !== collReq) return;
       const res = await fetchMedia($filters, nextPage, pageSize, collection.id);
       if (mine !== collReq) return;
       collectionTotal = res.total;
@@ -324,6 +330,10 @@
   }
   function removeSelectionFromCollection() {
     if (!activeCollection || !$selection.length) return;
+    // Drop from the visible grid immediately so the action feels instant; the reactive
+    // reload (which now awaits the save) reconciles against the server afterwards.
+    const drop = new Set($selection.map(String));
+    collectionItems = collectionItems.filter((it) => !drop.has(String(it.id)));
     removeFromCollection(activeCollection.id, $selection);
     clearSelection();
   }

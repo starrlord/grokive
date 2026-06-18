@@ -404,11 +404,22 @@ export const activeCollectionId = writable(null);
 const cid = () => 'co-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 const today = () => new Date().toISOString().slice(0, 10);
 
+// Collection mutations persist with a fire-and-forget POST, but several reads resolve a
+// collection's ids from the server's collections.json (the /api/media + /api/facets
+// `collection=` path, and loadCollections itself). A reload fired right after a local
+// mutation therefore races the unawaited save and often reads the PRE-save list — which
+// looked like "Remove from collection didn't take" (the removed item reappeared on the
+// reload). Track the in-flight save so those reads can await it (read-after-write order).
+let collectionsSaved = Promise.resolve();
+export function collectionsSettled() {
+  return collectionsSaved;
+}
 export async function loadCollections() {
+  await collectionsSaved;
   collections.set(await fetchCollections());
 }
 function persistCollections() {
-  saveCollections(get(collections));
+  collectionsSaved = saveCollections(get(collections));
 }
 function uniqueIds(ids) {
   const seen = new Set();
