@@ -9,6 +9,8 @@
   const options = [
     { value: 'new', label: 'Newest' },
     { value: 'old', label: 'Oldest' },
+    { value: 'size', label: 'Largest' },
+    { value: 'size_asc', label: 'Smallest' },
     { value: 'prompt', label: 'Prompt A–Z' },
     { value: 'model', label: 'Model A–Z' }
   ];

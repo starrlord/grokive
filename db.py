@@ -383,6 +383,10 @@ def query_media(
             "old": "m.created_at ASC",
             "prompt": "m.prompt COLLATE NOCASE ASC",
             "model": "m.model COLLATE NOCASE ASC",
+            # `m.size_bytes IS NULL` first keeps files whose size is unknown (e.g. the file
+            # vanished off disk) at the bottom in BOTH directions; created_at breaks ties.
+            "size": "m.size_bytes IS NULL, m.size_bytes DESC, m.created_at DESC",
+            "size_asc": "m.size_bytes IS NULL, m.size_bytes ASC, m.created_at DESC",
         }.get(sort, "m.created_at DESC")
 
         total = conn.execute(f"SELECT COUNT(*) FROM media m{joins}{where_sql}", params).fetchone()[0]

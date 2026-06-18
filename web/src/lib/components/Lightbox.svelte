@@ -34,14 +34,16 @@
     setTimeout(() => (b.textContent = prev), 1200);
   }
 
-  // Human file size: "812 KB", "3.8 MB", "2 GB" (drops a trailing .0).
+  // Human file size: "812 KB", "54 MB", "800 MB", "1.1 GB". One decimal under 10 of a
+  // unit, whole numbers at/above 10, and a trailing ".0" is always dropped.
   function fmtSize(b) {
     if (b == null || b === '') return '';
     if (b < 1024) return `${b} B`;
-    if (b < 1024 ** 2) return `${Math.round(b / 1024)} KB`;
-    if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} MB`;
-    const gb = b / 1024 ** 3;
-    return `${gb.toFixed(gb < 10 ? 1 : 0).replace(/\.0$/, '')} GB`;
+    const units = ['KB', 'MB', 'GB', 'TB'];
+    let n = b / 1024, u = 0;
+    while (n >= 1024 && u < units.length - 1) { n /= 1024; u++; }
+    const s = (n < 10 ? n.toFixed(1) : Math.round(n).toString()).replace(/\.0$/, '');
+    return `${s} ${units[u]}`;
   }
 
   let { list = [], index = 0, autoAdvance = false, title = '', onclose = () => {}, onopenrelated = () => {} } = $props();

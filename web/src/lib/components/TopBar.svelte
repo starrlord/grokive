@@ -105,6 +105,8 @@
                   value={$filters.sort} onchange={(e) => setSort(e.target.value)}>
                   <option value="new">Newest</option>
                   <option value="old">Oldest</option>
+                  <option value="size">Largest</option>
+                  <option value="size_asc">Smallest</option>
                   <option value="prompt">Prompt A–Z</option>
                   <option value="model">Model A–Z</option>
                 </select>
