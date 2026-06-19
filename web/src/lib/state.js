@@ -516,10 +516,52 @@ export const settings = writable({
   xai_image_aspect_ratio: '1:1',
   xai_video_resolution: '480p',
   xai_video_aspect_ratio: '16:9',
-  xai_video_duration: 6
+  xai_video_duration: 6,
+  // Subtitle display style (player ::cue + burned-in export). Server-persisted.
+  subtitle_font: 'system',
+  subtitle_size: 170,
+  subtitle_color: '#ffffff',
+  subtitle_bg_opacity: 0.25
 });
 export async function loadSettings() {
   try { settings.set(await getSettings()); } catch {}
+}
+
+// --- Subtitle display style -------------------------------------------------
+// Curated font choices. `id` is what's persisted (must match _SUB_FONT_LIBASS in
+// server.py); `stack` is the CSS font-family the player's ::cue uses. The burned-in
+// export maps the same id to a DejaVu family server-side.
+export const SUBTITLE_FONTS = [
+  { id: 'system', label: 'System', stack: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' },
+  { id: 'sans', label: 'Sans-serif', stack: '"Helvetica Neue", Arial, sans-serif' },
+  { id: 'serif', label: 'Serif', stack: 'Georgia, "Times New Roman", serif' },
+  { id: 'mono', label: 'Monospace', stack: 'ui-monospace, "Courier New", monospace' }
+];
+export const SUBTITLE_STYLE_DEFAULTS = {
+  subtitle_font: 'system',
+  subtitle_size: 170,
+  subtitle_color: '#ffffff',
+  subtitle_bg_opacity: 0.25
+};
+
+const _subStack = (id) => (SUBTITLE_FONTS.find((f) => f.id === id) || SUBTITLE_FONTS[0]).stack;
+const _subSize = (n) => { const v = Math.round(Number(n)); return Number.isFinite(v) ? Math.max(25, Math.min(400, v)) : 170; };
+const _subOpacity = (n) => { const v = Number(n); return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.25; };
+const _subColor = (c) => (/^#[0-9a-fA-F]{6}$/.test(c) ? c : '#ffffff');
+
+// A complete `video::cue { … }` rule built from literal values — injected into the
+// document head so we don't depend on CSS custom properties resolving inside ::cue
+// (which is inconsistent across engines).
+export function subtitleCueRule(s) {
+  return `video::cue{font-family:${_subStack(s.subtitle_font)};font-size:${_subSize(s.subtitle_size)}%;`
+    + `color:${_subColor(s.subtitle_color)};background-color:rgba(0,0,0,${_subOpacity(s.subtitle_bg_opacity)});}`;
+}
+
+// Inline style for the modal's sample-caption preview (an absolute px size stands in
+// for the cue's percentage so the preview reads at a sensible scale).
+export function subtitlePreviewStyle(s) {
+  return `font-family:${_subStack(s.subtitle_font)};font-size:${Math.round(20 * _subSize(s.subtitle_size) / 100)}px;`
+    + `color:${_subColor(s.subtitle_color)};background-color:rgba(0,0,0,${_subOpacity(s.subtitle_bg_opacity)});`;
 }
 
 // --- Grok Imagine: multi-session workspaces --------------------------------

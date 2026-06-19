@@ -531,6 +531,16 @@ body {
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }
 
+/* Subtitle (WebVTT) cue baseline — the Subtitle display panel overrides this with
+   a literal rule injected into <head> from the saved settings (see +layout.svelte
+   / subtitleCueRule). This default keeps captions styled before that runs. */
+video::cue {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 170%;
+  color: #ffffff;
+  background-color: rgba(0, 0, 0, 0.25);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }

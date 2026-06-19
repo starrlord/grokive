@@ -335,6 +335,40 @@ def _burn_enabled() -> bool:
     return bool(_load_settings().get("burn_subtitles"))
 
 
+# Subtitle display style — shared by the player's ::cue rendering (read via
+# /api/settings) and the burned-in export (mapped to libass below). Curated font
+# keys must stay in sync with SUBTITLE_FONTS in web/src/lib/state.js; each maps to
+# a family fontconfig can resolve in the container (fonts-dejavu-core, see Dockerfile).
+_SUB_FONT_LIBASS = {
+    "system": "DejaVu Sans",
+    "sans": "DejaVu Sans",
+    "serif": "DejaVu Serif",
+    "mono": "DejaVu Sans Mono",
+}
+
+
+def _sub_size(v) -> int:
+    """Subtitle size as a percentage of the renderer default, clamped 25–400."""
+    try:
+        return max(25, min(400, int(round(float(v)))))
+    except (TypeError, ValueError):
+        return 170
+
+
+def _sub_opacity(v) -> float:
+    """Background-box opacity 0.0–1.0."""
+    try:
+        return max(0.0, min(1.0, round(float(v), 3)))
+    except (TypeError, ValueError):
+        return 0.25
+
+
+def _sub_color(v) -> str:
+    """A #RRGGBB hex colour, or white if malformed."""
+    s = str(v or "").strip()
+    return s.lower() if re.fullmatch(r"#[0-9a-fA-F]{6}", s) else "#ffffff"
+
+
 def _embed_url() -> str:
     """Effective embeddings endpoint (OpenAI-compatible base, e.g. .../v1). Env wins."""
     return EMBED_ENV or str(_load_settings().get("embed_server_url", "")).strip()
@@ -866,6 +900,10 @@ def api_settings_get() -> Response:
         whisper_configured=bool(_whisper_url()),
         whisper_env_locked=bool(WHISPER_ENV),
         burn_subtitles=bool(settings.get("burn_subtitles")),
+        subtitle_font=str(settings.get("subtitle_font") or "system"),
+        subtitle_size=_sub_size(settings.get("subtitle_size")),
+        subtitle_color=_sub_color(settings.get("subtitle_color")),
+        subtitle_bg_opacity=_sub_opacity(settings.get("subtitle_bg_opacity")),
         embed_server_url=_embed_url(),
         embed_model=_embed_model(),
         embed_configured=bool(_embed_url()),
@@ -912,6 +950,18 @@ def api_settings_post() -> Response:
         settings["whisper_server_url"] = str(payload.get("whisper_server_url") or "").strip()[:500]
     if "burn_subtitles" in payload:
         settings["burn_subtitles"] = bool(payload.get("burn_subtitles"))
+    # Subtitle display style (player ::cue + burned-in export). Font is restricted
+    # to the curated keys; size/colour/opacity are clamped to safe ranges.
+    if "subtitle_font" in payload:
+        font = str(payload.get("subtitle_font") or "").strip()
+        if font in _SUB_FONT_LIBASS:
+            settings["subtitle_font"] = font
+    if "subtitle_size" in payload:
+        settings["subtitle_size"] = _sub_size(payload.get("subtitle_size"))
+    if "subtitle_color" in payload:
+        settings["subtitle_color"] = _sub_color(payload.get("subtitle_color"))
+    if "subtitle_bg_opacity" in payload:
+        settings["subtitle_bg_opacity"] = _sub_opacity(payload.get("subtitle_bg_opacity"))
     # Prompt Studio endpoints — only writable when not pinned by an env var.
     if not EMBED_ENV and "embed_server_url" in payload:
         settings["embed_server_url"] = str(payload.get("embed_server_url") or "").strip()[:500]
@@ -1795,7 +1845,8 @@ FALLBACK_H = 1080
 VIDEO_ENCODER = os.environ.get("VIDEO_ENCODER", "auto").strip().lower()
 NVENC_PRESET = "p5"   # NVENC quality/speed balance (p1 fastest … p7 slowest)
 NVENC_CQ = "19"       # constant-quality target; ~matches libx264 CRF 10 for the merge
-# Burned-in subtitle font size; half of libass's default of 16 for SRT.
+# Baseline burned-in subtitle font size (= "100%"); half of libass's default of 16
+# for SRT. The saved subtitle_size percentage scales this in _ass_force_style().
 SUBTITLE_FONTSIZE = 8
 
 
@@ -1922,6 +1973,41 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
     return False
 
 
+def _hex_to_ass_bgr(hex_color: str) -> str:
+    """#RRGGBB → libass BGR hex (no alpha), e.g. '#ff8800' → '0088FF'. ASS colours
+    are little-endian (BGR), the reverse of CSS's RRGGBB."""
+    h = str(hex_color or "").lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        return "FFFFFF"
+    return (h[4:6] + h[2:4] + h[0:2]).upper()
+
+
+def _ass_force_style() -> str:
+    """Map the saved subtitle display settings to a libass force_style string.
+
+    ASS colours are &HAABBGGRR with an INVERTED alpha byte (00 = opaque, FF =
+    fully transparent). Background opacity is rendered as an opaque box
+    (BorderStyle=3) whose BackColour carries the alpha; Outline/Shadow are off so
+    the box hugs the text, matching the player's ::cue look.
+    """
+    s = _load_settings()
+    font = _SUB_FONT_LIBASS.get(str(s.get("subtitle_font") or "system"), "DejaVu Sans")
+    fontsize = max(1, round(SUBTITLE_FONTSIZE * _sub_size(s.get("subtitle_size")) / 100))
+    color_bgr = _hex_to_ass_bgr(_sub_color(s.get("subtitle_color")))
+    back_alpha = format(round((1.0 - _sub_opacity(s.get("subtitle_bg_opacity"))) * 255), "02X")
+    return ",".join([
+        f"Fontname={font}",
+        f"Fontsize={fontsize}",
+        f"PrimaryColour=&H00{color_bgr}",
+        "BorderStyle=3",
+        f"BackColour=&H{back_alpha}000000",
+        "Outline=0",
+        "Shadow=0",
+    ])
+
+
 def _burn_subtitles_into(video_path: Path) -> Path:
     """Transcribe video_path via Whisper and burn the captions in (re-encode,
     CRF 18 / medium, audio copied through). Returns the burned file, or the
@@ -1944,12 +2030,12 @@ def _burn_subtitles_into(video_path: Path) -> Path:
     workdir = video_path.parent
     (workdir / "subs.srt").write_text(srt, encoding="utf-8")
     burned = workdir / "burned.mp4"
-    # libass renders SRT with a default Fontsize of 16 (at PlayResY 288, scaled to
-    # the video). Force half that for smaller burned-in captions.
+    # Style the burned-in captions from the saved subtitle display settings
+    # (font / size / colour / background opacity), mapped to libass force_style.
     try:
         _run_ffmpeg(
             ["ffmpeg", "-y", "-i", video_path.name,
-             "-vf", f"subtitles=subs.srt:force_style='Fontsize={SUBTITLE_FONTSIZE}'",
+             "-vf", f"subtitles=subs.srt:force_style='{_ass_force_style()}'",
              *_video_encode_args("18", cpu_preset="medium", nvenc_cq="23"),
              "-c:a", "copy", "-movflags", "+faststart", burned.name],
             "burn subtitles",

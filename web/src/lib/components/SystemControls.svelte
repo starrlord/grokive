@@ -7,6 +7,7 @@
   import { copyText } from '$lib/clipboard.js';
   import ConfigModal from './ConfigModal.svelte';
   import StatsModal from './StatsModal.svelte';
+  import SubtitleStyleModal from './SubtitleStyleModal.svelte';
   import Popover from './Popover.svelte';
 
   let { onrefresh = () => {} } = $props();
@@ -15,6 +16,7 @@
   let showLog = $state(false);
   let showConfig = $state(false);
   let showStats = $state(false);
+  let showSubStyle = $state(false);
   let timer;
   let polling = false;
   // Only announce a finished job we actually watched run (so a leftover 'done'
@@ -169,6 +171,11 @@
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6" rx="0.5"/><rect x="12" y="7" width="3" height="10" rx="0.5"/><rect x="17" y="13" width="3" height="4" rx="0.5"/></svg>
           Stats
         </button>
+        <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)]"
+          onclick={() => { close(); showSubStyle = true; }}>
+          <span aria-hidden="true" class="grid h-4 w-6 place-items-center rounded-sm bg-[var(--surface-2)] text-[10px] font-black leading-none tracking-tight text-[var(--accent)]">CC</span>
+          Subtitle display…
+        </button>
         {#if $settings.whisper_configured}
           <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-50"
             disabled={status.running} onclick={() => { close(); doSubs(); }}>
@@ -314,4 +321,8 @@
 
 {#if showStats}
   <StatsModal onclose={() => (showStats = false)} />
+{/if}
+
+{#if showSubStyle}
+  <SubtitleStyleModal onclose={() => (showSubStyle = false)} />
 {/if}

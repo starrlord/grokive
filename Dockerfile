@@ -15,9 +15,11 @@ RUN npm run build
 # --- Stage 2: Python app server ---
 FROM python:3.12-slim
 
-# ffmpeg = video thumbnails / merge / burn; gosu = drop to PUID/PGID for Unraid-friendly file ownership
+# ffmpeg = video thumbnails / merge / burn; gosu = drop to PUID/PGID for Unraid-friendly file ownership;
+# fonts-dejavu-core = TrueType families (Sans/Serif/Mono) libass resolves for burned-in subtitle styling
+# (slim base ships no fonts, and --no-install-recommends skips ffmpeg's suggested font packages).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg gosu \
+    && apt-get install -y --no-install-recommends ffmpeg gosu fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

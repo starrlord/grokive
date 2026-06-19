@@ -1,7 +1,7 @@
 <script>
   import '../app.css';
   import { onMount } from 'svelte';
-  import { theme, mode } from '$lib/state.js';
+  import { theme, mode, settings, loadSettings, subtitleCueRule } from '$lib/state.js';
   import { authStatus } from '$lib/api.js';
   import Login from '$lib/components/Login.svelte';
 
@@ -19,10 +19,26 @@
     if (meta && bg) meta.setAttribute('content', bg);
   });
 
+  // Apply the subtitle display style app-wide by rewriting a single injected
+  // <style> with a literal video::cue rule whenever the settings change.
+  $effect(() => {
+    const rule = subtitleCueRule($settings);
+    let el = document.getElementById('grok-sub-cue');
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'grok-sub-cue';
+      document.head.appendChild(el);
+    }
+    el.textContent = rule;
+  });
+
   onMount(async () => {
     const s = await authStatus();
     authed = !s.auth_required || s.authed;
     checked = true;
+    // Pull the saved settings (incl. subtitle style) once at startup so the cue
+    // rule reflects the user's choices before any player opens.
+    loadSettings();
   });
 </script>
 

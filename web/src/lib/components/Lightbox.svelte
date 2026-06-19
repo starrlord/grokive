@@ -26,6 +26,7 @@
   import { fmtSize } from '$lib/format.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import VisionPrompt from './VisionPrompt.svelte';
+  import SubtitleStyleModal from './SubtitleStyleModal.svelte';
 
   async function copy(e, text) {
     const b = e.currentTarget;
@@ -65,6 +66,7 @@
   let stageEl = $state(null);
   let showInfo = $state(false);
   let showVision = $state(false);
+  let showSubStyle = $state(false);
   let relatedFor = $state('');
   let related = $state({ base: null, generated: [] });
   let relatedLoading = $state(false);
@@ -261,6 +263,9 @@
     onclose();
   }
   function onkey(e) {
+    // The subtitle-style dialog owns the keyboard while open (it handles its own
+    // Escape); don't let arrows/Escape also drive the player underneath.
+    if (showSubStyle) return;
     if (e.key === 'Escape') { if (document.fullscreenElement) return; if (showVision) { showVision = false; return; } if (showInfo) { showInfo = false; return; } close(); }
     else if (e.key === 'ArrowLeft') step(-1);
     else if (e.key === 'ArrowRight') step(1);
@@ -320,6 +325,10 @@
           onclick={() => toggleBasket(item.id)}>
           <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
         </button>
+      {/if}
+      {#if item.media_type === 'video' && item.subtitles}
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg text-xs font-black tracking-tight {showSubStyle ? 'text-[var(--accent)]' : ''}"
+          title="Subtitle display" aria-label="Subtitle display" aria-pressed={showSubStyle} onclick={() => (showSubStyle = true)}>CC</button>
       {/if}
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
         title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => { showInfo = !showInfo; if (showInfo) showVision = false; }}>ⓘ</button>
@@ -422,6 +431,10 @@
       <ConfirmDialog title="Delete this item?"
         message="The file is permanently removed from disk and won't be re-downloaded on future syncs."
         confirmLabel="Delete" onconfirm={doDelete} oncancel={() => (confirmingDelete = false)} />
+    {/if}
+
+    {#if showSubStyle}
+      <SubtitleStyleModal onclose={() => (showSubStyle = false)} />
     {/if}
   </div>
 {/if}

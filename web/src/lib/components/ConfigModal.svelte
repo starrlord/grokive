@@ -5,6 +5,7 @@
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import Button from './Button.svelte';
+  import SubtitleStyleModal from './SubtitleStyleModal.svelte';
 
   const layouts = [
     { id: 'cinematic', label: 'Grid' },
@@ -104,6 +105,7 @@
   let pickingTheme = $state(false);
   let pickingPromptAi = $state(false);
   let pickingImagine = $state(false);
+  let showSubStyle = $state(false);
   let llmProviderDrafts = {};
   let embedProviderDrafts = {};
 
@@ -305,6 +307,7 @@
   // Escape backs out of nested config pages first, then closes the modal.
   function onkey(e) {
     if (e.key !== 'Escape') return;
+    if (showSubStyle) return; // the subtitle dialog handles its own Escape
     if (pickingTheme) pickingTheme = false;
     else if (pickingPromptAi) pickingPromptAi = false;
     else if (pickingImagine) pickingImagine = false;
@@ -596,8 +599,16 @@
           <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none disabled:opacity-60"
             placeholder={envLocked ? 'Set by WHISPER_SERVER_URL env var' : 'http://host:9000/asr'} bind:value={whisper} disabled={envLocked} />
           <label class="mt-3 flex cursor-pointer items-center gap-2 text-sm">
-            <input type="checkbox" class="h-4 w-4 accent-[var(--accent)]" bind:checked={burn} /> Burn subtitles into merged playlist exports
+            <input type="checkbox" class="h-4 w-4 accent-[var(--accent)]" bind:checked={burn} /> Burn subtitles into merged exports
           </label>
+          <button type="button" class="mt-3 flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+            aria-label="Subtitle display style" onclick={() => (showSubStyle = true)}>
+            <span class="text-sm font-semibold">Display style</span>
+            <span class="ml-auto flex min-w-0 items-center gap-2 text-sm text-muted">
+              <span class="truncate">Font · size · colour · opacity</span>
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+          </button>
         </section>
 
         <section class="mt-6">
@@ -664,6 +675,10 @@
     {/if}
   </div>
 </div>
+
+{#if showSubStyle}
+  <SubtitleStyleModal onclose={() => (showSubStyle = false)} />
+{/if}
 
 <style>
   /* Full-screen sheet on phones reaches the screen edges, so the header clears the
