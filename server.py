@@ -3386,6 +3386,14 @@ def api_facets() -> Response:
     ))
 
 
+@app.get("/api/stats")
+def api_stats() -> Response:
+    """Library totals (video/image counts + summed size) for the Stats panel."""
+    if not DB_FILE.exists():
+        rebuild_db()
+    return jsonify(db.stats(DB_FILE))
+
+
 @app.post("/api/media/by-ids")
 def api_media_by_ids() -> Response:
     """Resolve an ordered id list to full media records (for playlist playback)."""

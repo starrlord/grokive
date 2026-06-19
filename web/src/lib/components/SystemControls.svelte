@@ -6,6 +6,7 @@
   import { toast } from '$lib/toast.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfigModal from './ConfigModal.svelte';
+  import StatsModal from './StatsModal.svelte';
   import Popover from './Popover.svelte';
 
   let { onrefresh = () => {} } = $props();
@@ -13,6 +14,7 @@
   let status = $state({ running: false, step: 'idle', job: 'sync', log: [], finished_at: '', auth_hint: false });
   let showLog = $state(false);
   let showConfig = $state(false);
+  let showStats = $state(false);
   let timer;
   let polling = false;
   // Only announce a finished job we actually watched run (so a leftover 'done'
@@ -162,6 +164,11 @@
     {#snippet trigger()}<span aria-hidden="true">⚙</span>{/snippet}
     {#snippet children(close)}
       <div class="w-56 max-w-[calc(100vw-1rem)] rounded-card border border-line bg-[var(--surface-solid)] p-1.5 shadow-[0_18px_44px_-14px_rgba(0,0,0,0.6)]">
+        <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)]"
+          onclick={() => { close(); showStats = true; }}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6" rx="0.5"/><rect x="12" y="7" width="3" height="10" rx="0.5"/><rect x="17" y="13" width="3" height="4" rx="0.5"/></svg>
+          Stats
+        </button>
         {#if $settings.whisper_configured}
           <button type="button" class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm font-semibold transition hover:bg-[var(--surface-2)] disabled:opacity-50"
             disabled={status.running} onclick={() => { close(); doSubs(); }}>
@@ -303,4 +310,8 @@
 
 {#if showConfig}
   <ConfigModal onclose={() => (showConfig = false)} />
+{/if}
+
+{#if showStats}
+  <StatsModal onclose={() => (showStats = false)} />
 {/if}

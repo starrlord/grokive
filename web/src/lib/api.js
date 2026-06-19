@@ -212,6 +212,10 @@ export const startSync = () => fetch('/api/sync', { method: 'POST' });
 export const startSubtitles = () => fetch('/api/subtitles', { method: 'POST' });
 export const syncStatus = () => getJSON('/api/sync/status');
 
+// --- Library stats ---------------------------------------------------------
+// { videos, images, total, bytes } — whole-library totals for the Stats panel.
+export const getStats = () => getJSON('/api/stats');
+
 // --- Config + settings -----------------------------------------------------
 export const getConfig = () => getJSON('/api/config');
 export const postConfig = (curlText) =>

@@ -615,3 +615,28 @@ def facets(
                 "resolutions": resolutions, "total": total}
     finally:
         conn.close()
+
+
+def stats(db_path: str | Path) -> dict[str, Any]:
+    """Whole-library totals for the Stats panel: media counts by type and the
+    summed on-disk size. ``size_bytes`` is captured at index time, so this is a
+    single cheap aggregate query — no filesystem walk. Rows with a missing size
+    (older indexes) just contribute 0 to the byte total."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT "
+            "COALESCE(SUM(media_type='video'), 0) AS videos, "
+            "COALESCE(SUM(media_type='image'), 0) AS images, "
+            "COUNT(*) AS total, "
+            "COALESCE(SUM(size_bytes), 0) AS bytes "
+            "FROM media"
+        ).fetchone()
+        return {
+            "videos": row["videos"],
+            "images": row["images"],
+            "total": row["total"],
+            "bytes": row["bytes"],
+        }
+    finally:
+        conn.close()
