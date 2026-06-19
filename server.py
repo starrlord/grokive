@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hashlib
+import io
 import json
 import os
 import re
@@ -31,6 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from collections import deque
 from pathlib import Path
 
@@ -4399,6 +4401,20 @@ def _atomic_write_json(path: Path, data, *, backup: bool = True) -> str:
     return bak
 
 
+def _atomic_write_bytes(path: Path, data: bytes, *, backup: bool = True) -> str:
+    """Atomically write raw bytes (tmp + replace), copying the prior file into
+    ``/data/backups`` first (capped per file) unless ``backup`` is False. The bytes
+    counterpart of ``_atomic_write_json`` — used by restore, where the source is a
+    backup zip's raw member (JSON text already serialized, ``prompt_studio.db``, or a
+    secret text file) rather than a Python object. Returns the backup filename (or "")."""
+    bak = _backup_state_file(path) if backup else ""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+    return bak
+
+
 def _load_deleted() -> set:
     if not DELETED_FILE.exists():
         return set()
@@ -4531,6 +4547,276 @@ def api_media_delete() -> Response:
         print(f"index delete failed: {exc}")
 
     return jsonify(ok=True, deleted=removed, blocklisted=len(blocklist_ids))
+
+
+# --------------------------------------------------------------------------- #
+# Backup / Restore — a portable, point-in-time bundle of the DURABLE state
+# (records + config) as a single .zip, so the whole archive can be exported and
+# re-imported on this or another machine. Deliberately EXCLUDES the media blobs
+# (gallery/, gigabytes, re-syncable) and the derived index.db (rebuilt from
+# metadata.json on restore). Secrets — the API keys in settings.json, the Grok
+# session (grok_auth.txt) and the admin password — are bundled ONLY when explicitly
+# requested (?secrets=1); off by default, so the downloaded file is safe to store
+# anywhere. Restore validates every member up front and snapshots the pre-restore
+# state into /data/backups before overwriting, so a bad backup is always recoverable.
+# --------------------------------------------------------------------------- #
+
+BACKUP_VERSION = 1
+_SETTINGS_SECRET_KEYS = ("embed_api_key", "llm_api_key", "xai_api_key")
+# Zip-bomb backstop: an honest backup is a few MB; refuse to extract anything wildly
+# larger so a crafted archive can't exhaust memory on restore.
+_RESTORE_MAX_TOTAL = 600 * 1024 * 1024
+
+# arcname -> destination path. This is also the strict allowlist for restore: only
+# these exact names are ever written, so a crafted zip can never escape DATA_DIR.
+_BACKUP_TARGETS = {
+    "metadata.json": METADATA_FILE,
+    "library.json": LIBRARY_FILE,
+    "collections.json": COLLECTIONS_FILE,
+    "playlists.json": PLAYLISTS_FILE,
+    "saved_responses.json": RESPONSES_FILE,
+    "scenes.json": SCENES_FILE,
+    "personas.json": PERSONAS_FILE,
+    "freeform_presets.json": FREEFORM_PRESETS_FILE,
+    "deleted_ids.json": DELETED_FILE,
+    "settings.json": SETTINGS_FILE,
+    "prompt_studio.db": PROMPT_DB_FILE,
+}
+# imagine_sessions.json is deliberately NOT backed up: it only indexes un-saved Grok
+# Imagine generations whose blobs live in the ephemeral imagine_staging/ scratch dir
+# (not bundled), so restoring it elsewhere would recreate sessions of broken tiles.
+# Keepers are promoted into the gallery (metadata.json), which IS backed up.
+# Secret files — included on export and accepted on restore ONLY in secrets mode.
+_BACKUP_SECRET_TARGETS = {
+    "grok_auth.txt": CURL_FILE,
+    "admin_password.txt": ADMIN_PW_FILE,
+}
+# Members that must parse as JSON before being written (validated up front so a
+# corrupt entry aborts the whole restore rather than half-overwriting live data).
+_BACKUP_JSON_NAMES = {
+    "metadata.json", "library.json", "collections.json", "playlists.json",
+    "saved_responses.json", "scenes.json", "personas.json",
+    "freeform_presets.json", "deleted_ids.json", "settings.json",
+}
+
+
+def _settings_without_secrets() -> dict:
+    """settings.json with the API-key fields stripped, for a no-secrets export."""
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    for key in _SETTINGS_SECRET_KEYS:
+        data.pop(key, None)
+    return data
+
+
+def _count_records(path: Path) -> int:
+    """Best-effort record count for the manifest/summary: list length, the single
+    record-list inside a wrapper dict, or the sum of all list values (library)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        lists = [v for v in data.values() if isinstance(v, list)]
+        if len(lists) == 1:
+            return len(lists[0])
+        return sum(len(v) for v in lists)
+    return 0
+
+
+def _count_favorites() -> int:
+    """library.json holds two lists (favorites + stashed); count only favorites so the
+    summary label is honest (the generic _count_records would sum both)."""
+    try:
+        data = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+        fav = data.get("favorites") if isinstance(data, dict) else None
+        return len(fav) if isinstance(fav, list) else 0
+    except Exception:
+        return 0
+
+
+def _backup_counts() -> dict:
+    return {
+        "media": _count_records(METADATA_FILE),
+        "collections": _count_records(COLLECTIONS_FILE),
+        "playlists": _count_records(PLAYLISTS_FILE),
+        "saved_responses": _count_records(RESPONSES_FILE),
+        "scenes": _count_records(SCENES_FILE),
+        "personas": _count_records(PERSONAS_FILE),
+        "favorites": _count_favorites(),
+    }
+
+
+@app.get("/api/backup/export")
+def api_backup_export() -> Response:
+    """Stream a .zip bundle of the durable state. ?secrets=1 also bundles the API
+    keys, Grok session and admin password (off by default)."""
+    include_secrets = request.args.get("secrets", "").strip().lower() in ("1", "true", "yes", "on")
+    ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    fname = f"grokive-backup-{ts}.zip"
+
+    targets = dict(_BACKUP_TARGETS)
+    if include_secrets:
+        targets.update(_BACKUP_SECRET_TARGETS)
+
+    manifest = {
+        "app": "grokive",
+        "kind": "backup",
+        "version": BACKUP_VERSION,
+        "created_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "includes_secrets": include_secrets,
+        "counts": _backup_counts(),
+        "files": [],
+    }
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, path in targets.items():
+            if name == "settings.json" and not include_secrets:
+                if not path.exists():
+                    continue
+                payload = json.dumps(_settings_without_secrets(), ensure_ascii=False, indent=2).encode("utf-8")
+            else:
+                if not path.exists():
+                    continue
+                try:
+                    payload = path.read_bytes()
+                except OSError:
+                    continue
+            zf.writestr(name, payload)
+            manifest["files"].append({"name": name, "bytes": len(payload)})
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+
+    data = buf.getvalue()
+    return Response(
+        data,
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Content-Length": str(len(data)),
+        },
+    )
+
+
+@app.post("/api/backup/import")
+def api_backup_import() -> Response:
+    """Restore a backup .zip produced by /api/backup/export. Validates every member
+    first, then atomically replaces the live state files (snapshotting the prior
+    versions into /data/backups), and rebuilds the derived index. Destructive."""
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify(ok=False, error="No backup file uploaded."), 400
+    if not f.filename.lower().endswith(".zip"):
+        return jsonify(ok=False, error="Expected a .zip backup file."), 400
+
+    # Restore replaces prompt_studio.db, which a running embed build holds open for
+    # minutes — racing it would fail the swap (Windows) or lose the build's in-flight
+    # writes (Linux). Refuse rather than race.
+    with _embed_lock:
+        if _embed.get("running"):
+            return jsonify(ok=False, error="A Prompt Studio embedding build is running — wait for it to finish, then restore."), 409
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="ga-restore-"))
+    try:
+        zpath = tmpdir / "backup.zip"
+        f.save(str(zpath))  # streams to disk — never buffers the upload in memory
+        try:
+            archive = zipfile.ZipFile(zpath)
+        except zipfile.BadZipFile:
+            return jsonify(ok=False, error="That file isn't a valid .zip backup."), 400
+        with archive as zf:
+            names = set(zf.namelist())
+            if "manifest.json" not in names:
+                return jsonify(ok=False, error="Not a Grokive backup (no manifest.json)."), 400
+            if sum(i.file_size for i in zf.infolist()) > _RESTORE_MAX_TOTAL:
+                return jsonify(ok=False, error="Backup is implausibly large; refusing to extract."), 400
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except Exception:
+                return jsonify(ok=False, error="Backup manifest is unreadable."), 400
+            if not (isinstance(manifest, dict)
+                    and manifest.get("app") == "grokive" and manifest.get("kind") == "backup"):
+                return jsonify(ok=False, error="That .zip isn't a Grokive backup."), 400
+            includes_secrets = bool(manifest.get("includes_secrets"))
+
+            # Phase 1: read + validate every recognised member BEFORE writing anything,
+            # so a corrupt entry aborts the restore instead of half-overwriting live data.
+            all_targets = {**_BACKUP_TARGETS, **_BACKUP_SECRET_TARGETS}
+            pending: list[tuple[Path, bytes]] = []
+            for arcname, dest in all_targets.items():
+                if arcname not in names:
+                    continue
+                raw = zf.read(arcname)
+                if arcname in _BACKUP_JSON_NAMES:
+                    try:
+                        parsed = json.loads(raw.decode("utf-8"))
+                    except Exception as exc:
+                        return jsonify(ok=False, error=f"'{arcname}' in the backup is corrupt: {exc}"), 400
+                    # settings.json merges OVER the current settings so restoring a
+                    # no-secrets backup never wipes existing API keys (the keys are
+                    # simply absent from it); a secrets backup carries — and overrides
+                    # with — its own keys.
+                    if arcname == "settings.json" and isinstance(parsed, dict):
+                        try:
+                            current = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                        except Exception:
+                            current = {}
+                        if not isinstance(current, dict):
+                            current = {}
+                        merged = {**current, **parsed}
+                        raw = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
+                pending.append((dest, raw))
+
+            if not pending:
+                return jsonify(ok=False, error="Backup contained no recognised state files."), 400
+
+            # Phase 2: write each file atomically (prior version snapshotted to
+            # /data/backups). Each _atomic_write_bytes is per-file atomic (tmp + replace),
+            # but the SET isn't — so if a write fails mid-way (e.g. disk full), roll the
+            # already-written files back from their snapshots, making the restore
+            # all-or-nothing rather than a half-applied mix of old and new state.
+            done: list[tuple[Path, str]] = []  # (dest, snapshot filename or "")
+            try:
+                for dest, data in pending:
+                    bak = _atomic_write_bytes(dest, data)
+                    done.append((dest, bak))
+            except OSError as exc:
+                rolled = 0
+                for dest, bak in reversed(done):
+                    if not bak:
+                        continue  # no snapshot (file was absent / backup failed) — leave as-is
+                    try:
+                        shutil.copy2(BACKUPS_DIR / bak, dest)
+                        rolled += 1
+                    except OSError:
+                        pass
+                return jsonify(
+                    ok=False,
+                    error=f"Restore failed while writing files ({exc}). Rolled back "
+                          f"{rolled} of {len(done)} change(s) from /data/backups; "
+                          f"your prior snapshots are kept there.",
+                ), 500
+            restored = [dest.name for dest, _ in done]
+
+        # index.db is purely derived — rebuild it from the restored metadata.json so the
+        # gallery reflects the restore immediately. (The locked-collection cache keys on
+        # collections.json's mtime, so it refreshes itself on the next request.)
+        rebuild_db()
+
+        return jsonify(
+            ok=True,
+            restored=sorted(restored),
+            includes_secrets=includes_secrets,
+            counts=_backup_counts(),
+        )
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @app.get("/healthz")

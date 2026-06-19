@@ -36,6 +36,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - [Firefox extension](#firefox-extension-prompt-studio-companion)
 - [Grok Imagine (generate images & video)](#grok-imagine-generate-images--video)
 - [Subtitles (Whisper)](#subtitles-whisper)
+- [Backup & Restore](#backup--restore)
 - [Capture your Grok auth request](#capture-your-grok-auth-request)
 - [Running from source](#running-from-source-without-docker)
 - [Privacy](#privacy)
@@ -73,6 +74,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
 - **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
+- **Backup & Restore:** download a single portable `.zip` of all your *records and config* — the media index/metadata, favorites/archive, collections, playlists, Prompt Studio prompts/scenes/personas, and settings — from **Config → Backup & Restore**, and restore it later on this or another machine. The media files themselves aren't bundled (they're large and re-syncable). Secrets (API keys, Grok session) are excluded by default; tick *Include secrets* for a full machine migration. Restore validates the archive, snapshots your current state to `backups/` first, and rebuilds the index automatically.
 - **Ten themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
 - Self-hosted and local-first: core media storage, browsing, sync state, and metadata stay on your own hardware. Optional integrations only call the endpoints you configure, such as Whisper, OpenAI, OpenRouter, or another OpenAI-compatible server.
 
@@ -708,6 +710,64 @@ The app can generate subtitles for your videos using a
 - **Burn Subtitles** (a checkbox in **Config**): when enabled, exporting a playlist transcribes the merged video and burns the subtitles in (a re-encode at CRF 18; audio copied through). If transcription fails the export still completes without burned-in subtitles.
 - Silent clips get an empty `.srt` (so they aren't re-processed) and no caption track. Whisper can hallucinate text on near-silent audio.
 - Audio is extracted locally (16 kHz mono) before upload, so only a small file is sent to the Whisper server.
+
+## Backup & Restore
+
+A one-click way to take a portable, point-in-time snapshot of everything *except* the
+media files — and put it back later, on this machine or another. It lives in
+**Config → Backup & Restore**.
+
+This is separate from the rolling per-write safety net (the app already copies each state
+file into `backups/` before every change). Backup & Restore is the whole library's
+*records and configuration* bundled into a single file you can download and keep.
+
+### What's in a backup
+
+A single `.zip` (`grokive-backup-<timestamp>.zip`) containing your **records and
+config** plus a `manifest.json` describing it:
+
+- `metadata.json` — the media index (every item's **prompt**, model, dimensions, montage
+  parameters); the canonical source the gallery's `index.db` is rebuilt from
+- `library.json` — favorites and archive
+- `collections.json` — collections (including any password-lock state)
+- `playlists.json` — playlists
+- `saved_responses.json` — Prompt Studio saved prompts, with their **folders & tags**
+- `scenes.json`, `personas.json`, `freeform_presets.json` — Prompt Studio scenes, persona
+  cards, and Freeform presets
+- `deleted_ids.json` — the delete blocklist
+- `settings.json` — all configuration (Whisper / Prompt Studio / Imagine endpoints,
+  subtitle style, generation defaults)
+- `prompt_studio.db` — the durable prompt embeddings (so semantic search / theme clusters
+  survive a restore without re-embedding)
+
+**Not included** (by design): the media and thumbnails (gigabytes — keep them on disk or
+re-Sync), the derived `index.db` (rebuilt on restore), and the ephemeral Grok Imagine
+staging workspace.
+
+### Secrets are opt-in
+
+By default the backup is safe to store anywhere: API keys are stripped from
+`settings.json`, and `grok_auth.txt` (your Grok session) and `admin_password.txt` are left
+out. Tick **Include secrets** before downloading to bundle them too — useful for moving to
+a new machine in one shot, but the file then holds those secrets in clear text, so store
+it somewhere safe.
+
+### Restoring
+
+Pick a backup `.zip` with **Restore from file…** and confirm. Restore is **destructive** —
+it replaces your current records, collections, playlists, Prompt Studio data, and settings
+with the backup's contents — so it asks first, and:
+
+- It validates the whole archive before touching anything; a corrupt or non-Grokive file
+  is rejected with your live data untouched.
+- Your current state is snapshotted into `backups/` first, and the write is all-or-nothing
+  (a failure rolls back), so a bad restore is always recoverable.
+- A no-secrets backup is **merged** over your current settings, so restoring one never
+  wipes API keys you already have configured.
+- The search index is rebuilt automatically afterward, and the app reloads.
+- Media files already on disk are kept; records that point at media you don't have won't
+  show a thumbnail until you re-Sync. (Restore won't run while a Prompt Studio embedding
+  build is in progress.)
 
 ## Capture Your Grok Auth Request
 

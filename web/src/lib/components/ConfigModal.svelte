@@ -1,8 +1,9 @@
 <script>
   import { onMount } from 'svelte';
-  import { getConfig, postConfig, getSettings, postSettings, fetchProviderModels, authStatus, logout } from '$lib/api.js';
+  import { getConfig, postConfig, getSettings, postSettings, fetchProviderModels, authStatus, logout, exportBackup, restoreBackup } from '$lib/api.js';
   import { loadSettings, theme, setTheme, THEMES, mode } from '$lib/state.js';
   import { portal } from '$lib/portal.js';
+  import { toast } from '$lib/toast.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import Button from './Button.svelte';
   import SubtitleStyleModal from './SubtitleStyleModal.svelte';
@@ -105,9 +106,18 @@
   let pickingTheme = $state(false);
   let pickingPromptAi = $state(false);
   let pickingImagine = $state(false);
+  let pickingBackup = $state(false);
   let showSubStyle = $state(false);
   let llmProviderDrafts = {};
   let embedProviderDrafts = {};
+
+  // Backup & Restore. Export is a one-shot download; restore is destructive, so a
+  // picked file is held in `restoreFile` for an inline confirm step before it runs.
+  let backupSecrets = $state(false);
+  let backupBusy = $state(false);
+  let restoreFile = $state(null);
+  let restoring = $state(false);
+  let restoreInput = $state(null); // hidden <input type=file>, opened programmatically
 
   const current = $derived(THEMES.find((t) => t.id === $theme) || THEMES[0]);
   const llmProviderLabel = $derived(providerLabel(llmProvider));
@@ -304,13 +314,55 @@
     else { msg = 'Saved.'; msgClass = 'text-[var(--success-ink)]'; setTimeout(onclose, 800); }
   }
 
+  async function doExportBackup() {
+    if (backupBusy) return;
+    backupBusy = true;
+    try {
+      await exportBackup(backupSecrets);
+      toast('Backup downloaded', { type: 'success' });
+    } catch (e) {
+      toast(e?.message || 'Backup failed.', { type: 'error' });
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  function onPickRestore(e) {
+    const file = e.target.files?.[0] || null;
+    e.target.value = ''; // let the same file be re-picked after a cancel
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+      toast('Choose a .zip backup file.', { type: 'error' });
+      return;
+    }
+    restoreFile = file; // arm the inline confirm
+  }
+
+  async function doRestore() {
+    if (!restoreFile || restoring) return;
+    restoring = true;
+    try {
+      const r = await restoreBackup(restoreFile);
+      const n = r?.counts?.media ?? 0;
+      toast(`Backup restored — ${n} media records. Reloading…`, { type: 'success' });
+      restoreFile = null;
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) {
+      toast(e?.message || 'Restore failed.', { type: 'error' });
+      restoring = false;
+    }
+  }
+
   // Escape backs out of nested config pages first, then closes the modal.
   function onkey(e) {
     if (e.key !== 'Escape') return;
     if (showSubStyle) return; // the subtitle dialog handles its own Escape
+    if (restoring) return; // don't let Escape disrupt an in-flight restore
     if (pickingTheme) pickingTheme = false;
     else if (pickingPromptAi) pickingPromptAi = false;
     else if (pickingImagine) pickingImagine = false;
+    else if (restoreFile) restoreFile = null; // back out of the restore confirm first
+    else if (pickingBackup) pickingBackup = false;
     else onclose();
   }
 </script>
@@ -518,19 +570,55 @@
   </div>
 {/snippet}
 
+{#snippet backupSettings()}
+  <p class="mb-3 text-sm text-muted">A portable <code class="rounded-sm bg-[var(--code-bg)] px-1">.zip</code> of your records and config — media library, collections, playlists, Prompt Studio prompts &amp; settings. Media files aren't included.</p>
+  <div class="rounded-xl border border-line p-3">
+    <label class="flex cursor-pointer items-center gap-2 text-sm">
+      <input type="checkbox" class="h-4 w-4 accent-[var(--accent)]" bind:checked={backupSecrets} />
+      Include secrets <span class="text-muted">(API keys, Grok session)</span>
+    </label>
+    {#if backupSecrets}
+      <p class="mt-2 text-xs text-[var(--danger-ink)]">This file will hold your API keys and Grok session in clear text — store it somewhere safe.</p>
+    {/if}
+    <div class="mt-3 flex flex-wrap gap-2">
+      <Button variant="primary" class="pointer-coarse:min-h-11" disabled={backupBusy} onclick={doExportBackup}>
+        {backupBusy ? 'Preparing…' : 'Download backup'}
+      </Button>
+      <Button variant="secondary" class="pointer-coarse:min-h-11" disabled={restoring} onclick={() => restoreInput?.click()}>
+        Restore from file…
+      </Button>
+    </div>
+  </div>
+
+  {#if restoreFile}
+    <div class="mt-3 rounded-xl border border-line bg-[var(--surface-2)] p-3">
+      <div class="text-sm font-bold text-[var(--danger-ink)]">Restore from “{restoreFile.name}”?</div>
+      <p class="mt-1 text-sm text-muted">This replaces your current library records, collections, playlists, Prompt Studio data and settings with the backup's contents. Your current state is snapshotted to <code class="rounded-sm bg-[var(--code-bg)] px-1">/data/backups</code> first. Media files already on disk are kept; records pointing at missing media won't show a thumbnail until you re-sync.</p>
+      <div class="mt-3 flex flex-wrap gap-2">
+        <Button variant="danger" class="pointer-coarse:min-h-11" disabled={restoring} onclick={doRestore}>
+          {restoring ? 'Restoring…' : 'Replace & restore'}
+        </Button>
+        <Button variant="secondary" class="pointer-coarse:min-h-11" disabled={restoring} onclick={() => (restoreFile = null)}>Cancel</Button>
+      </div>
+    </div>
+  {/if}
+
+  <input bind:this={restoreInput} type="file" accept=".zip,application/zip" class="hidden" onchange={onPickRestore} />
+{/snippet}
+
 <!-- Backdrop: full-screen sheet on phones (panel fills it), centered card on ≥sm. -->
 <div use:portal class="fixed inset-0 z-[60] bg-[var(--overlay)] backdrop-blur-sm sm:grid sm:place-items-center sm:p-4" role="presentation"
      onclick={(e) => { if (e.target === e.currentTarget) onclose(); }}>
   <div class="config-panel panel flex h-[100dvh] w-full flex-col overflow-hidden sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:max-w-[640px] sm:rounded-card"
        role="dialog" aria-modal="true" aria-label="Config" tabindex="-1" use:trapFocus>
     <header class="cfg-header flex shrink-0 items-center gap-2 border-b border-line px-4 py-3 sm:px-5">
-      {#if pickingTheme || pickingPromptAi || pickingImagine}
+      {#if pickingTheme || pickingPromptAi || pickingImagine || pickingBackup}
         <button type="button" class="-ml-1 flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-11"
-          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; pickingImagine = false; }}>
+          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; pickingImagine = false; pickingBackup = false; if (!restoring) restoreFile = null; }}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
-        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : pickingImagine ? 'Grok Imagine API' : 'Prompt Studio AI'}</h2>
+        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : pickingImagine ? 'Grok Imagine API' : pickingBackup ? 'Backup & Restore' : 'Prompt Studio AI'}</h2>
       {:else}
         <h2 class="text-lg font-bold">Config</h2>
         <button type="button" class="ml-auto grid h-9 w-9 place-items-center rounded-lg border border-line transition hover:bg-[var(--surface-2)] pointer-coarse:h-11 pointer-coarse:w-11"
@@ -538,7 +626,7 @@
       {/if}
     </header>
 
-    <div class="config-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5" class:cfg-safe-bottom={pickingTheme}>
+    <div class="config-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5" class:cfg-safe-bottom={pickingTheme || pickingBackup}>
       {#if pickingTheme}
         <!-- Theme gallery: 1 col on phone, 2 on tablet, 3 on desktop. Applies live. -->
         <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -558,6 +646,8 @@
         {@render promptAiSettings()}
       {:else if pickingImagine}
         {@render imagineSettings()}
+      {:else if pickingBackup}
+        {@render backupSettings()}
       {:else}
         <!-- Appearance: compact settings rows (live-applied, separate from Save). -->
         <section>
@@ -644,6 +734,18 @@
           </button>
         </section>
 
+        <section class="mt-6">
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Backup &amp; Restore</div>
+          <button type="button" class="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+            aria-label="Backup and restore" onclick={() => (pickingBackup = true)}>
+            <span class="text-sm font-semibold">Export &amp; restore</span>
+            <span class="ml-auto flex min-w-0 items-center gap-2 text-sm text-muted">
+              <span class="truncate">Download a <code class="rounded-sm bg-[var(--code-bg)] px-1">.zip</code> · restore</span>
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+          </button>
+        </section>
+
         {#if authRequired}
           <section class="mt-6 flex items-center justify-between gap-3">
             <div class="text-xs font-bold uppercase tracking-wider text-muted">Account</div>
@@ -666,7 +768,7 @@
       {/if}
     </div>
 
-    {#if !pickingTheme}
+    {#if !pickingTheme && !pickingBackup}
       <footer class="cfg-footer config-actions flex shrink-0 items-center justify-end gap-2 px-4 py-3 sm:px-5">
         <span class="mr-auto min-w-0 flex-1 truncate text-sm {msgClass}">{msg}</span>
         <Button variant="secondary" size="lg" class="pointer-coarse:min-h-11" onclick={onclose}>Cancel</Button>

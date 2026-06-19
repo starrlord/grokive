@@ -237,6 +237,42 @@ export async function fetchProviderModels(body) {
   return d;
 }
 
+// --- Backup / Restore ------------------------------------------------------
+// A portable .zip of the durable state (metadata, library, collections, playlists,
+// Prompt Studio data, settings). secrets=true also bundles the API keys + Grok
+// session. Streams the file to the browser as a download, honouring the server's
+// timestamped Content-Disposition filename.
+export async function exportBackup(includeSecrets = false) {
+  const res = await fetch(`/api/backup/export?secrets=${includeSecrets ? 1 : 0}`);
+  if (!res.ok) {
+    let msg = 'Backup failed.';
+    try { const j = await res.json(); if (j.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  let name = 'grokive-backup.zip';
+  const m = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') || '');
+  if (m) name = m[1];
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+}
+// Replace the live state with the contents of a backup .zip (destructive — the
+// server snapshots the prior state into /data/backups first). Returns the summary.
+export async function restoreBackup(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api/backup/import', { method: 'POST', body: fd });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.ok === false) throw new Error(d.error || `Restore failed (HTTP ${res.status}).`);
+  return d; // { ok, restored: string[], includes_secrets, counts }
+}
+
 // --- Grok Imagine (xAI) generation -----------------------------------------
 // Image generation is synchronous (returns the ingested gallery records). Video
 // is async: start a job, then poll status until it finishes.
