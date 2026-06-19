@@ -439,7 +439,7 @@
 
 <svelte:head><title>Grokive</title></svelte:head>
 
-<TopBar onrefresh={() => { load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} onplay={playRandomLibrary} />
+<TopBar onrefresh={() => { activeCollection ? loadCollectionItems(activeCollection, true) : load(true); refreshFacets(); }} onfilters={() => (showFilters = true)} onmenu={() => (menuOpen = true)} onplay={playRandomLibrary} />
 
 <div class="flex">
   <!-- Studio is its own full-width workspace; the media-browsing sidebar (filters,
