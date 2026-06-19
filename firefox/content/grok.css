@@ -141,47 +141,116 @@
   50% { opacity: 0.85; }
 }
 
-/* Imagine video quota readout — sits between the action group and the close
-   button. Hidden when the toolbar is collapsed (only the G handle shows) and
-   until the first successful fetch (set inline in JS). */
+/* Imagine quota — a compact ⚡ badge inline with the actions; the full per-tier
+   breakdown opens as a popover above the bar on hover / tap / focus. The whole
+   block hides when the toolbar is collapsed (only the G handle shows) and until
+   the first successful fetch (set inline in JS). */
 .gks-quota {
+  position: relative;          /* anchor for the absolutely-positioned popover */
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 7px;
   margin-left: 2px;
   padding-left: 9px;
   border-left: 1px solid #262b33;
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
 }
 
 .gks-toolbar.gks-collapsed .gks-quota {
   display: none !important;
 }
 
-/* Thin divider between the image tiers (Img/Pro/Edit) and the video tiers. */
-.gks-q-divider {
+/* The always-visible badge: lightning glyph + worst-case count. Sized to match
+   the action buttons so the row stays even. */
+.gks-quota-badge {
   flex: 0 0 auto;
-  width: 1px;
-  align-self: stretch;
-  min-height: 14px;
-  margin: 0 1px;
-  background: #262b33;
-}
-
-.gks-q-stat {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 32px;
+  margin: 0;
+  padding: 0 9px;
+  border: 1px solid #262b33;
+  border-radius: 10px;
+  background: #0b0d10;
   color: #c4cad3;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.gks-quota-badge:hover {
+  background: #1b2129;
+  border-color: #3a4250;
+}
+
+.gks-qb-icon {
+  font-size: 13px;
+}
+
+.gks-qb-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+/* Badge colour follows the worst tier: plenty/unlimited → green, low → amber,
+   exhausted → red. */
+.gks-quota-badge.gks-q-ok  { color: #34d399; border-color: #1f5c46; }
+.gks-quota-badge.gks-q-low { color: #fbbf24; border-color: #6b551b; }
+.gks-quota-badge.gks-q-out { color: #f87171; border-color: #6b2b2b; }
+
+/* Popover with the full per-tier breakdown, anchored above the badge. Opens on
+   hover / focus / a JS-toggled .gks-pop-open class (for tap). */
+.gks-quota-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 150px;
+  padding: 8px 10px;
+  background: #14181d;
+  border: 1px solid #262b33;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.gks-quota:hover .gks-quota-pop,
+.gks-quota:focus-within .gks-quota-pop,
+.gks-quota.gks-pop-open .gks-quota-pop {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Each tier is a row: label on the left, value (+ optional reset) on the right. */
+.gks-q-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+  line-height: 1;
+  color: #c4cad3;
+  white-space: nowrap;
 }
 
 .gks-q-label {
   color: #8a93a0;
   font-weight: 600;
   font-size: 11px;
+}
+
+.gks-q-right {
+  display: inline-flex;
+  align-items: center;
 }
 
 .gks-q-val {
@@ -195,11 +264,19 @@
 .gks-q-stat.gks-q-low .gks-q-val { color: #fbbf24; }
 .gks-q-stat.gks-q-out .gks-q-val { color: #f87171; }
 
+/* Horizontal rule between the image tiers (Img/Pro/Edit) and the video tiers. */
+.gks-q-divider {
+  height: 1px;
+  width: 100%;
+  margin: 4px 0;
+  background: #262b33;
+}
+
 .gks-q-reset {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin-left: 3px;
+  margin-left: 8px;
   color: #8a93a0;
   font-variant-numeric: tabular-nums;
   font-size: 11px;

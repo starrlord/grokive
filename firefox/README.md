@@ -30,9 +30,10 @@ parties, no cloud, no telemetry.
 - **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere.
 - **grok.com toolbar** — a compact floating pill with Random / Enhance / Save / Star buttons that
   write directly into the page's prompt field (falls back to clipboard if it can't find one).
-- **Imagine quota readout** — on Grok Imagine pages, the toolbar shows your remaining image
-  (Img / Pro / Edit) and video (480p / 720p) generations with a live countdown to reset, read
-  straight from Grok's own quota endpoint using your existing grok.com session.
+- **Imagine quota readout** — on Grok Imagine pages, the toolbar shows a compact ⚡ badge with
+  your most-urgent remaining count; hover (or tap) it to expand the full per-bucket breakdown —
+  image (Img / Pro / Edit) and video (480p / 720p) generations — each with a live countdown to
+  reset, read straight from Grok's own quota endpoint using your existing grok.com session.
 - **Options page** with a "Test connection" button so you can confirm setup before relying on it.
 
 ## How it talks to Grokive
@@ -172,11 +173,12 @@ On `grok.com`, a compact floating pill appears (bottom-right) with four buttons:
 - **💾 Save** — saves the current field text to your save folder.
 - **⭐ Star** — saves *and* stars the current field text (favorites it in Grokive).
 
-**Imagine quota readout.** On Grok Imagine pages (`grok.com/imagine`), the pill also shows your
-remaining generations for each bucket — **Img · Pro · Edit │ 480p · 720p** — colour-coded
-(green = plenty, amber = low, red = none left). When you near or hit a cap, the exact count and a
-live **⏱ countdown to reset** appear next to that tier. It reads from Grok's own quota endpoint
-using your existing grok.com session (no API key), refreshes every 60 s, and stays hidden on
+**Imagine quota readout.** On Grok Imagine pages (`grok.com/imagine`), the pill shows a compact
+**⚡ badge** carrying your most-urgent remaining count, colour-coded (green = plenty, amber = low,
+red = none left). **Hover** the badge — or **tap** it on touch — to expand the full per-bucket
+breakdown — **Img · Pro · Edit** and **480p · 720p** — each with its exact count and, when you
+near or hit a cap, a live **⏱ countdown to reset**. It reads from Grok's own quota endpoint using
+your existing grok.com session (no API key), refreshes every 60 s, and stays hidden on
 non-Imagine pages.
 
 > Grok only reports an exact number as you approach a limit — when you have plenty, a tier shows

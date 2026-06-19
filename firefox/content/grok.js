@@ -397,14 +397,51 @@
   function renderQuota() {
     if (!quotaEl) return;
     let known = false;
+    let worst = 'ok';          // ok < low < out — follows the most-urgent tier
+    let minRemaining = null;   // smallest concrete count across metered tiers
+    let allUnlimited = true;
     for (const t of QUOTA_TIERS) {
       const tier = quotaState[t.key] || null;
       if (tier) known = true;
       renderTier(quotaEl.querySelector('[data-tier="' + t.key + '"]'), tier);
+      if (!tier || tier.unlimited) continue;
+      if (typeof tier.remaining === 'number') {
+        allUnlimited = false;
+        if (minRemaining == null || tier.remaining < minRemaining) minRemaining = tier.remaining;
+        if (tier.remaining <= 0) worst = 'out';
+        else if (tier.remaining <= 3 && worst !== 'out') worst = 'low';
+      }
+    }
+    // Badge: colour follows the worst tier; the value is ∞ while everything is
+    // unlimited, otherwise the most-urgent remaining count (so the number you
+    // actually care about is visible without opening the popover).
+    const badge = quotaEl.querySelector('.gks-quota-badge');
+    if (badge) {
+      badge.classList.remove('gks-q-ok', 'gks-q-low', 'gks-q-out');
+      badge.classList.add(worst === 'out' ? 'gks-q-out' : (worst === 'low' ? 'gks-q-low' : 'gks-q-ok'));
+      const bVal = badge.querySelector('.gks-qb-val');
+      if (bVal) bVal.textContent = allUnlimited ? '∞' : String(minRemaining);
+      badge.title = buildQuotaTitle();
     }
     // Reveal only once we actually have data; a failed/blocked fetch (e.g. signed
     // out) leaves every tier null and the block stays hidden rather than showing —.
     quotaEl.style.display = known ? '' : 'none';
+  }
+
+  // One-line "Img ∞ · Pro ∞ · Edit ∞ · 480p 12 · 720p ∞" summary for the badge
+  // tooltip, so the full picture is available on hover even without the popover.
+  function buildQuotaTitle() {
+    const parts = [];
+    for (const t of QUOTA_TIERS) {
+      const tier = quotaState[t.key];
+      let v = '—';
+      if (tier) {
+        if (tier.unlimited) v = '∞';
+        else if (typeof tier.remaining === 'number') v = String(tier.remaining);
+      }
+      parts.push(t.label + ' ' + v);
+    }
+    return 'Grok Imagine quota — ' + parts.join(' · ');
   }
 
   // 1s tick: re-render only the countdown text from the stored resetAt; when a
@@ -440,14 +477,35 @@
   function buildQuota() {
     const wrap = document.createElement('div');
     wrap.className = 'gks-quota';
-    wrap.title = 'Grok Imagine quota — image (Img/Pro/Edit) & video (480p/720p) generations left + time until reset';
     wrap.style.display = 'none';   // hidden until the first successful fetch
+
+    // The always-visible badge: ⚡ glyph + the most-urgent remaining count.
+    const badge = document.createElement('button');
+    badge.type = 'button';
+    badge.className = 'gks-quota-badge';
+    badge.setAttribute('aria-haspopup', 'true');
+    badge.setAttribute('aria-expanded', 'false');
+    badge.title = 'Grok Imagine quota — hover for image & video generations left';
+    const bIcon = document.createElement('span');
+    bIcon.className = 'gks-qb-icon';
+    bIcon.textContent = '⚡';
+    const bVal = document.createElement('span');
+    bVal.className = 'gks-qb-val';
+    bVal.textContent = '…';
+    badge.appendChild(bIcon);
+    badge.appendChild(bVal);
+
+    // The popover: one row per tier (label left, value + reset right), with a
+    // horizontal rule between the image and video groups.
+    const pop = document.createElement('div');
+    pop.className = 'gks-quota-pop';
+    pop.setAttribute('role', 'tooltip');
     let prevGroup = null;
     for (const t of QUOTA_TIERS) {
       if (prevGroup && t.group !== prevGroup) {
         const sep = document.createElement('span');
         sep.className = 'gks-q-divider';
-        wrap.appendChild(sep);
+        pop.appendChild(sep);
       }
       prevGroup = t.group;
       const stat = document.createElement('span');
@@ -456,6 +514,8 @@
       const lab = document.createElement('span');
       lab.className = 'gks-q-label';
       lab.textContent = t.label;
+      const right = document.createElement('span');
+      right.className = 'gks-q-right';
       const val = document.createElement('span');
       val.className = 'gks-q-val';
       val.textContent = '…';
@@ -466,11 +526,32 @@
       rv.className = 'gks-q-reset-val';
       reset.appendChild(document.createTextNode('⏱'));
       reset.appendChild(rv);
+      right.appendChild(val);
+      right.appendChild(reset);
       stat.appendChild(lab);
-      stat.appendChild(val);
-      stat.appendChild(reset);
-      wrap.appendChild(stat);
+      stat.appendChild(right);
+      pop.appendChild(stat);
     }
+
+    // Open/close. Hover is handled in CSS (:hover), but a tap on touch devices
+    // has no hover — toggle a class on click. Re-clamping isn't needed since the
+    // popover opens upward from a bottom-anchored bar.
+    badge.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      wrap.classList.toggle('gks-pop-open');
+      badge.setAttribute('aria-expanded', wrap.classList.contains('gks-pop-open') ? 'true' : 'false');
+    });
+    // Tapping elsewhere closes a tap-opened popover.
+    document.addEventListener('pointerdown', (ev) => {
+      if (wrap.classList.contains('gks-pop-open') && !wrap.contains(ev.target)) {
+        wrap.classList.remove('gks-pop-open');
+        badge.setAttribute('aria-expanded', 'false');
+      }
+    });
+
+    wrap.appendChild(badge);
+    wrap.appendChild(pop);
     quotaEl = wrap;
     return wrap;
   }
