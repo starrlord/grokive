@@ -269,7 +269,10 @@
   }
   function openCanvas(c) {
     activeCanvasName = c.name || 'Canvas';
-    filters.update((f) => ({ ...f, view: 'canvases', canvas: c.id }));
+    // Same clean-slate rule as entering a collection: don't carry any refinement (query,
+    // tags, models, resolutions, media type, period) from the previous canvas — or
+    // wherever you came from — into this one.
+    filters.update((f) => ({ ...f, view: 'canvases', canvas: c.id, query: '', tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all' }));
   }
   function closeCanvas() {
     activeCanvasName = '';
@@ -291,15 +294,22 @@
     if (!list.length) { toast('No playable videos in this playlist.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: pl.name };
   }
+  // Entering a collection starts a clean filter slate: no refinement — query, tags,
+  // models, resolutions, media type or period — from wherever you came from carries in
+  // and silently filters the new collection. (Mirrors setView / openCanvas; sort is kept.)
+  function enterCollection(id) {
+    filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all' }));
+    $activeCollectionId = id;
+  }
   function openCollection(c) {
-    $activeCollectionId = c.id;
+    enterCollection(c.id);
   }
   // After a folder import lands its new collection, refresh the list and (if the user
   // clicked "Open collection") drill straight into it. The Library view is already
   // active — the Import picker lives on the collections landing — so no view switch.
   async function onImportCreated(result, open) {
     await loadCollections();
-    if (open && result?.collection_id) $activeCollectionId = result.collection_id;
+    if (open && result?.collection_id) enterCollection(result.collection_id);
   }
   async function playCollection(c, orderedItems = null) {
     const source = Array.isArray(orderedItems) ? orderedItems : await mediaByIds(c.ids);
@@ -532,7 +542,7 @@
           </div>
         </div>
       {:else if $mode === 'editorial'}
-        <EditorialList items={displayItems} onopen={openLightbox} />
+        <EditorialList items={displayItems} onopen={openLightbox} filterable />
       {:else}
         <JustifiedGrid items={displayItems} {targetHeight} {gap}
           selectMode={$selectMode}
@@ -587,7 +597,7 @@
           </div>
         </div>
       {:else if $mode === 'editorial'}
-        <EditorialList items={displayItems} onopen={openLightbox} />
+        <EditorialList items={displayItems} onopen={openLightbox} filterable />
       {:else}
         <JustifiedGrid items={displayItems} {targetHeight} {gap}
           selectMode={$selectMode}

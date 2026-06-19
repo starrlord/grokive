@@ -1,9 +1,12 @@
 <script>
-  import { favorites, toggleFavorite, removeMedia } from '$lib/state.js';
+  import { favorites, filters, toggleTag, toggleFavorite, removeMedia } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
-  let { items = [], onopen = () => {} } = $props();
+  // `filterable` turns the tag chips into buttons that toggle the grid's tag filter.
+  // Off by default — and intentionally left off in collection views, where a filter
+  // change doesn't refetch the collection's items, so a click would do nothing.
+  let { items = [], onopen = () => {}, filterable = false } = $props();
   let confirming = $state(null);
 
   const fmtDate = (s) => (s || '').slice(0, 10);
@@ -43,15 +46,22 @@
         {#if it.tags?.length}
           <div class="flex flex-wrap gap-1.5">
             {#each it.tags.slice(0, 6) as tag (tag)}
-              <span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">{tag}</span>
+              {#if filterable}
+                {@const active = $filters.tags.includes(tag)}
+                <button type="button"
+                  class="rounded-full border px-2 py-0.5 text-xs transition {active ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted hover:border-[var(--accent)]'}"
+                  onclick={() => toggleTag(tag)}>{tag}</button>
+              {:else}
+                <span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">{tag}</span>
+              {/if}
             {/each}
           </div>
         {/if}
         <div class="mt-auto flex flex-wrap gap-2 pt-2">
           <button type="button"
-            class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {fav ? 'text-[var(--favorite)]' : ''}"
+            class="rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)] {fav ? 'text-[var(--favorite)]' : ''}"
             onclick={() => toggleFavorite(it.id)}>{fav ? '♥ Favorited' : '♡ Favorite'}</button>
-          <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold"
+          <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)]"
             onclick={(e) => copy(e, it.prompt)}>Copy prompt</button>
           <button type="button" class="rounded-lg border border-[var(--danger-border-strong)] px-3 py-2 text-sm font-semibold text-[var(--danger-ink)] transition hover:bg-[var(--danger-bg)]"
             onclick={() => (confirming = it)}>Delete</button>

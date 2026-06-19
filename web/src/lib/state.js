@@ -75,12 +75,18 @@ export function setView(view) {
   activeCollectionId.set(null);
   filters.update((f) => {
     const changed = f.view !== view;
+    // Switching to a different view starts a clean slate — no refinement follows you in.
+    // Re-clicking the view you're already on (changed === false) keeps everything (it's a
+    // back-to-root no-op, not entering a new context). `sort` always persists.
     return {
       ...f,
       view,
+      query: changed ? '' : f.query,
       tags: changed ? [] : f.tags,
       models: changed ? [] : f.models,
       resolutions: changed ? [] : f.resolutions,
+      mediaType: changed ? 'all' : f.mediaType,
+      period: changed ? 'all' : f.period,
       canvas: null
     };
   });
