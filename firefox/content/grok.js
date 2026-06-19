@@ -3,6 +3,9 @@
 // Injects a small collapsible floating toolbar (bottom-right) onto grok.com with
 // three actions: Random (pull a random saved prompt), Enhance (rewrite the field
 // text via the server's AI), and Save (store the field text into the saveFolder).
+// It also shows a live Grok Imagine quota readout (image + 480p/720p video
+// generations left + time until reset), read straight from grok.com's own quota
+// endpoint, scoped to /imagine pages.
 //
 // Hard rules from the shared build contract:
 //  - Vanilla JS only, MV2, WebExtension promise API via the `ext` shim.
@@ -293,6 +296,232 @@
     toast(added ? ('Saved & starred ★ to ' + folder) : ('Starred ★ in ' + folder), 'ok');
   }
 
+  // ---- Imagine quota (image + video) ------------------------------------------
+  // Grok Imagine exposes per-bucket quota at POST /rest/media/imagine/quota_info
+  // (empty JSON body) — the same endpoint the official UI's credit-quota store
+  // polls. The toolbar lives ON grok.com, so this is a SAME-ORIGIN fetch and the
+  // page's session cookie rides along with credentials:'include' — no API key.
+  // The response carries five buckets: image, imagePro, imageEdit, video (480p),
+  // video720p (720p). Quirk: when you're not near the cap the server OMITS
+  // remainingQueries/nextAvailableAt and just returns { available:true } (treat as
+  // unlimited); the live count + reset time only appear as you approach/hit the cap.
+  const QUOTA_URL = 'https://grok.com/rest/media/imagine/quota_info';
+  const QUOTA_POLL_MS = 60000;            // network refresh cadence
+  const RESET_PAD_MS = 30 * 60 * 1000;    // grok.com pads nextAvailableAt by 30 min
+
+  // The five quota buckets in display order. `key` is the response field AND the
+  // data-tier attribute; `group` drives a small divider between image and video.
+  const QUOTA_TIERS = [
+    { key: 'image', label: 'Img', group: 'img' },
+    { key: 'imagePro', label: 'Pro', group: 'img' },
+    { key: 'imageEdit', label: 'Edit', group: 'img' },
+    { key: 'video', label: '480p', group: 'vid' },
+    { key: 'video720p', label: '720p', group: 'vid' }
+  ];
+
+  let quotaEl = null;
+  let quotaPollTimer = null;   // 60s network poll (only while on an Imagine page)
+  let quotaTickTimer = null;   // 1s ticker: watches SPA nav + re-renders countdowns
+  let quotaRefreshing = false; // guard against overlapping fetches
+  let quotaPath = '';          // last seen pathname, to detect client-side nav
+  // Map of bucket key -> tier view model { unlimited, remaining, resetAt } (or null).
+  let quotaState = {};
+
+  // Turn one quota bucket into a tier view model. `available:true` with no
+  // remainingQueries means "plenty left" (the server only sends a number as you
+  // near the cap); available:false means exhausted (0).
+  function mapBucket(bucket) {
+    if (!bucket || typeof bucket !== 'object') return null;
+    const hasCount = typeof bucket.remainingQueries === 'number';
+    let resetAt = null;
+    if (bucket.nextAvailableAt != null) {
+      const t = new Date(bucket.nextAvailableAt).getTime();   // ISO-8601 or epoch-ms
+      if (Number.isFinite(t)) resetAt = t + RESET_PAD_MS;
+    }
+    return {
+      unlimited: !hasCount && bucket.available !== false,
+      remaining: hasCount ? bucket.remainingQueries : (bucket.available === false ? 0 : null),
+      resetAt: resetAt
+    };
+  }
+
+  async function fetchImagineQuota() {
+    try {
+      const res = await fetch(QUOTA_URL, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      if (!res || !res.ok) return null;
+      const data = await res.json();
+      return (data && typeof data === 'object') ? data : null;
+    } catch (e) {
+      return null;   // never throw — the readout just stays hidden
+    }
+  }
+
+  function fmtCountdown(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const p = (n) => String(n).padStart(2, '0');
+    return h > 0 ? (h + ':' + p(m) + ':' + p(sec)) : (m + ':' + p(sec));
+  }
+
+  function renderTier(statEl, tier) {
+    if (!statEl) return;
+    const valEl = statEl.querySelector('.gks-q-val');
+    const resetEl = statEl.querySelector('.gks-q-reset');
+    const resetValEl = statEl.querySelector('.gks-q-reset-val');
+    statEl.classList.remove('gks-q-ok', 'gks-q-low', 'gks-q-out');
+    if (!tier) { valEl.textContent = '—'; resetEl.style.display = 'none'; return; }
+    if (tier.unlimited) {
+      valEl.textContent = '∞';
+      statEl.classList.add('gks-q-ok');
+    } else if (typeof tier.remaining === 'number') {
+      valEl.textContent = String(tier.remaining);
+      statEl.classList.add(tier.remaining <= 0 ? 'gks-q-out' : (tier.remaining <= 3 ? 'gks-q-low' : 'gks-q-ok'));
+    } else {
+      valEl.textContent = '—';
+    }
+    if (tier.resetAt) {
+      resetValEl.textContent = fmtCountdown(tier.resetAt - Date.now());
+      resetEl.style.display = '';
+    } else {
+      resetEl.style.display = 'none';
+    }
+  }
+
+  function renderQuota() {
+    if (!quotaEl) return;
+    let known = false;
+    for (const t of QUOTA_TIERS) {
+      const tier = quotaState[t.key] || null;
+      if (tier) known = true;
+      renderTier(quotaEl.querySelector('[data-tier="' + t.key + '"]'), tier);
+    }
+    // Reveal only once we actually have data; a failed/blocked fetch (e.g. signed
+    // out) leaves every tier null and the block stays hidden rather than showing —.
+    quotaEl.style.display = known ? '' : 'none';
+  }
+
+  // 1s tick: re-render only the countdown text from the stored resetAt; when a
+  // window rolls over, pull fresh numbers.
+  function updateCountdowns() {
+    if (!quotaEl) return;
+    let expired = false;
+    for (const t of QUOTA_TIERS) {
+      const tier = quotaState[t.key];
+      if (!tier || !tier.resetAt) continue;
+      const left = tier.resetAt - Date.now();
+      const stat = quotaEl.querySelector('[data-tier="' + t.key + '"]');
+      const rv = stat && stat.querySelector('.gks-q-reset-val');
+      if (rv) rv.textContent = fmtCountdown(left);
+      if (left <= 0) expired = true;
+    }
+    if (expired) refreshQuota();
+  }
+
+  async function refreshQuota() {
+    if (quotaRefreshing) return;
+    quotaRefreshing = true;
+    const data = await fetchImagineQuota();
+    quotaRefreshing = false;
+    if (data) {
+      const next = {};
+      for (const t of QUOTA_TIERS) next[t.key] = mapBucket(data[t.key]);
+      quotaState = next;
+    }
+    renderQuota();
+  }
+
+  function buildQuota() {
+    const wrap = document.createElement('div');
+    wrap.className = 'gks-quota';
+    wrap.title = 'Grok Imagine quota — image (Img/Pro/Edit) & video (480p/720p) generations left + time until reset';
+    wrap.style.display = 'none';   // hidden until the first successful fetch
+    let prevGroup = null;
+    for (const t of QUOTA_TIERS) {
+      if (prevGroup && t.group !== prevGroup) {
+        const sep = document.createElement('span');
+        sep.className = 'gks-q-divider';
+        wrap.appendChild(sep);
+      }
+      prevGroup = t.group;
+      const stat = document.createElement('span');
+      stat.className = 'gks-q-stat';
+      stat.setAttribute('data-tier', t.key);
+      const lab = document.createElement('span');
+      lab.className = 'gks-q-label';
+      lab.textContent = t.label;
+      const val = document.createElement('span');
+      val.className = 'gks-q-val';
+      val.textContent = '…';
+      const reset = document.createElement('span');
+      reset.className = 'gks-q-reset';
+      reset.style.display = 'none';
+      const rv = document.createElement('span');
+      rv.className = 'gks-q-reset-val';
+      reset.appendChild(document.createTextNode('⏱'));
+      reset.appendChild(rv);
+      stat.appendChild(lab);
+      stat.appendChild(val);
+      stat.appendChild(reset);
+      wrap.appendChild(stat);
+    }
+    quotaEl = wrap;
+    return wrap;
+  }
+
+  // Only the Imagine app meters video generations, so scope the readout to
+  // /imagine* — on chat or other grok.com pages it stays hidden. grok.com is an
+  // SPA, so a one-time path check isn't enough; the persistent 1s ticker also
+  // watches for client-side navigation (Firefox Xray wrappers block reliably
+  // monkeypatching the page's history.pushState from a content script, so polling
+  // the path is the robust, framework-agnostic approach).
+  function isImaginePath() {
+    try { return /^\/imagine(\/|$)/.test(location.pathname); }
+    catch (e) { return false; }
+  }
+
+  // Start/stop the 60s network poll based on whether we're on an Imagine page.
+  function syncQuota() {
+    if (!quotaEl) return;
+    if (isImaginePath()) {
+      if (!quotaPollTimer) {
+        refreshQuota();
+        quotaPollTimer = setInterval(refreshQuota, QUOTA_POLL_MS);
+      }
+    } else if (quotaPollTimer) {
+      clearInterval(quotaPollTimer);
+      quotaPollTimer = null;
+      quotaState = { v480: null, v720: null };
+      renderQuota();   // hides the block once off Imagine
+    }
+  }
+
+  function quotaTick() {
+    if (location.pathname !== quotaPath) {   // client-side navigation
+      quotaPath = location.pathname;
+      syncQuota();
+    }
+    if (quotaPollTimer) updateCountdowns();  // live reset countdown while active
+  }
+
+  function startQuota() {
+    quotaPath = location.pathname;
+    if (!quotaTickTimer) quotaTickTimer = setInterval(quotaTick, 1000);
+    syncQuota();
+  }
+
+  function stopQuota() {
+    if (quotaPollTimer) { clearInterval(quotaPollTimer); quotaPollTimer = null; }
+    if (quotaTickTimer) { clearInterval(quotaTickTimer); quotaTickTimer = null; }
+    quotaEl = null;
+  }
+
   // ---- Toolbar construction ----------------------------------------------------
   let toolbarEl = null;
 
@@ -460,6 +689,7 @@
 
     bar.appendChild(handle);
     bar.appendChild(group);
+    bar.appendChild(buildQuota());
     bar.appendChild(close);
     return bar;
   }
@@ -470,9 +700,11 @@
     toolbarEl = buildToolbar();
     document.body.appendChild(toolbarEl);
     applySavedPos(toolbarEl);   // restore where the user last dragged it
+    startQuota();               // begin polling Imagine video quota
   }
 
   function removeToolbar() {
+    stopQuota();
     try {
       if (toolbarEl && toolbarEl.parentNode) toolbarEl.parentNode.removeChild(toolbarEl);
     } catch (e) { /* noop */ }
@@ -510,6 +742,14 @@
       if (toolbarEl && toolbarEl.style.left && toolbarEl.style.left !== 'auto') {
         clampToViewport(toolbarEl);
       }
+    });
+  } catch (e) { /* noop */ }
+
+  // Refresh the quota when the tab comes back to the foreground so a backgrounded
+  // tab doesn't show a stale count/countdown.
+  try {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && quotaPollTimer) refreshQuota();
     });
   } catch (e) { /* noop */ }
 

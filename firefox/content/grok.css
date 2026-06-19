@@ -141,6 +141,70 @@
   50% { opacity: 0.85; }
 }
 
+/* Imagine video quota readout — sits between the action group and the close
+   button. Hidden when the toolbar is collapsed (only the G handle shows) and
+   until the first successful fetch (set inline in JS). */
+.gks-quota {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: 2px;
+  padding-left: 9px;
+  border-left: 1px solid #262b33;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.gks-toolbar.gks-collapsed .gks-quota {
+  display: none !important;
+}
+
+/* Thin divider between the image tiers (Img/Pro/Edit) and the video tiers. */
+.gks-q-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  align-self: stretch;
+  min-height: 14px;
+  margin: 0 1px;
+  background: #262b33;
+}
+
+.gks-q-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #c4cad3;
+}
+
+.gks-q-label {
+  color: #8a93a0;
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.gks-q-val {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: #c4cad3;
+}
+
+/* Plenty left / unlimited → green, low → amber, exhausted → red. */
+.gks-q-stat.gks-q-ok .gks-q-val { color: #34d399; }
+.gks-q-stat.gks-q-low .gks-q-val { color: #fbbf24; }
+.gks-q-stat.gks-q-out .gks-q-val { color: #f87171; }
+
+.gks-q-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 3px;
+  color: #8a93a0;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
 .gks-close {
   flex: 0 0 auto;
   width: 22px;

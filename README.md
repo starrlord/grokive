@@ -33,6 +33,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - [Playlists and export](#playlists-and-export)
 - [Song Beat Montage](#song-beat-montage)
 - [Prompt Studio](#prompt-studio)
+- [Firefox extension](#firefox-extension-prompt-studio-companion)
 - [Grok Imagine (generate images & video)](#grok-imagine-generate-images--video)
 - [Subtitles (Whisper)](#subtitles-whisper)
 - [Capture your Grok auth request](#capture-your-grok-auth-request)
@@ -55,16 +56,19 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Search across prompts, tags, models, and local filenames.
 - Filter by media type: all, images, or videos.
 - Filter by generated prompt tags, model names, and canvas.
-- Sort by newest, oldest, prompt A-Z, or model A-Z.
+- Filter by **time period** (last hour through this year) and resolution.
+- Sort by newest, oldest, largest, smallest, prompt A-Z, or model A-Z.
 - Open a same-prompt view to see every image/video created from that prompt.
 - Click/copy prompts for reuse.
 - Show parent media when parent metadata is available.
-- Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder.
+- Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder. Collections and playlists live together under a **Library** tab.
+- **Import a folder** of your own videos/images straight into a new or existing collection — files are copied in with thumbnails and indexed alongside your synced media.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
-- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with GPU-accelerated rendering and one-click **Add to Collection**.
+- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with optional GPU-accelerated rendering (NVENC when available, else CPU) and one-click **Add to Collection**. Gather clips into a cross-library **Montage basket** to build one montage from videos spread across collections and canvases.
 - **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish / Enhance** (in your style, with fresh dialogue). Use local Ollama for local-only AI, or OpenAI/OpenRouter when you want a remote provider.
 - **Grok Imagine generation (xAI):** generate brand-new **images and video** from text — or from a **source image** (edit a still, or animate it) — in its own **Grok Imagine** view. Work in multiple **workspaces** that each keep their own history and can render videos concurrently, bring an image in via **Use as source** (gallery), a previous generation, or an **upload** (button or drag-and-drop), then **Save to Gallery** the keepers (tagged with a ✨ badge and linked back to their source). Needs an xAI API key (`XAI_API_KEY` or **Config**).
 - **Describe for Grok (image → prompt):** a ⚡ button on any image in the lightbox reads the picture *and* its saved prompt with a **vision model** and writes a ready-to-paste Grok Imagine prompt — character, wardrobe, action, setting, and camera — which you can edit and **save straight into Prompt Studio**. Point it at a self-hosted multimodal model (e.g. a Qwen3-VL build in Ollama) to keep it local.
+- **Firefox companion add-on** (*Grokive Prompt Studio*): surfaces your saved prompt library on **grok.com** — pull a random prompt, enhance or vary it, and save it back, writing straight into the page's prompt field. Talks only to your own server. See [Firefox extension](#firefox-extension-prompt-studio-companion).
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
@@ -85,18 +89,32 @@ All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
 `playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
 scenes), `saved_responses.json` (starred prompts), `personas.json` (Prompt Studio persona
-cards), `prompt_studio.db` (durable prompt embeddings), `imagine_sessions.json` +
-`imagine_staging/` (un-saved Grok Imagine generations, per workspace),
-media, thumbnails, subtitle `.srt`/`.vtt` sidecars, and the built gallery) is written
-under one volume: the container's `/data` (set via the `GROK_DATA_DIR` env var), so it
-survives container updates. `index.db` is purely derived from `metadata.json` and
-on-disk files, and is rebuilt automatically on startup and after each sync.
+cards), `freeform_presets.json` (saved Freeform request presets), `prompt_studio.db`
+(durable prompt embeddings), `imagine_sessions.json` + `imagine_staging/` (un-saved Grok
+Imagine generations, per workspace), `admin_password.txt` (the auto-generated login
+password), `backups/` (rolling atomic-write backups of the JSON state, newest few kept),
+`movie_tmp/` (Beat Montage render scratch), media, thumbnails, subtitle `.srt`/`.vtt`
+sidecars, and the built gallery) is written under one volume: the container's `/data`
+(set via the `GROK_DATA_DIR` env var), so it survives container updates. `index.db` is
+purely derived from `metadata.json` and on-disk files, and is rebuilt automatically on
+startup and after each sync. Media and thumbnails are stored **sharded** —
+`media/<type>/<2-hex>/<id>.<ext>` and `thumbnails/<2-hex>/<id>.jpg` — bucketed by a hash
+of the id, so a single folder never fills with thousands of files.
 
 ### docker compose
 
+`docker-compose.yml` **pulls** the prebuilt image (`ghcr.io/starrlord/grokive:latest`) —
+it has no `build:` section, so don't add `--build` (it would have nothing to build):
+
 ```bash
-docker compose up -d --build
+docker compose up -d
 # open http://<host>:8080
+```
+
+To build the image locally from a source checkout instead, use the dedicated build file:
+
+```bash
+docker compose -f docker-compose.build.yml up -d --build
 ```
 
 1. Open the web UI and click **Config**.
@@ -240,9 +258,9 @@ When run in Docker, the archiver serves a **SvelteKit** single-page app at `/`, 
 by a SQLite read-model (`db.py` → `index.db`, with FTS5 full-text search) and a small
 Flask API (`/api/media`, `/api/facets`, …). Highlights:
 
-- **Views:** Recent, All Media, Collections, Favorites, Archive, and Canvases tabs. All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
+- **Views:** Recent, All Media, **Library**, Favorites, Archive, and Canvases tabs. The **Library** tab is the single home for both **Collections** and **Playlists** (switchable inside it). All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
 - **Workspaces:** beyond browsing, two top-bar tools — **✦ Prompt Studio** (compose prompts) and **✨ Grok Imagine** (generate images & video). See those sections below.
-- **Collections:** group mixed images and videos into named cards with covers, then drill into each collection with the normal gallery controls and scoped tag/resolution filters.
+- **Collections:** group mixed images and videos into named cards with covers, then drill into each collection with the normal gallery controls and scoped tag/resolution filters. **Import a folder** of local files into a new or existing collection (per-file progress; imports are auto-archived so they don't crowd Recent), and toggle **Group** to cluster a collection's clips into *families* by the base image each was generated from (lineage traced through `parent_id`) — each family ready to merge-export or turn into a montage in one click.
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
@@ -250,12 +268,18 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
   Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light (Config →
   Appearance), each previewed as a gradient swatch. The ☾/☀ button quick-toggles light.
 - **Search & filters:** full-text prompt/tag/model search in the top bar; a searchable
-  **tag-cloud** modal (*Browse all tags*); media-type and model filters; one-click reset
-  (the "Grokive" wordmark or the *Reset filters* chip).
+  **tag-cloud** modal (*Browse all tags*); media-type, model, resolution, and **time-period**
+  filters (last hour … this year, from the Display popover); sort by newest, oldest, largest,
+  smallest, prompt A-Z, or model A-Z; one-click reset (the "Grokive" wordmark or the
+  *Reset filters* chip).
 - **Favorites & Archive:** hover a card for ♥ (favorite) and the archive icon (hide from
   Recent; reversible from the Archive view).
-- **Select mode:** multi-select plus compact Select Visible / Next 25 helpers for bulk favorite/archive, **Add to Collection**, **Save as playlist**, or a
-  one-off **Export**.
+- **Select mode:** multi-select (drag-to-paint with edge auto-scroll on desktop, long-press
+  range-select on touch) plus compact Select Visible / Next 25 helpers, for bulk
+  favorite/archive, **Add to Collection**, **Save as playlist**, **🎬 Movie** (Beat Montage),
+  **+ Queue** (add to the Montage basket), play in order, or a one-off **Export**.
+- **Library Stats:** a gear-menu modal showing total image/video counts and the library's
+  total on-disk size.
 - **Lightbox:** the media fills the window; press `i` / tap ⓘ for prompt + actions, `f`
   for fullscreen, arrows to navigate; subtitle track shown when available. On images, a
   **⚡ Describe for Grok** button turns the picture into a Grok Imagine prompt (see
@@ -301,11 +325,17 @@ timeouts far less likely. Exports on a trusted LAN with no proxy in front aren't
 Turn a handful of clips and a song into a tight, **beat-synced montage** — not a
 slideshow with cuts, but an edit where the cuts land on the music and each clip's
 biggest movement hits *on the beat*. The server analyses the song's beats and energy,
-analyses motion in each clip, plans a cut list, and renders the result on the GPU.
+analyses motion in each clip, plans a cut list, and renders the result (on the GPU when one
+is available, otherwise the CPU — see *Requirements & performance*).
 
 **Open it:** click **Select** in the top bar, pick **2 or more videos** (5+ gives the
 planner more to work with), then click **🎬 Movie** in the selection bar. The clips you
 selected become the candidate pool — the montage's order is *computed*, not your pick order.
+
+**Build across your library:** instead of a single selection, gather clips into the
+persistent **Montage basket** — from the lightbox, a collection card's music icon, or
+**+ Queue** in select mode — to pool videos from different collections and canvases, then
+launch one montage from the floating basket chip. The basket survives page reloads.
 
 ### Controls
 
@@ -318,9 +348,14 @@ selected become the candidate pool — the montage's order is *computed*, not yo
   one clip per beat — high-energy). On top of this baseline, **cut density automatically
   follows the song's energy**: quiet intros cut sparsely; as the track builds toward a
   drop or chorus the montage accelerates on its own. Great for slow-building songs.
-- **Aspect / resolution** — `1080p 16:9`, `720p 16:9`, `Vertical 9:16`, or `Square 1:1`.
-  Every clip is normalised (scaled + padded) to this exact frame, so mixed-orientation
-  sources combine cleanly.
+- **Aspect / resolution** — **Auto** (the default) sizes the canvas to the largest source
+  clip (capped at 4K) so footage isn't cropped or letterboxed to a mismatched frame, or pick a
+  fixed frame: `1080p 16:9`, `720p 16:9`, `Vertical 9:16`, or `Square 1:1`. A fixed frame
+  normalises every clip to that exact size, so mixed-orientation sources still combine cleanly.
+- **Let clips speak** — in the song's quiet pockets, hold on a clip that has a real spoken
+  line, duck the music (~−8 dB), play the line, then swell back in on a beat. Preset-independent;
+  **Moments** picks how many such holds (Auto, or 1–4). Needs the source clips to already have
+  subtitle sidecars (see *Subtitles*) — without them this silently does nothing.
 - **Frame rate** — 24, 30, or 60 fps.
 - **Length** — optional override in seconds; leave blank to match the song.
 - **File name** — used for the download and as the montage's title in the gallery.
@@ -416,7 +451,9 @@ see below.)
 The **Freeform** tab is a direct line to the model in your active persona's voice — no beat or format
 rules, it just answers. Type a request ("give me 10 in-character lines for the scene…"), choose how many,
 and get a numbered list back. An optional **Start each with…** field forces every result to begin with an
-exact phrase you choose (prepended deterministically, not left to the model). (Needs an LLM endpoint.)
+exact phrase you choose (prepended deterministically, not left to the model). **Save** a request
+(instruction + *Start each with…* prefix + count) as a reusable **preset**, stored server-side
+(`freeform_presets.json`) and synced across devices. (Needs an LLM endpoint.)
 
 ### AI features (optional)
 
@@ -484,6 +521,10 @@ With those configured you get:
   setting — with an optional "twist" steer), and *Polish* (one enriched version). **Use** loads a
   result into the composer; **Copy** grabs it. Clicking a past prompt to **Remix** it also uses the
   model to split run-on prompts cleanly into fields (quoted dialogue is preserved verbatim).
+- **Enhance** — rewrite a prompt into a compact, Grok-friendly brief. An escalating **dialogue
+  level** (Natural → Suggestive → Unfiltered) punches up *only* the quoted speech while keeping the
+  visual scene aligned to the original, and a *dialogue-only* mode rewrites just the quoted lines and
+  splices them back into the prompt.
 - **Scene Builder** — the **Scene** tab described above: a continuous multi-clip scene scripted as
   numbered beats for the *Extend from Frame* workflow, which you can **save and name** to reload later.
 - **Persona cards** — save multiple named character/voice definitions ("Ship's AI", "noir detective", "android narrator", …) and
@@ -496,8 +537,13 @@ With those configured you get:
 - **Freeform** — the **Freeform** tab: a direct, unconstrained request to the model in the active
   persona's voice (numbered list), with an optional **Start each with…** exact prefix.
 - **Saved responses** — hit **★ Save** on any result (Scene beats, Freeform items, Variations) to keep
-  it in a server-side library you can search, copy, and reuse from the **Saved** tab on any device. You
-  can also **add a prompt by hand** there (⌘/Ctrl + Enter) to stash one without generating it.
+  it in a server-side library you can search, copy, and reuse from the **Saved** tab (or the top-bar
+  **Prompts** button) on any device. Prompts are organised into intent **folders** (Character
+  Descriptions, Actions/Motion, Dialogue/Voice, Scene Beats, Style/Look, Instructions/Format, Unfiled)
+  with cross-cutting **tags**, a star filter, text search, and drag-to-reorder; **add a prompt by hand**
+  (⌘/Ctrl + Enter), or **import every library prompt** in one merge. With an LLM configured, **Auto-tag**
+  files a saved prompt into a folder with a few retrieval tags, and **Audit** reviews an already-filed
+  prompt and proposes folder/tag corrections.
 
 ### Describe for Grok (image → prompt)
 
@@ -525,8 +571,75 @@ generation can take a few seconds to a minute on CPU, and the overlay shows a pr
 while it works.
 
 Embeddings live in `prompt_studio.db` keyed by prompt text, so they survive an index rebuild and
-only new prompts are ever re-embedded. Saved scenes, responses, and persona cards live in
-`scenes.json` / `saved_responses.json` / `personas.json` under `/data`.
+only new prompts are ever re-embedded. Saved scenes, responses, persona cards, and Freeform presets live
+in `scenes.json` / `saved_responses.json` / `personas.json` / `freeform_presets.json` under `/data`.
+
+## Firefox Extension (Prompt Studio companion)
+
+A companion Firefox add-on, **Grokive Prompt Studio**, brings your Prompt Studio prompt
+library right onto **grok.com**, so a fresh prompt is one click away while you generate. It
+lives in [`firefox/`](firefox/) and talks **only** to your own Grokive server — no third
+parties, no telemetry. See [`firefox/README.md`](firefox/README.md) for the full reference.
+
+### What it does
+
+- **Random prompt** — pull a random saved prompt from any Prompt Studio folder (or *All* /
+  *Unfiled*), then edit, copy, enhance, or vary it; **↻ Another** re-rolls.
+- **Enhance / Variations** — rewrite a prompt or generate alternates using your server's AI
+  (the same Natural / Suggestive / Unfiltered dialogue levels as Prompt Studio).
+- **Save** — write new or edited prompts back to the server, into a folder named **`Firefox`**
+  by default (server-side append + dedupe, so it never clobbers your other prompts).
+- **On-page toolbar** — a compact, draggable floating pill on `grok.com` with **Random /
+  Enhance / Save** that write straight into the page's prompt field (clipboard fallback if it
+  can't find one). Toggle it off in Options.
+- **Keyboard shortcut** — `Alt+Shift+R` copies a random prompt to the clipboard from anywhere
+  and shows a preview notification (rebindable in `about:addons` → ⚙ → *Manage Extension
+  Shortcuts*).
+
+### Requirements
+
+It's a thin client for a **running Grokive server** — every network call goes to the server you
+configure. **Enhance** and **Variations** additionally need that server's LLM configured
+(`LLM_SERVER_URL`, see [Prompt Studio AI](#ai-features-optional)); when it isn't, those buttons
+are disabled. The add-on is **Manifest V2**, minimum **Firefox 109**, vanilla JS (no build step).
+
+### Install
+
+For a quick try, load it temporarily:
+
+1. Open `about:debugging` → **This Firefox** → **Load Temporary Add-on…**.
+2. Select `firefox/manifest.json`.
+
+Temporary add-ons clear on restart. For a permanent install, package it, then either sign it via
+Mozilla AMO (works in any Firefox) or disable signature enforcement (Developer Edition / Nightly
+/ ESR only) — release/Beta Firefox installs **signed** extensions only:
+
+```powershell
+pwsh -File firefox/package.ps1   # -> firefox/dist/grokive-promptstudio-<version>.xpi (unsigned)
+```
+
+- **Signed (any Firefox):** set `WEB_EXT_API_KEY` / `WEB_EXT_API_SECRET` (free AMO credentials)
+  and run `pwsh -File firefox/sign.ps1` (wraps `web-ext sign --channel=unlisted`), then install
+  the signed `.xpi` from `about:addons` → ⚙ → **Install Add-on From File…**.
+- **Unsigned (Dev/Nightly/ESR only):** set `xpinstall.signatures.required = false` in
+  `about:config`, then install the `.xpi` the same way.
+
+Full signing steps are in [`firefox/README.md`](firefox/README.md).
+
+### Connect to your server
+
+Open the extension's **Options** page and set:
+
+- **Server URL** — your Grokive origin (default `http://localhost:8080`).
+- **Username / Password** — only if your server requires login. On a trusted LAN the simplest
+  setup is to run the server with **`AUTH_DISABLED=true`** (see
+  [Environment variables](#environment-variables)) for zero-config access.
+- **Save folder** — where new prompts land (default `Firefox`).
+- **Default dialogue level** — the Enhance intensity used by default.
+- **Show toolbar on grok.com** — toggles the floating on-page pill.
+
+**Test connection** confirms the server is reachable, whether you're authed, and whether the AI
+is ready — before you rely on it.
 
 ## Grok Imagine (generate images & video)
 
@@ -591,6 +704,7 @@ The app can generate subtitles for your videos using a
 3. Click **Generate Subtitles**. It transcribes every video without a matching `.srt`, writing `.srt` + `.vtt` next to the video. Progress streams into the **Log** overlay.
 
 - Captions appear as a toggleable track in the lightbox.
+- **Subtitle Display** (a **Config** panel): style captions — font (from a curated set), size, colour, and background opacity — with a live preview. The chosen style applies both to the player track and to burned-in exports, and is saved server-side in `settings.json`.
 - **Burn Subtitles** (a checkbox in **Config**): when enabled, exporting a playlist transcribes the merged video and burns the subtitles in (a re-encode at CRF 18; audio copied through). If transcription fails the export still completes without burned-in subtitles.
 - Silent clips get an empty `.srt` (so they aren't re-processed) and no caption track. Whisper can hallucinate text on near-silent audio.
 - Audio is extracted locally (16 kHz mono) before upload, so only a small file is sent to the Whisper server.
@@ -667,9 +781,10 @@ or `AUTH_DISABLED=true`, before starting if you prefer.
 ### Downloading
 
 `python grokive.py download` fetches favorites; `python grokive.py agents` fetches Agent
-canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs). Both write to
-`media/images/`, `media/videos/`, and `metadata.json`, and skip anything already
-downloaded. Shortcut: `python grokive.py all` runs download → index in one go.
+canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs). Both write into the
+sharded `media/images/` and `media/videos/` layout (files bucketed by a hash of their id) plus
+`metadata.json`, and skip anything already downloaded. Shortcut: `python grokive.py all` runs
+download → index in one go.
 
 To grab a single post rather than your whole library, `python grokive.py post <id-or-url> [...]`
 downloads one or more posts by id or `/imagine/post/<id>` link (the root media plus its

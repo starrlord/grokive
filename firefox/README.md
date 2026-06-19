@@ -28,8 +28,11 @@ parties, no cloud, no telemetry.
 - **Save** edited or brand-new prompts to your `Firefox` folder (server-side append +
   dedupe — it never clobbers your other prompts).
 - **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere.
-- **grok.com toolbar** — a compact floating pill with Random / Enhance / Save buttons that
+- **grok.com toolbar** — a compact floating pill with Random / Enhance / Save / Star buttons that
   write directly into the page's prompt field (falls back to clipboard if it can't find one).
+- **Imagine quota readout** — on Grok Imagine pages, the toolbar shows your remaining image
+  (Img / Pro / Edit) and video (480p / 720p) generations with a live countdown to reset, read
+  straight from Grok's own quota endpoint using your existing grok.com session.
 - **Options page** with a "Test connection" button so you can confirm setup before relying on it.
 
 ## How it talks to Grokive
@@ -161,12 +164,23 @@ copy it to the clipboard, and show a notification with a short preview. (You can
 
 ### grok.com toolbar
 
-On `grok.com`, a compact floating pill appears (bottom-right) with three buttons:
+On `grok.com`, a compact floating pill appears (bottom-right) with four buttons:
 
 - **🎲 Random** — inserts a random prompt into the Grok input field (or copies it to the
   clipboard if no field is found).
 - **✨ Enhance** — enhances the current field text in place, using your default dialogue level.
 - **💾 Save** — saves the current field text to your save folder.
+- **⭐ Star** — saves *and* stars the current field text (favorites it in Grokive).
+
+**Imagine quota readout.** On Grok Imagine pages (`grok.com/imagine`), the pill also shows your
+remaining generations for each bucket — **Img · Pro · Edit │ 480p · 720p** — colour-coded
+(green = plenty, amber = low, red = none left). When you near or hit a cap, the exact count and a
+live **⏱ countdown to reset** appear next to that tier. It reads from Grok's own quota endpoint
+using your existing grok.com session (no API key), refreshes every 60 s, and stays hidden on
+non-Imagine pages.
+
+> Grok only reports an exact number as you approach a limit — when you have plenty, a tier shows
+> **∞**. That's a Grok API behaviour, not the extension.
 
 **Move it:** drag the violet **G** handle to reposition the pill anywhere on the page — it
 stays on-screen and remembers where you put it across page loads. A quick **click** (no drag)
@@ -177,17 +191,23 @@ You can turn this toolbar off in Options.
 
 ## Privacy
 
-This extension talks **only** to the Grokive server you configure. Your prompts, library, and
-AI requests stay between your browser and your own self-hosted server — nothing is sent to any
-third party, and there is no analytics or telemetry.
+The extension sends your prompts, library, and AI requests **only** to the Grokive server you
+configure — nothing goes to any third party, and there is no analytics or telemetry. The one
+other request it makes is the **Imagine quota read**: a same-origin call to `grok.com`'s own
+quota endpoint, made only while you're on a Grok Imagine page, using the session you're already
+logged in with. It reads your generation limits and sends nothing new anywhere.
 
 ## How it works (architecture)
 
 - **Manifest V2**, vanilla JS, no bundler or framework.
-- The **background page does all network requests.** The Grokive server sends no CORS headers,
-  but a background-page `fetch` made with host permission isn't subject to CORS. The popup,
-  options page, and content script never fetch the server directly — they send messages to the
-  background, which returns a consistent `{ ok, data?, error? }` shape.
+- The **background page does all *Grokive* network requests.** The Grokive server sends no CORS
+  headers, but a background-page `fetch` made with host permission isn't subject to CORS. The
+  popup, options page, and content script never fetch the Grokive server directly — they send
+  messages to the background, which returns a consistent `{ ok, data?, error? }` shape.
+- **One exception:** the grok.com content script reads the Imagine quota with a *same-origin*
+  `fetch` to grok.com directly (`credentials:'include'`) — it's already running on that origin
+  with the page's session, so there's no background round-trip or CORS issue. It polls only on
+  `/imagine*` pages and stays out of the Grokive message path entirely.
 - **Auth is handled in the background:** before a protected call (or on a `401`), it checks
   `/api/auth/status` and, if needed and credentials are configured, logs in and retries once.
 - Settings live in `ext.storage.local` under a single `settings` key, with defaults filled in so
