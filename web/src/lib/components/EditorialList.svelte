@@ -18,12 +18,16 @@
   }
 </script>
 
-<div class="mx-auto flex max-w-5xl flex-col" style="gap:var(--gap)">
+<!-- Magazine tiles: 1 col on phones (image-on-top, same as before), 2 cols from md up.
+     items-start keeps each tile its natural height (ragged bottoms) so portrait and
+     landscape neighbours don't stretch each other — and it stays stable under the
+     page's infinite scroll, unlike a column/masonry layout that rebalances on append. -->
+<div class="mx-auto grid max-w-6xl grid-cols-1 items-start md:grid-cols-2" style="gap:var(--gap)">
   {#each items as it (it.id)}
     {@const fav = $favorites.has(it.id)}
-    <article class="panel grid grid-cols-1 overflow-hidden rounded-card sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <article class="panel flex flex-col overflow-hidden rounded-card">
       <button type="button" class="group relative block w-full overflow-hidden bg-[var(--media-bg)]"
-        style="aspect-ratio:{ratio(it)}; max-height:72vh" onclick={() => onopen(it, items)}>
+        style="aspect-ratio:{ratio(it)}; max-height:56vh" onclick={() => onopen(it, items)}>
         {#if it.thumb}
           <img src={it.thumb} alt="" loading="lazy" decoding="async"
                class="h-full w-full object-contain transition-transform duration-500 group-hover:scale-[1.02]" />
@@ -33,7 +37,7 @@
         {/if}
       </button>
 
-      <div class="flex flex-col gap-3 p-5">
+      <div class="flex flex-1 flex-col gap-3 p-5">
         <p class="text-lg font-semibold leading-snug">{it.prompt || 'Untitled prompt'}</p>
         <p class="text-sm text-muted">{[it.model, fmtDate(it.created_at), it.media_type].filter(Boolean).join(' · ')}</p>
         {#if it.tags?.length}
@@ -43,7 +47,7 @@
             {/each}
           </div>
         {/if}
-        <div class="mt-auto flex gap-2 pt-2">
+        <div class="mt-auto flex flex-wrap gap-2 pt-2">
           <button type="button"
             class="rounded-lg border border-line px-3 py-2 text-sm font-semibold {fav ? 'text-[var(--favorite)]' : ''}"
             onclick={() => toggleFavorite(it.id)}>{fav ? '♥ Favorited' : '♡ Favorite'}</button>

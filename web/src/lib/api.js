@@ -87,7 +87,10 @@ async function downloadBlob(response, name) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = (name || 'export').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') + '.mp4';
+  // Sanitize to a filesystem-safe stem; fall back to 'export' when the name is all
+  // non-ASCII/symbols (e.g. a fully non-Latin prompt) so it can't collapse to '.mp4'.
+  const stem = (name || 'export').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'export';
+  a.download = stem + '.mp4';
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -95,8 +98,8 @@ async function downloadBlob(response, name) {
 }
 export const exportPlaylist = (id, name) =>
   fetch(`/api/playlists/${encodeURIComponent(id)}/export`).then((r) => downloadBlob(r, name));
-export const exportSelection = (ids) =>
-  fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, name: 'selection' }) }).then((r) => downloadBlob(r, 'selection'));
+export const exportSelection = (ids, name = 'selection') =>
+  fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, name }) }).then((r) => downloadBlob(r, name));
 
 // --- Delete (hard-delete + blocklist) --------------------------------------
 export const deleteMedia = (ids) =>
@@ -153,10 +156,10 @@ export function importFile(importId, file, { onProgress, signal } = {}) {
     xhr.send(fd);
   });
 }
-export async function importCommit(importId, name) {
+export async function importCommit(importId, { name, collectionId } = {}) {
   const res = await fetch('/api/import/commit', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ import_id: importId, name })
+    body: JSON.stringify({ import_id: importId, name, collection_id: collectionId })
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || `Import failed (HTTP ${res.status}).`);

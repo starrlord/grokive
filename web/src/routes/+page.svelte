@@ -16,6 +16,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import JustifiedGrid from '$lib/components/JustifiedGrid.svelte';
   import EditorialList from '$lib/components/EditorialList.svelte';
+  import CollectionGroups from '$lib/components/CollectionGroups.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import SelectBar from '$lib/components/SelectBar.svelte';
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
@@ -49,6 +50,7 @@
   let collectionName = $state('');
   let activeCanvasName = $state('');
   let showCollectionPicker = $state(false);
+  let groupByBase = $state(false); // collection view: cluster items by their base image
   let showMovie = $state(false);
   let movieVideoIds = $state([]); // video ids fed to the Montage panel (selection or a collection)
   let importFiles = $state(null); // FileList from a folder Import picker (drives ImportModal)
@@ -249,6 +251,16 @@
     return () => io.disconnect();
   });
 
+  // Group-by-base mode clusters the WHOLE collection and its families' Export/Montage
+  // act on every clip — so a >500-item collection (which otherwise loads page-by-page
+  // on scroll) must be drained up front, or families and their exports would be
+  // silently truncated. Pull the next page whenever grouping is on and more remain;
+  // bounded by collectionTotal, so it stops once everything is loaded.
+  $effect(() => {
+    if (!groupByBase || !activeCollection || loading) return;
+    if (collectionItems.length < collectionTotal) loadCollectionItems(activeCollection, false);
+  });
+
   function openLightbox(item, list) {
     lb = { list, index: list.findIndex((x) => x.id === item.id), autoAdvance: false, title: '' };
   }
@@ -333,7 +345,12 @@
     // Drop from the visible grid immediately so the action feels instant; the reactive
     // reload (which now awaits the save) reconciles against the server afterwards.
     const drop = new Set($selection.map(String));
+    const before = collectionItems.length;
     collectionItems = collectionItems.filter((it) => !drop.has(String(it.id)));
+    // Keep the total in step with the optimistic splice so the group-mode "fully loaded"
+    // gate (loaded >= total) doesn't briefly flip false and flash its banner before the
+    // reconciling refetch lands. The refetch corrects it to the true server count anyway.
+    collectionTotal = Math.max(0, collectionTotal - (before - collectionItems.length));
     removeFromCollection(activeCollection.id, $selection);
     clearSelection();
   }
@@ -452,6 +469,15 @@
         <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
         <MediaTypeTabs class="ml-auto" />
         <SortSelect />
+        <!-- Cluster the collection's clips by the base image each was generated from,
+             so related videos (and their source still) gather into one family you can
+             merge-export or montage in a click. -->
+        <button type="button" aria-pressed={groupByBase}
+          class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition {groupByBase ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+          title="Group related videos by their base image" onclick={() => (groupByBase = !groupByBase)}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Group
+        </button>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
@@ -463,6 +489,12 @@
             <p class="text-sm">Select media from Recent or All Media to add it here.</p>
           </div>
         </div>
+      {:else if groupByBase}
+        <CollectionGroups items={currentGridItems} mode={$mode} {targetHeight} {gap}
+          selectMode={$selectMode} loaded={collectionItems.length} total={collectionTotal}
+          onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)}
+          onplay={(videos, title) => playResolved(videos, title)}
+          onmontage={(ids) => { movieVideoIds = ids; showMovie = true; }} />
       {:else if $mode === 'editorial'}
         <EditorialList items={currentGridItems} onopen={openLightbox} />
       {:else}

@@ -1549,34 +1549,70 @@ def api_import_file() -> Response:
 
 @app.post("/api/import/commit")
 def api_import_commit() -> Response:
-    """Finalize an import: append all buffered records to metadata.json, create a new
-    collection named after the folder, and rebuild the index once. Body: {import_id, name}."""
+    """Finalize an import: append all buffered records to metadata.json, file them into a
+    collection (a new one named after the folder, OR an existing one when ``collection_id``
+    is given), and rebuild the index once. Body: {import_id, name, collection_id?}."""
     payload = request.get_json(silent=True) or {}
     import_id = str(payload.get("import_id") or "").strip()
     name = (str(payload.get("name") or "").strip() or "Imported")[:80]
+    target_id = str(payload.get("collection_id") or "").strip()
+
+    # Validate an existing-collection target BEFORE consuming the buffered upload, so a
+    # bad request (deleted or sealed target) leaves the files recoverable — the client
+    # can retry with another target or cancel (which deletes them).
+    collections = _load_collections(strict=True)
+    target = None
+    if target_id:
+        target = next((c for c in collections if str(c.get("id")) == target_id), None)
+        if target is None:
+            return jsonify(ok=False, error="That collection no longer exists."), 404
+        # Refuse a sealed (locked + not unlocked this session) target: the client never
+        # offers it, and an import must not mutate a collection the user can't see.
+        if target.get("locked") and target.get("pass_hash") and target_id not in _session_unlocked():
+            return jsonify(ok=False, error="Unlock this collection before importing into it."), 403
+
     with _imports_lock:
         records = _imports.pop(import_id, None)
     if not records:
         return jsonify(ok=False, error="Nothing to import."), 400
 
+    ids = [r["id"] for r in records]
+    today = time.strftime("%Y-%m-%d")
+
+    if target is not None:
+        seen = set(target.get("ids", []))
+        target["ids"] = list(target.get("ids", [])) + [i for i in ids if i not in seen]
+        if not target.get("cover_id") and ids:
+            target["cover_id"] = ids[0]
+        target["updated_at"] = today
+        coll_id, coll_name = target_id, target.get("name") or name
+    else:
+        coll_id, coll_name = "col-" + secrets.token_hex(8), name
+        collections.insert(0, {
+            "id": coll_id, "name": name, "ids": ids,
+            "cover_id": ids[0] if ids else "", "created_at": today, "updated_at": today,
+        })
+
     loaded = _load_json_strict(METADATA_FILE, [])
     items = loaded if isinstance(loaded, list) else []
     items.extend(records)
-    _atomic_write_json(METADATA_FILE, items)
 
-    ids = [r["id"] for r in records]
+    # Publish the import. Write the collection membership BEFORE metadata.json (which is
+    # what rebuild_db indexes from): if the second write fails, the worst durable state is
+    # a collection holding ids not yet in metadata (they simply render nothing) rather than
+    # archived media orphaned out of every collection. On any write failure, restore the
+    # buffer so the client's cancel can reclaim the uploaded files instead of stranding them.
+    try:
+        _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+        _atomic_write_json(METADATA_FILE, items)
+    except Exception:
+        with _imports_lock:
+            _imports.setdefault(import_id, []).extend(records)
+        raise
+
     _archive_ids(ids)  # imported media start archived (kept out of Recent), per design
-    today = time.strftime("%Y-%m-%d")
-    coll_id = "col-" + secrets.token_hex(8)
-    collections = _load_collections(strict=True)
-    collections.insert(0, {
-        "id": coll_id, "name": name, "ids": ids,
-        "cover_id": ids[0] if ids else "", "created_at": today, "updated_at": today,
-    })
-    _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
-
     rebuild_db()
-    return jsonify(ok=True, collection_id=coll_id, name=name, count=len(ids))
+    return jsonify(ok=True, collection_id=coll_id, name=coll_name, count=len(ids))
 
 
 @app.post("/api/import/cancel")

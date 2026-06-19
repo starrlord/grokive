@@ -7,8 +7,23 @@
   import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
   import { importFile, importCommit, importCancel } from '$lib/api.js';
+  import { collections } from '$lib/state.js';
 
   let { files, onclose = () => {}, oncreated = () => {} } = $props();
+
+  // Where the imported files land: a brand-new collection, or appended to an existing
+  // one. Sealed collections (locked + not unlocked this session) can't be a target —
+  // they're hidden here just as they are in the "Add to Collection" picker.
+  let target = $state('new'); // 'new' | 'existing'
+  let existingId = $state('');
+  const pickable = $derived(($collections || []).filter((c) => !(c.locked && !c.unlocked)));
+  // Keep the destination valid as the collections store changes underneath (a relock or
+  // unlock-expiry can drop the chosen collection): clear a selection that left the list,
+  // and fall back to "new" when there's nothing eligible to add to.
+  $effect(() => {
+    if (!pickable.length) { target = 'new'; existingId = ''; }
+    else if (existingId && !pickable.some((c) => c.id === existingId)) existingId = '';
+  });
 
   const VIDEO = ['mp4', 'webm', 'm4v', 'mov'];
   const IMAGE = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif'];
@@ -87,11 +102,19 @@
     if (cancelling) { importCancel(importId); onclose(); return; }
     phase = 'committing';
     try {
-      result = await importCommit(importId, name.trim() || topFolder);
+      result = await importCommit(importId,
+        target === 'existing' && existingId
+          ? { collectionId: existingId }
+          : { name: name.trim() || topFolder });
       phase = 'done';
       burst++;
     } catch (e) {
-      errMsg = e?.message || 'Could not create the collection.';
+      // Reclaim the buffered upload so a failed commit (e.g. the target was deleted or
+      // got locked between picking it and committing) doesn't strand the files on disk.
+      // Safe: a validation failure returns before the server consumes the buffer, and
+      // once a commit has succeeded this is a no-op (nothing left to cancel).
+      importCancel(importId);
+      errMsg = e?.message || 'Could not finish the import.';
       phase = 'error';
     }
   }
@@ -140,19 +163,46 @@
               <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
             </span>
             <div class="min-w-0">
-              <p class="font-semibold text-ink">Create a new collection from this folder</p>
+              <p class="font-semibold text-ink">{target === 'existing' ? 'Add this folder to a collection' : 'Create a new collection from this folder'}</p>
               <p class="text-sm text-muted">{queue.length} supported file{queue.length === 1 ? '' : 's'} found.</p>
               {#if skipped}
                 <p class="mt-1 text-xs text-muted">{skipped} skipped — {#if unsupported.length}{unsupported.length} unsupported ({unsupportedExts.join(', ')}){/if}{#if unsupported.length && skippedDir.length} · {/if}{#if skippedDir.length}{skippedDir.length} in Training/Archive folders{/if}.</p>
               {/if}
             </div>
           </div>
-          <div>
-            <label for="import-name" class="mb-2 block text-xs font-bold uppercase tracking-wider text-muted">Collection name</label>
-            <input id="import-name" bind:value={name} maxlength="80"
-              class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2.5 text-base font-extrabold outline-none focus:border-[var(--accent)]" />
-            <p class="mt-1.5 text-xs text-muted">Defaults to the folder name — rename now or later.</p>
-          </div>
+
+          <!-- Destination: new vs. existing collection. Only offered when there's an
+               eligible (non-sealed) collection to add to; otherwise import always
+               creates a new one. -->
+          {#if pickable.length}
+            <div class="grid grid-cols-2 gap-1.5">
+              <button type="button" onclick={() => (target = 'new')}
+                class="rounded-lg border px-3 py-2 text-sm font-semibold transition {target === 'new' ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}">New collection</button>
+              <button type="button" onclick={() => (target = 'existing')}
+                class="rounded-lg border px-3 py-2 text-sm font-semibold transition {target === 'existing' ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}">Add to existing</button>
+            </div>
+          {/if}
+
+          {#if target === 'existing'}
+            <div>
+              <label for="import-existing" class="mb-2 block text-xs font-bold uppercase tracking-wider text-muted">Collection</label>
+              <select id="import-existing" bind:value={existingId}
+                class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2.5 text-base font-bold outline-none focus:border-[var(--accent)]">
+                <option value="" disabled>Choose a collection…</option>
+                {#each pickable as c (c.id)}
+                  <option value={c.id}>{c.name} ({(c.item_count ?? c.ids?.length ?? 0).toLocaleString()})</option>
+                {/each}
+              </select>
+              <p class="mt-1.5 text-xs text-muted">The imported files are appended to this collection and archived (kept out of Recent).</p>
+            </div>
+          {:else}
+            <div>
+              <label for="import-name" class="mb-2 block text-xs font-bold uppercase tracking-wider text-muted">Collection name</label>
+              <input id="import-name" bind:value={name} maxlength="80"
+                class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2.5 text-base font-extrabold outline-none focus:border-[var(--accent)]" />
+              <p class="mt-1.5 text-xs text-muted">Defaults to the folder name — rename now or later.</p>
+            </div>
+          {/if}
         </div>
       {:else if phase === 'running' || phase === 'committing'}
         <div class="space-y-5">
@@ -211,7 +261,7 @@
       {#if phase === 'confirm'}
         <button type="button" class="rounded-lg border border-line px-4 py-2.5 text-sm font-semibold" onclick={onclose}>Cancel</button>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 text-sm font-bold text-[var(--on-accent)] disabled:opacity-45"
-          disabled={!queue.length} onclick={start}>Import {queue.length} file{queue.length === 1 ? '' : 's'}</button>
+          disabled={!queue.length || (target === 'existing' && !existingId)} onclick={start}>Import {queue.length} file{queue.length === 1 ? '' : 's'}</button>
       {:else if phase === 'running'}
         <button type="button" class="rounded-lg border border-line px-4 py-2.5 text-sm font-semibold disabled:opacity-50" disabled={cancelling} onclick={cancel}>{cancelling ? 'Cancelling…' : 'Cancel'}</button>
       {:else if phase === 'committing'}
