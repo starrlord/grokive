@@ -166,6 +166,21 @@
     if (ctxSig !== '' && next !== ctxSig) setSelectMode(false);
     ctxSig = next;
   });
+
+  // Drilling into a collection/canvas swaps the page content in place (no route
+  // change), so the window keeps its scroll — after scrolling the landing to find
+  // the item, you land below the collection's (non-sticky) toolbar. Reset to top
+  // only when ENTERING a drilled view (the key becomes a new non-empty value),
+  // never when it clears — so hitting Back keeps your place on the landing.
+  let prevDrill = '';
+  $effect(() => {
+    const drill = $activeCollectionId
+      ? `c:${$activeCollectionId}`
+      : ($filters.canvas ? `v:${$filters.canvas}` : '');
+    if (drill && drill !== prevDrill && typeof window !== 'undefined') window.scrollTo(0, 0);
+    prevDrill = drill;
+  });
+
   async function refreshFacets() {
     try { facets = await fetchFacets($filters, $activeCollectionId); } catch {}
   }
