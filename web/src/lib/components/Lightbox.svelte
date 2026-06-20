@@ -259,6 +259,10 @@
     if (videoEl?.webkitEnterFullscreen) videoEl.webkitEnterFullscreen();
   }
   function close() {
+    // Pause before unmount so we never tear down a mid-play element — a clean stop,
+    // the same end-state as letting the clip finish (the path that doesn't wedge the
+    // shared audio graph). Both the Close button and a void-click route through here.
+    try { videoEl?.pause?.(); } catch {}
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
     onclose();
   }
@@ -281,7 +285,7 @@
   <div class="lightbox fixed inset-0 z-50 bg-[var(--lightbox-bg)] backdrop-blur-sm" role="dialog" aria-modal="true" tabindex="-1" use:trapFocus>
     <!-- Media fills the whole viewport; nothing overlaps it unless Info is opened. -->
     <div bind:this={stageEl} class="lightbox-stage absolute inset-0 grid place-items-center p-2 sm:p-4" role="presentation"
-         onpointerdown={enableSound}
+         onpointerdown={(e) => { if (e.target !== e.currentTarget) enableSound(); }}
          onpointermove={pokeCounter}
          onclick={(e) => { if (e.target === e.currentTarget) close(); }}>
       {#if item.media_type === 'video'}
