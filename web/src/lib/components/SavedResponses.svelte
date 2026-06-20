@@ -1164,6 +1164,10 @@
     }
     .card-actions-reveal {
       display: contents;
+      /* pointer-events is INHERITED: display:contents drops this wrapper's box but
+         not its computed `pointer-events:none` (the reveal class), which the child
+         buttons would inherit — visible but un-tappable. Restore it so taps land. */
+      pointer-events: auto;
     }
     .prompt-body {
       padding-right: 0;
