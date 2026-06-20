@@ -836,7 +836,7 @@
                   draggable="true" ondragstart={(e) => onDragStart(e, id)} ondragend={() => (dragId = null)}
                   role="button" tabindex="-1" aria-label="Drag to reorder" title="Drag to reorder">⠿</span>
               {/if}
-              <div class="min-w-0 flex-1 pr-8">
+              <div class="prompt-body min-w-0 flex-1 pr-8">
                 {#if needsClamp(text)}
                   <button type="button" class="block w-full cursor-pointer text-left" aria-expanded={expanded[id] || false}
                     title={expanded[id] ? 'Collapse' : 'Expand full prompt'} onclick={() => toggleExpand(id)}>
@@ -851,9 +851,11 @@
 
             <!-- Action toolbar: ★ stays visible (it also signals starred state); everything else reveals on
                  hover or keyboard focus so a row of buttons doesn't crowd the prompt. Absolutely placed so
-                 revealing the toolbar never reflows the card or its neighbours. -->
-            <div class="absolute right-2 top-2 flex items-center gap-1 rounded-lg border border-transparent px-1.5 py-1 transition group-hover:border-[var(--line-accent)] group-hover:bg-[var(--elev-pop)] group-hover:shadow-[var(--shadow-dock)] group-hover:backdrop-blur-sm group-focus-within:border-[var(--line-accent)] group-focus-within:bg-[var(--elev-pop)] group-focus-within:shadow-[var(--shadow-dock)] group-focus-within:backdrop-blur-sm">
-              <div class="pointer-events-none flex items-center gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                 revealing the toolbar never reflows the card or its neighbours. On touch (no hover) the
+                 `card-actions` rule in <style> drops this into normal flow, always visible — otherwise it'd
+                 be unreachable on a phone (taps can't hover and pointer-events:none swallows them). -->
+            <div class="card-actions absolute right-2 top-2 flex items-center gap-1 rounded-lg border border-transparent px-1.5 py-1 transition group-hover:border-[var(--line-accent)] group-hover:bg-[var(--elev-pop)] group-hover:shadow-[var(--shadow-dock)] group-hover:backdrop-blur-sm group-focus-within:border-[var(--line-accent)] group-focus-within:bg-[var(--elev-pop)] group-focus-within:shadow-[var(--shadow-dock)] group-focus-within:backdrop-blur-sm">
+              <div class="card-actions-reveal pointer-events-none flex items-center gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                 {#if llmReady}
                   <button type="button" onclick={() => openEnhance(r)} disabled={enhance.loading} title="Enhance prompt"
                     class="inline-flex h-7 items-center gap-1 rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
@@ -1145,4 +1147,26 @@
   }
 
   .review-link:hover { color: var(--ink); text-decoration: underline; }
+
+  /* Touch / no-hover devices: the floating toolbar reveals on :hover or
+     :focus-within, neither of which a phone fires — so the AI/Enhance/Copy/Del
+     actions are unreachable (and pointer-events:none swallows taps). On no-hover
+     pointers, take the toolbar out of the corner and lay it in normal flow under
+     the prompt, permanently visible and tappable. `display: contents` dissolves
+     the reveal wrapper so all controls (incl. ★) wrap as one row. Hover-capable
+     devices never match this query, so desktop keeps the exact hover-reveal. */
+  @media (hover: none) {
+    .card-actions {
+      position: static;
+      margin-top: 0.5rem;
+      flex-wrap: wrap;
+      padding: 0;
+    }
+    .card-actions-reveal {
+      display: contents;
+    }
+    .prompt-body {
+      padding-right: 0;
+    }
+  }
 </style>
