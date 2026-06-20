@@ -48,7 +48,7 @@
   --gap: 10px;
   --row-h: 240px;        /* justified target row height (cinematic) */
   --accent: #8b5cf6;     /* violet — vivid on the near-black cinematic bg */
-  --accent-2: #4bb3a8;
+  --accent-2: #2dd4a8;   /* vivid mint-teal — secondary accent (tags / organisation / "saved" markers) */
   --on-accent: #ffffff;
   --overlay: rgb(0 0 0 / 0.65);
   --overlay-strong: rgb(0 0 0 / 0.70);
@@ -93,6 +93,26 @@
   --surface-tint: #111111;
   --surface-highlight: rgb(255 255 255 / 0.07);
   --spinner-track: rgb(255 255 255 / 0.35);
+  /* Elevation + edges for raised cards/popovers. All derived from existing
+     per-theme vars so they adapt to every [data-theme] automatically. Lift
+     toward #fff (opaque, always "lighter"), NOT toward --ink or --surface-2:
+     --ink inverts on the light theme and --surface-2 is darker than --bg there,
+     so either would flip the page<rail<card<popover order. On the light theme
+     these collapse to #fff and the border + shadow carry the depth instead. */
+  --elev-card: color-mix(in srgb, var(--surface-solid), #fff 6%);   /* raised card tile */
+  --elev-pop: color-mix(in srgb, var(--surface-solid), #fff 13%);   /* one step above the card (hover popover) */
+  --line-bright: color-mix(in srgb, var(--line) 70%, var(--ink) 30%);   /* a defined rim (brighter on dark, darker on light) */
+  --line-accent: color-mix(in srgb, var(--line) 65%, var(--accent) 35%); /* accent-tinted edge for floating chrome (35% — 45% reads garish on cobalt/nocturne) */
+  --shadow-card: 0 1px 2px color-mix(in srgb, var(--bg) 60%, transparent), 0 4px 12px color-mix(in srgb, var(--bg) 70%, transparent);
+  --shadow-card-hover: 0 8px 22px color-mix(in srgb, var(--bg) 62%, transparent);
+  /* Dual-accent organisation: the per-theme secondary accent (--accent-2) carries
+     "organisation" (tags + folder hover); --accent stays "engaged / the action".
+     --chip-ink committed at 55/45 (not 70/30) so pale accent-2 themes (cobalt
+     yellow / graphite champagne / arctic mint) still clear AA at chip size. */
+  --chip-bg: color-mix(in srgb, var(--accent-2) 12%, var(--surface-solid));
+  --chip-line: color-mix(in srgb, var(--line) 72%, var(--accent-2) 28%);
+  --chip-ink: color-mix(in srgb, var(--accent-2) 55%, var(--ink) 45%);
+  --folder-hover: color-mix(in srgb, var(--surface-solid) 85%, var(--accent-2) 15%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 

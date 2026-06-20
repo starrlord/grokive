@@ -148,6 +148,45 @@
     return () => io.disconnect();
   });
 
+  // --- Masonry columns -------------------------------------------------------
+  // Variable-height cards in a row-aligned grid leave a tall void beside a short
+  // card (a one-line prompt stretched to a 6-line neighbour's row). Instead, pack
+  // cards into independent columns. colCount tracks the xl breakpoint — the only
+  // place we go 2-up; below it the list is a single column.
+  let colCount = $state(1);
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(min-width: 1280px)'); // Tailwind `xl`
+    const sync = () => (colCount = mq.matches ? 2 : 1);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  // Rough per-card height estimate (no DOM measurement) — only needs to be
+  // proportionally right so the columns balance. Clamped prompts cap their lines.
+  function estCardHeight(r) {
+    const t = textOf(r);
+    const breaks = (t.match(/\n/g) || []).length;
+    const lines = needsClamp(t) ? 7 : Math.max(1, Math.ceil(t.length / 50) + breaks);
+    const tagRows = Math.max(1, Math.ceil((tagsOf(r).length + 1) / 4));
+    return 48 + lines * 21 + tagRows * 30; // chrome + text lines + tag rows (px)
+  }
+  // Greedy shortest-column assignment, in array order. Each card's column depends
+  // only on the cards before it, so growing pageItems only appends — earlier cards
+  // never jump columns (no reflow/scroll-jank as the incremental window grows).
+  const columns = $derived.by(() => {
+    const n = Math.max(1, colCount);
+    const cols = Array.from({ length: n }, () => []);
+    const heights = new Array(n).fill(0);
+    pageItems.forEach((r, i) => {
+      let k = 0;
+      for (let j = 1; j < n; j++) if (heights[j] < heights[k]) k = j;
+      cols[k].push({ r, i });
+      heights[k] += estCardHeight(r);
+    });
+    return cols;
+  });
+
   async function copy(t) {
     const ok = await copyText(t);
     toast(ok ? 'Copied' : 'Copy failed', { type: ok ? 'success' : 'error' });
@@ -566,9 +605,9 @@
   }
 </script>
 
-<div class="mx-auto grid w-full max-w-7xl grid-cols-1 gap-3 md:grid-cols-[12.5rem_minmax(0,1fr)]">
+<div class="mx-auto grid w-full max-w-7xl grid-cols-1 gap-3 md:grid-cols-[15rem_minmax(0,1fr)] lg:grid-cols-[16rem_minmax(0,1fr)]">
   <!-- Folder rail -->
-  <aside class="rounded-xl border border-line bg-[var(--surface)]/35 p-2 md:sticky md:top-20 md:self-start">
+  <aside class="rounded-xl border border-line bg-[var(--surface-solid)] p-2 shadow-[inset_0_0_0_1px_var(--surface-highlight)] md:sticky md:top-20 md:self-start">
     <div class="mb-2 flex items-center justify-between px-1 text-[0.625rem] font-bold uppercase tracking-wider text-muted">
       <span>Folders</span>
       <span class="max-w-[11rem] truncate md:hidden">{activeFolderLabel}</span>
@@ -577,7 +616,7 @@
       {#snippet folderBtn(key, label, count)}
         <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
           <button type="button" onclick={() => selectFolder(key)} title={label}
-            class="flex min-w-0 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === key ? 'border-line border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-ink shadow-sm' : 'border-transparent text-muted hover:bg-[var(--surface-2)] hover:text-ink'}">
+            class="flex min-w-0 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === key ? 'border-line border-l-2 border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--elev-card))] text-ink shadow-[var(--shadow-card)]' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
             <span class="min-w-0 flex-1 truncate">{label}</span>
             <span class="shrink-0 text-xs opacity-70">{count}</span>
           </button>
@@ -596,7 +635,7 @@
           {:else}
             <div class="group flex items-stretch gap-0.5">
               <button type="button" onclick={() => selectFolder(f)} ondblclick={() => startRename(f)} title={f}
-                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === f ? 'border-line border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)] text-ink shadow-sm' : 'border-transparent text-muted hover:bg-[var(--surface-2)] hover:text-ink'}">
+                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === f ? 'border-line border-l-2 border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--elev-card))] text-ink shadow-[var(--shadow-card)]' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
                 <span class="min-w-0 flex-1 truncate">{f}</span>
                 <span class="shrink-0 text-xs opacity-70">{folderCounts.get(f) || 0}</span>
               </button>
@@ -616,7 +655,7 @@
             class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none placeholder:text-muted" />
         {:else}
           <button type="button" onclick={openNewFolder}
-            class="w-full rounded-lg border border-dashed border-line px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">+ New folder</button>
+            class="w-full rounded-lg border border-dashed border-line px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold text-muted transition hover:border-[var(--accent-2)] hover:text-ink">+ New folder</button>
         {/if}
       </li>
     </ul>
@@ -683,7 +722,7 @@
     </div>
 
     <!-- Manually add a prompt straight to the library (no generation needed). -->
-    <div class="mb-3 rounded-lg border border-line bg-[var(--surface)]/70 p-2.5 shadow-sm">
+    <div class="mb-3 rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 shadow-sm">
       <textarea bind:value={draft} onkeydown={onKey} rows="2" placeholder="Add a prompt by hand…"
         class="w-full resize-y rounded-md border border-line bg-[var(--surface-2)]/70 px-3 py-2 text-sm leading-relaxed text-ink outline-none placeholder:text-muted focus:border-[var(--accent)]"></textarea>
       <div class="mt-2 flex items-center justify-between gap-2">
@@ -705,7 +744,7 @@
 
     <!-- Tag filter (match ANY) — scoped to the active folder's tags -->
     {#if folderTags.length}
-      <div class="mb-3 rounded-lg border border-line bg-[var(--surface)]/25 px-2.5 py-2">
+      <div class="mb-3 rounded-lg border border-line bg-[var(--surface-solid)] px-2.5 py-2">
         <div class="mb-1.5 flex items-center justify-between gap-2">
           <span class="text-[0.625rem] font-bold uppercase tracking-wider text-muted">Filter by tag</span>
           <div class="flex items-center gap-2">
@@ -734,7 +773,7 @@
           <div class:tag-cloud-collapsed={!tagCloudExpanded && hasCollapsibleTags} class="tag-cloud flex flex-wrap items-center gap-1.5">
             {#each availableTagItems as t (t.name)}
               <button type="button" onclick={() => toggleTagFilter(t.name)}
-                class="rounded-full border border-line px-2.5 py-0.5 text-xs font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">#{t.name} <span class="opacity-60">{t.count}</span></button>
+                class="rounded-full border border-[var(--chip-line)] bg-[var(--chip-bg)] px-2.5 py-0.5 text-xs font-semibold text-[var(--chip-ink)] transition hover:border-[var(--accent-2)] hover:text-ink">#{t.name} <span class="opacity-60">{t.count}</span></button>
             {/each}
           </div>
         {/if}
@@ -742,7 +781,7 @@
     {/if}
 
     {#if shown.length === 0}
-      <div class="rounded-xl border border-dashed border-line bg-[var(--surface)]/35 px-4 py-10 text-center">
+      <div class="rounded-xl border border-dashed border-line bg-[var(--surface-solid)] px-4 py-10 text-center">
         <div class="mx-auto mb-2 flex h-10 w-10 items-center justify-center rounded-full border border-line text-lg text-muted">□</div>
         <h3 class="text-sm font-bold text-ink">
           {#if items.length === 0}
@@ -780,11 +819,16 @@
         {/if}
       </div>
     {:else}
-      <ul class="grid grid-cols-1 gap-2 xl:grid-cols-2">
-        {#each pageItems as r, rowIndex (rowId(r, rowIndex))}
-          {@const id = rowId(r, rowIndex)}
+      <!-- Masonry: pack cards into independent columns via the stable greedy fill above,
+           so a one-line card is followed immediately by the next instead of leaving a tall
+           void beside a long-prompt neighbour. -->
+      <div class="flex items-start gap-2">
+        {#each columns as col, colIndex (colIndex)}
+        <ul class="flex min-w-0 flex-1 flex-col gap-2">
+        {#each col as { r, i } (rowId(r, i))}
+          {@const id = rowId(r, i)}
           {@const text = textOf(r)}
-          <li class="flex min-h-[8.75rem] flex-col rounded-lg border border-line bg-[var(--surface)]/70 p-2.5 shadow-sm transition hover:border-[color-mix(in_srgb,var(--line)_70%,var(--accent)_30%)] {dragId === id ? 'opacity-40' : ''}"
+          <li class="group relative flex flex-col rounded-lg border border-[var(--line-bright)] bg-[var(--elev-card)] p-2.5 shadow-[inset_0_1px_0_var(--surface-highlight),var(--shadow-card)] transition-[box-shadow,border-color,transform] hover:-translate-y-px hover:border-[var(--line-accent)] hover:shadow-[inset_0_1px_0_var(--surface-highlight),var(--shadow-card-hover)] {dragId === id ? 'opacity-40' : ''}"
             ondragover={onDragOver} ondrop={(e) => onDrop(e, id)}>
             <div class="flex min-w-0 items-start gap-2">
               {#if canReorder}
@@ -792,7 +836,7 @@
                   draggable="true" ondragstart={(e) => onDragStart(e, id)} ondragend={() => (dragId = null)}
                   role="button" tabindex="-1" aria-label="Drag to reorder" title="Drag to reorder">⠿</span>
               {/if}
-              <div class="min-w-0 flex-1">
+              <div class="min-w-0 flex-1 pr-8">
                 {#if needsClamp(text)}
                   <button type="button" class="block w-full cursor-pointer text-left" aria-expanded={expanded[id] || false}
                     title={expanded[id] ? 'Collapse' : 'Expand full prompt'} onclick={() => toggleExpand(id)}>
@@ -803,48 +847,53 @@
                   <p class="whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{text}</p>
                 {/if}
               </div>
+            </div>
 
-              <div class="flex shrink-0 flex-row items-center gap-1">
-                <button type="button" onclick={() => toggleStarred(id)} aria-pressed={!!r.starred}
-                  aria-label={r.starred ? 'Unstar prompt' : 'Star prompt'} title={r.starred ? 'Unstar' : 'Star'}
-                  class="grid h-7 w-7 shrink-0 place-items-center rounded-md border text-[0.8125rem] transition {r.starred ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-line text-muted hover:border-[var(--accent)] hover:text-ink'}">{r.starred ? '★' : '☆'}</button>
+            <!-- Action toolbar: ★ stays visible (it also signals starred state); everything else reveals on
+                 hover or keyboard focus so a row of buttons doesn't crowd the prompt. Absolutely placed so
+                 revealing the toolbar never reflows the card or its neighbours. -->
+            <div class="absolute right-2 top-2 flex items-center gap-1 rounded-lg border border-transparent px-1.5 py-1 transition group-hover:border-[var(--line-accent)] group-hover:bg-[var(--elev-pop)] group-hover:shadow-[var(--shadow-dock)] group-hover:backdrop-blur-sm group-focus-within:border-[var(--line-accent)] group-focus-within:bg-[var(--elev-pop)] group-focus-within:shadow-[var(--shadow-dock)] group-focus-within:backdrop-blur-sm">
+              <div class="pointer-events-none flex items-center gap-1 opacity-0 transition group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
                 {#if llmReady}
                   <button type="button" onclick={() => openEnhance(r)} disabled={enhance.loading} title="Enhance prompt"
-                    class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
+                    class="inline-flex h-7 items-center gap-1 rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
                     <span aria-hidden="true">✧</span>Enhance
                   </button>
                   <button type="button" onclick={() => autotag(r)} disabled={suggest[id]?.loading} title="Suggest tags & folder"
-                    class="inline-flex h-7 items-center gap-1 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
+                    class="inline-flex h-7 items-center gap-1 rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] px-2 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-40">
                     <span aria-hidden="true">✦</span>{suggest[id]?.loading ? '...' : 'AI'}
                   </button>
                 {/if}
                 {#if onRemix}
                   <button type="button" onclick={() => onRemix(text)} aria-label="Edit in Compose" title="Load into the Compose composer to remix"
-                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-line text-[0.8125rem] text-muted transition hover:border-[var(--accent)] hover:text-ink">✎</button>
+                    class="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] text-[0.8125rem] text-muted transition hover:border-[var(--accent)] hover:text-ink">✎</button>
                 {/if}
-                <button type="button" onclick={() => copy(text)} title="Copy prompt" class="h-7 rounded-md border border-line px-2 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
+                <button type="button" onclick={() => copy(text)} title="Copy prompt" class="h-7 rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] px-2 text-[0.6875rem] font-semibold transition hover:border-[var(--accent)]">Copy</button>
                 {#if confirmDeleteId === id}
                   <button type="button" onclick={() => confirmDelete(id)} title="Click to permanently delete"
                     class="h-7 rounded-md bg-[var(--danger)] px-2 text-[0.6875rem] font-bold text-[var(--on-accent)] transition hover:bg-[var(--danger-hover)]">Sure?</button>
                 {:else}
                   <button type="button" onclick={() => askDelete(id)} title="Delete prompt"
-                    class="h-7 rounded-md border border-line px-2 text-[0.6875rem] font-semibold text-[var(--danger)] transition hover:border-[var(--danger)]">Del</button>
+                    class="h-7 rounded-md border border-[var(--line-bright)] bg-[var(--surface-solid)] px-2 text-[0.6875rem] font-semibold text-[var(--danger)] transition hover:border-[var(--danger)]">Del</button>
                 {/if}
               </div>
+              <button type="button" onclick={() => toggleStarred(id)} aria-pressed={!!r.starred}
+                aria-label={r.starred ? 'Unstar prompt' : 'Star prompt'} title={r.starred ? 'Unstar' : 'Star'}
+                class="grid h-7 w-7 shrink-0 place-items-center rounded-md border text-[0.8125rem] transition {r.starred ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--line-bright)] bg-[var(--surface-solid)] text-muted hover:border-[var(--accent)] hover:text-ink'}">{r.starred ? '★' : '☆'}</button>
             </div>
 
-            <div class="mt-auto pt-2">
+            <div class="pt-2">
               <!-- Tags + folder picker -->
               <div class="mt-2 flex flex-wrap items-center gap-1.5">
                 {#each tagsOf(r) as t (t)}
-                  <span class="inline-flex items-center overflow-hidden rounded-full border text-[0.6875rem] {activeTags.includes(t) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line bg-[var(--surface)] text-muted'}">
+                  <span class="inline-flex items-center overflow-hidden rounded-full border text-[0.6875rem] {activeTags.includes(t) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-[var(--chip-line)] bg-[var(--chip-bg)] text-[var(--chip-ink)]'}">
                     <button type="button" onclick={() => showRelatedTag(t)}
                       title={`Show prompts tagged #${t}`}
                       class="px-2 py-0.5 text-left transition hover:brightness-110">
                       #{t}
                     </button>
                     <button type="button" onclick={() => removeTag(r, t)} aria-label={`Remove tag ${t}`}
-                      class="border-l px-1.5 py-0.5 leading-none transition hover:text-[var(--danger)] {activeTags.includes(t) ? 'border-white/25' : 'border-line'}">×</button>
+                      class="border-l px-1.5 py-0.5 leading-none transition hover:text-[var(--danger)] {activeTags.includes(t) ? 'border-white/25' : 'border-[var(--chip-line)]'}">×</button>
                   </span>
                 {/each}
                 {#if tagEditId === id}
@@ -853,7 +902,7 @@
                     class="w-24 rounded-full border border-[var(--accent)] bg-[var(--surface)] px-2 py-0.5 text-[0.6875rem] outline-none" />
                 {:else}
                   <button type="button" onclick={() => startTag(id)}
-                    class="rounded-full border border-dashed border-line px-2 py-0.5 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink">+ tag</button>
+                    class="rounded-full border border-dashed border-line px-2 py-0.5 text-[0.6875rem] font-semibold text-muted transition hover:border-[var(--accent-2)] hover:text-ink">+ tag</button>
                 {/if}
 
                 <select value={folderOf(r)} onchange={(e) => moveToFolder(r, e.currentTarget.value)}
@@ -905,7 +954,9 @@
             </div>
           </li>
         {/each}
-      </ul>
+        </ul>
+        {/each}
+      </div>
       <!-- Grows the rendered window as it scrolls into view (keeps a big library light). -->
       {#if pageItems.length < shown.length}
         <div bind:this={sentinel} class="h-10"></div>
