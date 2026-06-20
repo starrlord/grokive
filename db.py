@@ -328,9 +328,16 @@ def query_media(
             if view == "favorites":
                 where.append("m.id IN (SELECT id FROM _fav)" if has_fav else "0")
 
-        for tag in tags:
-            where.append("EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id AND mt.tag = ?)")
-            params.append(tag)
+        # Tag filter is match-ANY (OR): a clip qualifies if it carries at least one of
+        # the selected tags, not all of them — mirrors the model filter and the Prompt
+        # Studio tag cloud. (A per-tag clause AND-joined into `where` required ALL of them.)
+        tag_list = list(tags)
+        if tag_list:
+            placeholders = ",".join("?" for _ in tag_list)
+            where.append(
+                f"EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = m.id AND mt.tag IN ({placeholders}))"
+            )
+            params.extend(tag_list)
 
         model_list = list(models)
         if model_list:

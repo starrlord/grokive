@@ -7,6 +7,7 @@ other tooling can reuse them without importing the large legacy HTML template.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -73,16 +74,36 @@ def tokens(prompt: str) -> list[str]:
 
 def tags_for_groups(groups: list[dict[str, Any]]) -> None:
     """Assign up to 8 representative tags to each group (in place), ranked by how
-    distinctive each unigram/bigram is across the whole corpus."""
-    corpus = Counter()
-    group_terms: list[list[str]] = []
+    distinctive each unigram/bigram is via TF-IDF (each group's prompt is one
+    document). This surfaces what makes a clip *different* from the rest of the
+    library rather than the boilerplate every prompt shares — the same scoring the
+    Prompt Studio cluster tagger (_label_clusters) uses. A frequency rank would do
+    the opposite: pick the most common library-wide words and drop the unique ones."""
+    per_group: list[Counter] = []
+    doc_freq: Counter = Counter()
     for group in groups:
         term_list = tokens(group["prompt"])
         bigrams = [f"{a} {b}" for a, b in zip(term_list, term_list[1:])]
-        terms = term_list + bigrams
-        group_terms.append(terms)
-        corpus.update(set(terms))
+        cnt: Counter = Counter(term_list + bigrams)
+        per_group.append(cnt)
+        doc_freq.update(cnt.keys())  # in how many groups each term appears
 
-    for group, terms in zip(groups, group_terms):
-        ranked = sorted(set(terms), key=lambda term: (-corpus[term], len(term), term))
-        group["tags"] = ranked[:8]
+    n = max(1, len(groups))
+    for group, cnt in zip(groups, per_group):
+        scored = [
+            (freq * (math.log((n + 1) / doc_freq[term]) + 1.0), freq, term)
+            for term, freq in cnt.items()
+        ]
+        scored.sort(key=lambda x: (-x[0], -x[1], x[2]))
+        kept: list[str] = []
+        covered: set[str] = set()
+        for _, _, term in scored:
+            words = term.split()
+            if len(words) == 1 and words[0] in covered:
+                continue  # already represented by a chosen bigram
+            kept.append(term)
+            if len(words) > 1:
+                covered.update(words)
+            if len(kept) >= 8:
+                break
+        group["tags"] = kept
