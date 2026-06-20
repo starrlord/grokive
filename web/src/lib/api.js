@@ -38,6 +38,12 @@ export function fetchFacets(f = {}, collectionId = null) {
   const p = new URLSearchParams();
   p.set('view', f.view || 'recent');
   if (f.query) p.set('q', f.query);
+  // Send the active chip selections so each facet's counts reflect the others
+  // (e.g. selecting tags narrows the resolution/model chips). The server excludes
+  // each facet's own dimension so its full option list stays visible.
+  if (f.tags?.length) p.set('tags', f.tags.join(','));
+  if (f.models?.length) p.set('models', f.models.join(','));
+  if (f.resolutions?.length) p.set('res', f.resolutions.join(','));
   if (f.canvas) p.set('canvas', f.canvas);
   if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
   if (f.period && f.period !== 'all') p.set('period', f.period);

@@ -519,6 +519,9 @@ def facets(
     *,
     view: str = "recent",
     q: str = "",
+    tags: Iterable[str] = (),
+    models: Iterable[str] = (),
+    resolutions: Iterable[int] = (),
     canvas: str | None = None,
     media_type: str = "all",
     favorites: Iterable[str] = (),
@@ -529,7 +532,12 @@ def facets(
     end: str | None = None,
 ) -> dict[str, Any]:
     """Tag / model / canvas / resolution counts for the current browsing scope.
-    ``hidden`` (locked-collection media) is excluded so counts never leak them."""
+
+    Cross-facet: each facet's counts reflect the OTHER active chip selections but
+    exclude its own dimension — so selecting tags narrows the resolution and model
+    counts (and vice versa), while each facet still lists all of its own options so
+    you can keep multi-selecting within it. ``hidden`` (locked-collection media) is
+    excluded so counts never leak them."""
     conn = _connect(db_path)
     try:
         has_stash = _temp_id_table(conn, "_stash", stashed)
@@ -575,38 +583,95 @@ def facets(
             where.append("m.created_at < ?")
             params.append(end)
 
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-        tags = [
+        # Per-dimension chip clauses (match-ANY within a dimension), each as (sql, params).
+        # A facet applies every OTHER dimension's clause but not its own, so selecting
+        # tags narrows the resolution/model counts while the tag list still shows every
+        # tag (letting you keep adding to the OR). `where`/`params` above are the base scope.
+        orient_sql = {
+            "landscape": "m.media_w > m.media_h",
+            "portrait": "m.media_w < m.media_h",
+            "square": "m.media_w = m.media_h",
+        }
+
+        def tag_clause() -> tuple[str | None, list[Any]]:
+            tl = [t for t in tags if t]
+            if not tl:
+                return None, []
+            ph = ",".join("?" for _ in tl)
+            return (f"EXISTS (SELECT 1 FROM media_tags mt2 WHERE mt2.media_id = m.id "
+                    f"AND mt2.tag IN ({ph}))"), list(tl)
+
+        def model_clause() -> tuple[str | None, list[Any]]:
+            ml = [m for m in models if m]
+            if not ml:
+                return None, []
+            clauses: list[str] = []
+            ps: list[Any] = []
+            for model in ml:
+                if model == "Unknown model":
+                    clauses.append("(m.model IS NULL OR m.model = '')")
+                else:
+                    clauses.append("m.model = ?")
+                    ps.append(model)
+            return "(" + " OR ".join(clauses) + ")", ps
+
+        def res_clause() -> tuple[str | None, list[Any]]:
+            buckets: list[tuple[int, str]] = []
+            for r in resolutions:
+                h_str, sep, orient = str(r).strip().lower().rpartition("-")
+                if sep and h_str.isdigit() and orient in orient_sql:
+                    buckets.append((int(h_str), orient))
+            if not buckets:
+                return None, []
+            clause = " OR ".join(
+                f"(MIN(m.media_w, m.media_h) = ? AND {orient_sql[o]})" for _, o in buckets
+            )
+            return f"({clause})", [h for h, _ in buckets]
+
+        def compose(*extra: tuple[str | None, list[Any]]) -> tuple[str, list[Any]]:
+            w = where[:]
+            p = params[:]
+            for sql, ps in extra:
+                if sql:
+                    w.append(sql)
+                    p.extend(ps)
+            return ((" WHERE " + " AND ".join(w)) if w else ""), p
+
+        tags_where, tags_params = compose(model_clause(), res_clause())
+        tag_rows = [
             {"name": r["tag"], "count": r["n"]}
             for r in conn.execute(
-                f"SELECT mt.tag, COUNT(*) n FROM media_tags mt JOIN media m ON m.id = mt.media_id{joins}{where_sql} "
+                f"SELECT mt.tag, COUNT(*) n FROM media_tags mt JOIN media m ON m.id = mt.media_id{joins}{tags_where} "
                 f"GROUP BY mt.tag ORDER BY n DESC, mt.tag",
-                params,
+                tags_params,
             )
         ]
-        models = [
+        models_where, models_params = compose(tag_clause(), res_clause())
+        model_rows = [
             {"name": r["model"] or "Unknown model", "count": r["n"]}
             for r in conn.execute(
-                f"SELECT COALESCE(NULLIF(m.model,''), NULL) model, COUNT(*) n FROM media m{joins}{where_sql} "
+                f"SELECT COALESCE(NULLIF(m.model,''), NULL) model, COUNT(*) n FROM media m{joins}{models_where} "
                 f"GROUP BY model ORDER BY n DESC",
-                params,
+                models_params,
             )
         ]
-        canvases = [
+        canvas_where, canvas_params = compose(tag_clause(), model_clause(), res_clause())
+        canvas_rows = [
             {"id": r["canvas_id"], "name": r["canvas_name"] or r["canvas_id"],
              "count": r["n"], "videos": r["v"], "images": r["i"], "cover": r["cover"]}
             for r in conn.execute(
                 f"SELECT m.canvas_id, m.canvas_name, COUNT(*) n, "
                 f"SUM(m.media_type='video') v, SUM(m.media_type='image') i, "
-                f"MAX(m.thumb) cover FROM media m{joins}{where_sql}"
-                f"{' AND' if where_sql else ' WHERE'} m.canvas_id IS NOT NULL "
+                f"MAX(m.thumb) cover FROM media m{joins}{canvas_where}"
+                f"{' AND' if canvas_where else ' WHERE'} m.canvas_id IS NOT NULL "
                 f"GROUP BY m.canvas_id ORDER BY n DESC",
-                params,
+                canvas_params,
             )
         ]
-        res_where = (where_sql + " AND" if where_sql else " WHERE") + \
+        res_base_where, res_params = compose(tag_clause(), model_clause())
+        res_where = (res_base_where + " AND" if res_base_where else " WHERE") + \
             " m.media_w IS NOT NULL AND m.media_h IS NOT NULL"
-        resolutions = [
+        resolution_rows = [
             {"height": r["h"], "orientation": r["orient"], "count": r["n"]}
             for r in conn.execute(
                 f"SELECT MIN(m.media_w, m.media_h) AS h, "
@@ -614,12 +679,14 @@ def facets(
                 f"WHEN m.media_w < m.media_h THEN 'portrait' ELSE 'square' END AS orient, "
                 f"COUNT(*) n FROM media m{joins}{res_where} "
                 f"GROUP BY h, orient ORDER BY h DESC, orient",
-                params,
+                res_params,
             )
         ]
-        total = conn.execute(f"SELECT COUNT(*) FROM media m{joins}{where_sql}", params).fetchone()[0]
-        return {"tags": tags, "models": models, "canvases": canvases,
-                "resolutions": resolutions, "total": total}
+        # Total stays the scope count (ignores chips) — its prior meaning; unused by the UI.
+        total = conn.execute(f"SELECT COUNT(*) FROM media m{joins}"
+                             f"{(' WHERE ' + ' AND '.join(where)) if where else ''}", params).fetchone()[0]
+        return {"tags": tag_rows, "models": model_rows, "canvases": canvas_rows,
+                "resolutions": resolution_rows, "total": total}
     finally:
         conn.close()
 
