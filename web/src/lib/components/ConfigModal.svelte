@@ -56,6 +56,7 @@
   let whisper = $state('');
   let envLocked = $state(false);
   let burn = $state(false);
+  let autonomous = $state(false);
   let llmProvider = $state('local');
   let llmUrl = $state('');
   let llmModel = $state('');
@@ -133,6 +134,7 @@
       whisper = s.whisper_server_url || '';
       envLocked = !!s.whisper_env_locked;
       burn = !!s.burn_subtitles;
+      autonomous = !!s.autonomous_mode;
       llmProvider = s.llm_provider || providerFromUrl(s.llm_server_url);
       llmUrl = s.llm_server_url || '';
       llmModel = s.llm_model || '';
@@ -275,7 +277,7 @@
       const r = await postConfig(curl);
       if (!r.ok) { const j = await r.json().catch(() => ({})); curlErr = j.error || 'cURL save failed.'; }
     }
-    const body = { burn_subtitles: burn };
+    const body = { burn_subtitles: burn, autonomous_mode: autonomous };
     if (!envLocked) body.whisper_server_url = whisper.trim();
     body.llm_provider = llmProvider;
     body.embed_provider = embedProvider;
@@ -681,6 +683,17 @@
           <textarea class="h-28 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
             placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
           <p class="mt-1 text-xs text-muted">{curlNote}</p>
+        </section>
+
+        <section class="mt-6">
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Automation</div>
+          <label class="flex cursor-pointer items-start gap-2 text-sm">
+            <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" bind:checked={autonomous} />
+            <span>
+              <span class="font-semibold">Autonomous Mode</span>
+              <span class="mt-0.5 block text-xs text-muted">After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.</span>
+            </span>
+          </label>
         </section>
 
         <section class="mt-6">

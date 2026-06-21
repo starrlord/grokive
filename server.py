@@ -262,6 +262,50 @@ def _run_step(label: str, args: list[str]) -> int:
     return proc.returncode or 0
 
 
+def _inproc_step(label: str, fn) -> int:
+    """Run an in-process post-sync step, framed in the rolling log exactly like _run_step
+    (=== header === / --- footer ---) so the status pill and parsed Summary view treat it the
+    same as a CLI step. Best-effort: a failure is logged and returns 1 but never raises — one
+    optional step can't fail the whole sync."""
+    _sync["step"] = label
+    _log(f"=== {label}: autonomous ===")
+    code = 0
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 - surfaced in the log, never fatal
+        code = 1
+        _log(f"{label} error: {str(exc)[:200]}")
+    _log(f"--- {label} exited with code {code} ---")
+    return code
+
+
+def _run_autonomous_steps() -> None:
+    """Autonomous Mode post-sync automation: update the prompt index, import new library prompts
+    (excluding locked/hidden collections), then AI-tag ONLY the freshly imported ones. Each step
+    is independently gated by its own config (a missing endpoint logs a skip, never an error) and
+    is best-effort, so it can't fail the sync that just succeeded."""
+    new_records: list = []
+
+    def _do_import() -> None:
+        nonlocal new_records
+        merged, new_records, _ = _import_library_into_saved(exclude_hidden=True)
+        _log(f"imported {len(new_records)} new prompt(s) — library now {len(merged)}")
+
+    def _do_autotag() -> None:
+        if not _llm_url():
+            _log("skipped — no LLM endpoint configured")
+            return
+        if not new_records:
+            _log("no new prompts to tag")
+            return
+        tagged = _autotag_records(new_records, log=_log)
+        _log(f"tagged {tagged}/{len(new_records)} new prompt(s)")
+
+    _inproc_step("embed", lambda: _run_embed_build_inline(_log))
+    _inproc_step("library", _do_import)
+    _inproc_step("autotag", _do_autotag)
+
+
 def _sync_worker() -> None:
     py = sys.executable
     cli = str(ROOT / "grokive.py")
@@ -282,6 +326,10 @@ def _sync_worker() -> None:
                 _sync["step"] = "error"
                 break
         else:
+            # All download/index steps succeeded → run optional post-sync automation
+            # (best-effort; never flips the sync to error). Off unless the toggle is set.
+            if _autonomous_enabled():
+                _run_autonomous_steps()
             _sync["step"] = "done"
     except Exception as exc:  # pragma: no cover - defensive
         rc = 1
@@ -335,6 +383,12 @@ def _whisper_url() -> str:
 
 def _burn_enabled() -> bool:
     return bool(_load_settings().get("burn_subtitles"))
+
+
+def _autonomous_enabled() -> bool:
+    """When on, a finished Sync auto-runs post-steps: update the prompt index, import new
+    prompts into the library, and AI-tag the freshly imported ones. See _run_autonomous_steps."""
+    return bool(_load_settings().get("autonomous_mode"))
 
 
 # Subtitle display style — shared by the player's ::cue rendering (read via
@@ -902,6 +956,7 @@ def api_settings_get() -> Response:
         whisper_configured=bool(_whisper_url()),
         whisper_env_locked=bool(WHISPER_ENV),
         burn_subtitles=bool(settings.get("burn_subtitles")),
+        autonomous_mode=bool(settings.get("autonomous_mode")),
         subtitle_font=str(settings.get("subtitle_font") or "system"),
         subtitle_size=_sub_size(settings.get("subtitle_size")),
         subtitle_color=_sub_color(settings.get("subtitle_color")),
@@ -952,6 +1007,8 @@ def api_settings_post() -> Response:
         settings["whisper_server_url"] = str(payload.get("whisper_server_url") or "").strip()[:500]
     if "burn_subtitles" in payload:
         settings["burn_subtitles"] = bool(payload.get("burn_subtitles"))
+    if "autonomous_mode" in payload:
+        settings["autonomous_mode"] = bool(payload.get("autonomous_mode"))
     # Subtitle display style (player ::cue + burned-in export). Font is restricted
     # to the curated keys; size/colour/opacity are clamped to safe ranges.
     if "subtitle_font" in payload:
@@ -3644,6 +3701,43 @@ def _embed_worker() -> None:
         _embed["error"] = err
 
 
+def _run_embed_build_inline(log) -> None:
+    """Build/refresh the prompt embedding index synchronously, for Autonomous Mode's post-sync
+    step. Reuses the _embed job slot (lock + state) so the Studio's build button reflects progress
+    and a manual build can't run at the same time. Logs a one-line skip when not configured or
+    already running; raises on a build error so the caller's step is marked failed."""
+    if not _embed_url():
+        log("skipped — no embeddings endpoint configured")
+        return
+    with _embed_lock:
+        if _embed["running"]:
+            log("skipped — an index build is already running")
+            return
+        _embed.update(running=True, done=0, total=0, error=None)
+
+    def progress(done: int, total: int) -> None:
+        with _embed_lock:
+            _embed["done"], _embed["total"] = done, total
+
+    base, model = _embed_url(), _embed_model()
+    err = None
+    try:
+        promptstudio.build_embeddings(
+            PROMPT_DB_FILE, _corpus_prompts(), base, model, progress=progress,
+            api_key=_embed_api_key(), extra_headers=_embed_extra_headers(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)[:300]
+    finally:
+        with _embed_lock:
+            _embed["running"] = False
+            _embed["error"] = err
+            done, total = _embed["done"], _embed["total"]
+    if err:
+        raise RuntimeError(err)
+    log(f"embedded {done}/{total} prompt(s)")
+
+
 @app.post("/api/prompts/embed")
 def api_prompts_embed() -> Response:
     """Kick (or no-op if already running) the incremental embedding build."""
@@ -4230,9 +4324,12 @@ def api_prompts_responses_star() -> Response:
     return jsonify(ok=True, responses=current)
 
 
-def _library_unique_prompts() -> dict:
-    """Map normalized-prompt hash -> {text, created} over every media prompt in metadata.json,
-    deduped (trivially-different wordings collapse, matching Prompt Studio's unique count)."""
+def _library_unique_prompts(exclude_hidden: bool = False) -> dict:
+    """Map normalized-prompt hash -> {text, created, visible} over every media prompt in
+    metadata.json, deduped (trivially-different wordings collapse, matching Prompt Studio's
+    unique count). When ``exclude_hidden`` is set, prompts that live ONLY in locked/hidden
+    collections are dropped before returning — a prompt shared with any visible media stays
+    (the same policy as the discovery surfaces: themes, find-similar)."""
     uniq: dict = {}
     if not METADATA_FILE.exists():
         return uniq
@@ -4240,6 +4337,7 @@ def _library_unique_prompts() -> dict:
         items = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
     except Exception:
         return uniq
+    hidden = _list_hidden_media_ids() if exclude_hidden else set()
     for it in items if isinstance(items, list) else []:
         if not isinstance(it, dict):
             continue
@@ -4257,39 +4355,45 @@ def _library_unique_prompts() -> dict:
         if not h:
             continue
         created = str(it.get("created_at") or "")
+        visible = str(it.get("id")) not in hidden  # always True when exclude_hidden is off
         row = uniq.get(h)
         if row is None:
-            uniq[h] = {"text": text, "created": created}
-        elif created > row["created"]:
-            row["created"] = created
+            uniq[h] = {"text": text, "created": created, "visible": visible}
+        else:
+            if created > row["created"]:
+                row["created"] = created
+            if visible:
+                row["visible"] = True
+    if exclude_hidden:
+        return {h: r for h, r in uniq.items() if r.get("visible")}
     return uniq
 
 
-@app.post("/api/prompts/responses/import-library")
-def api_prompts_responses_import_library() -> Response:
-    """Merge the media library's prompts (from metadata.json) into Saved responses: add any that
-    aren't already saved (deduped by normalized prompt hash). ``{"preview": true}`` only COUNTS
-    what would be added (for the button label) and writes nothing. The real import backs up the
-    current list first and can only grow it. Returns the full updated list."""
-    payload = request.get_json(silent=True) or {}
-    preview = bool(payload.get("preview"))
-    folder = str(payload.get("folder") or "Library").strip()[:40]
-    current: list = []
+def _read_responses() -> list:
+    """Saved Prompt Studio responses as a list of dicts ([] if none/unreadable)."""
     if RESPONSES_FILE.exists():
         try:
             loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
-                current = [x for x in loaded if isinstance(x, dict)]
+                return [x for x in loaded if isinstance(x, dict)]
         except Exception:
-            current = []
+            pass
+    return []
+
+
+def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool = False) -> tuple[list, list, str]:
+    """Merge the media library's prompts (metadata.json) into Saved responses, adding only those
+    not already saved (deduped by normalized prompt hash). Backs up the current list and can only
+    grow it. Returns ``(merged, new_entries, backup_path)`` — ``new_entries`` is the delta added
+    this call (empty list + no write when nothing is new). Shared by the manual import endpoint
+    and Autonomous Mode's post-sync step."""
+    current = _read_responses()
     have = {promptstudio.prompt_hash(t) for t in
             (str(x.get("text", "")).strip() for x in current) if t}
-    uniq = _library_unique_prompts()
+    uniq = _library_unique_prompts(exclude_hidden=exclude_hidden)
     missing = [(h, r) for h, r in uniq.items() if h not in have]
-    if preview:
-        return jsonify(ok=True, missing=len(missing), library_unique=len(uniq), saved=len(current))
     if not missing:
-        return jsonify(ok=True, added=0, total=len(current), backup="", responses=current)
+        return current, [], ""
     missing.sort(key=lambda hr: hr[1]["created"], reverse=True)  # newest first
     today = datetime.date.today().isoformat()
     new_entries = [{
@@ -4301,6 +4405,85 @@ def api_prompts_responses_import_library() -> Response:
     } for _, r in missing]
     merged = current + new_entries  # keep existing/curated on top; imports appended
     backup = _atomic_write_json(RESPONSES_FILE, merged)
+    return merged, new_entries, backup
+
+
+def _autotag_records(records: list, *, log=None) -> int:
+    """AI-tag a set of saved-response records in place on disk (Autonomous Mode's post-sync step).
+    For each record still present in saved_responses.json, asks the LLM for a folder + tags
+    (reusing the existing vocabulary, exactly like the per-item autotag endpoint) and applies them.
+    Tags only the records passed in — never re-tags the rest of the library. Best-effort per item:
+    an LLM error on one is logged and skipped. Writes once at the end. Returns how many changed."""
+    base, model = _llm_url(), _llm_model()
+    if not base or not records:
+        return 0
+    current = _read_responses()
+    by_id = {str(r.get("id")): r for r in current}
+    folders = sorted({str(r.get("folder")).strip() for r in current if str(r.get("folder")).strip()})
+    vocab = sorted({t for r in current for t in (r.get("tags") or []) if isinstance(t, str)})
+    api_key, headers = _llm_api_key(), _llm_extra_headers()
+    total, tagged = len(records), 0
+    for i, rec in enumerate(records, 1):
+        target = by_id.get(str(rec.get("id")))
+        if target is None:
+            continue  # vanished from the file between import and now
+        text = str(target.get("text") or "").strip()
+        if not text:
+            continue
+        if log and (i == 1 or i == total or i % 5 == 0):
+            log(f"tagging {i}/{total}…")
+        try:
+            out = promptstudio.suggest_labels(
+                base, model, prompt=text, folders=folders, tags=vocab,
+                api_key=api_key, extra_headers=headers,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if log:
+                log(f"tag failed for {target.get('id')}: {str(exc)[:120]}")
+            continue
+        new_tags = [t for t in (out.get("tags") or []) if isinstance(t, str) and t]
+        folder = str(out.get("folder") or "").strip()
+        changed = False
+        if new_tags:
+            merged_tags = list(target.get("tags") or [])
+            for t in new_tags:
+                if t not in merged_tags:
+                    merged_tags.append(t)
+                if t not in vocab:
+                    vocab.append(t)  # keep new vocab available to later items in this batch
+            target["tags"] = merged_tags[:20]
+            changed = True
+        if folder:
+            target["folder"] = folder[:40]
+            if folder not in folders:
+                folders.append(folder)
+            changed = True
+        if changed:
+            tagged += 1
+    if tagged:  # nothing changed (e.g. every call failed) → don't rewrite/back up the file
+        _atomic_write_json(RESPONSES_FILE, current)
+    return tagged
+
+
+@app.post("/api/prompts/responses/import-library")
+def api_prompts_responses_import_library() -> Response:
+    """Merge the media library's prompts (from metadata.json) into Saved responses: add any that
+    aren't already saved (deduped by normalized prompt hash). ``{"preview": true}`` only COUNTS
+    what would be added (for the button label) and writes nothing. The real import backs up the
+    current list first and can only grow it. Returns the full updated list."""
+    payload = request.get_json(silent=True) or {}
+    preview = bool(payload.get("preview"))
+    folder = str(payload.get("folder") or "Library").strip()[:40]
+    if preview:
+        current = _read_responses()
+        have = {promptstudio.prompt_hash(t) for t in
+                (str(x.get("text", "")).strip() for x in current) if t}
+        uniq = _library_unique_prompts()
+        missing = sum(1 for h in uniq if h not in have)
+        return jsonify(ok=True, missing=missing, library_unique=len(uniq), saved=len(current))
+    merged, new_entries, backup = _import_library_into_saved(folder)
+    if not new_entries:
+        return jsonify(ok=True, added=0, total=len(merged), backup="", responses=merged)
     return jsonify(ok=True, added=len(new_entries), total=len(merged), backup=backup, responses=merged)
 
 

@@ -1,6 +1,6 @@
 <script>
   import { get } from 'svelte/store';
-  import { settings, loadSettings, SUBTITLE_FONTS, SUBTITLE_STYLE_DEFAULTS, subtitlePreviewStyle } from '$lib/state.js';
+  import { settings, loadSettings, SUBTITLE_FONTS, SUBTITLE_STYLE_DEFAULTS, subtitlePreviewStyle, captionVideoHeight } from '$lib/state.js';
   import { postSettings } from '$lib/api.js';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
@@ -31,7 +31,8 @@
     settings.update((s) => ({ ...s, ...draft }));
   });
 
-  const previewStyle = $derived(subtitlePreviewStyle(draft));
+  // Pass the live video height (0 when none) so the swatch matches the on-video captions.
+  const previewStyle = $derived(subtitlePreviewStyle(draft, $captionVideoHeight));
   const D = SUBTITLE_STYLE_DEFAULTS;
   const atDefault = $derived(
     font === D.subtitle_font && size === D.subtitle_size &&

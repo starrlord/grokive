@@ -492,6 +492,7 @@ export const settings = writable({
   whisper_server_url: '',
   whisper_env_locked: false,
   burn_subtitles: false,
+  autonomous_mode: false,
   embed_configured: false,
   embed_server_url: '',
   embed_model: '',
@@ -549,18 +550,43 @@ const _subSize = (n) => { const v = Math.round(Number(n)); return Number.isFinit
 const _subOpacity = (n) => { const v = Number(n); return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.25; };
 const _subColor = (c) => (/^#[0-9a-fA-F]{6}$/.test(c) ? c : '#ffffff');
 
+// Rendered height (px) of the currently-playing caption video, 0 when none is open.
+// The Lightbox keeps this fresh via a ResizeObserver so the ::cue rule below can size
+// captions in absolute px anchored to the actual video — see subtitleCueRule.
+export const captionVideoHeight = writable(0);
+
+// Caption px size anchored to a video of `heightPx`, at `sizePct`%. Shared by the live
+// ::cue rule and the modal preview so the two always agree. The 0.05 baseline matches the
+// spec's 5vh default cue size, so existing saved sizes render the same as before on desktop.
+// Clamped to a readable 8–160px (intentional rails: keeps tiny videos legible and caps
+// runaway sizes on very large displays — only reached at slider extremes).
+const _cuePx = (heightPx, sizePct) => Math.max(8, Math.min(160, Math.round(heightPx * 0.05 * sizePct / 100)));
+
 // A complete `video::cue { … }` rule built from literal values — injected into the
 // document head so we don't depend on CSS custom properties resolving inside ::cue
 // (which is inconsistent across engines).
-export function subtitleCueRule(s) {
-  return `video::cue{font-family:${_subStack(s.subtitle_font)};font-size:${_subSize(s.subtitle_size)}%;`
+//
+// When the active video's rendered height is known (heightPx > 0) we size cues in absolute
+// px instead of a raw `%`. A ::cue percentage is relative to the browser's *default* cue
+// size, which each engine derives from the video differently — so the same stored size
+// rendered fine on a big desktop video but HUGE on a small phone one. Anchoring to the
+// measured height makes one shared value look the same on every device. Falls back to `%`
+// when no video is measured (heightPx = 0).
+export function subtitleCueRule(s, heightPx = 0) {
+  const sizePct = _subSize(s.subtitle_size);
+  const sizeCss = heightPx > 0 ? `${_cuePx(heightPx, sizePct)}px` : `${sizePct}%`;
+  return `video::cue{font-family:${_subStack(s.subtitle_font)};font-size:${sizeCss};`
     + `color:${_subColor(s.subtitle_color)};background-color:rgba(0,0,0,${_subOpacity(s.subtitle_bg_opacity)});}`;
 }
 
-// Inline style for the modal's sample-caption preview (an absolute px size stands in
-// for the cue's percentage so the preview reads at a sensible scale).
-export function subtitlePreviewStyle(s) {
-  return `font-family:${_subStack(s.subtitle_font)};font-size:${Math.round(20 * _subSize(s.subtitle_size) / 100)}px;`
+// Inline style for the modal's sample-caption preview. When a video is open behind the
+// modal (heightPx > 0) it uses the SAME px formula as the live cue rule so the swatch
+// matches what the user actually sees on the video; otherwise it falls back to a fixed
+// baseline that reads at a sensible scale in the small preview box.
+export function subtitlePreviewStyle(s, heightPx = 0) {
+  const sizePct = _subSize(s.subtitle_size);
+  const px = heightPx > 0 ? _cuePx(heightPx, sizePct) : Math.round(20 * sizePct / 100);
+  return `font-family:${_subStack(s.subtitle_font)};font-size:${px}px;`
     + `color:${_subColor(s.subtitle_color)};background-color:rgba(0,0,0,${_subOpacity(s.subtitle_bg_opacity)});`;
 }
 

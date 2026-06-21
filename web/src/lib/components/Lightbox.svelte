@@ -19,7 +19,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, captionVideoHeight } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -63,6 +63,20 @@
     if (item) removeMedia([item.id]);
   }
   let videoEl = $state(null);
+  // Keep the global ::cue rule sized to the video's actual rendered height, so captions
+  // look the same on desktop and phone (see subtitleCueRule). Re-measures on open, window
+  // resize, and orientation/fullscreen changes; resets to 0 (→ %-based fallback) on close.
+  $effect(() => {
+    const el = videoEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    // Only publish a real height — skipping 0 avoids a 1–2 frame flash of %-based sizing
+    // before layout settles (ResizeObserver fires again with the measured height).
+    const measure = () => { const h = Math.round(el.clientHeight || 0); if (h > 0) captionVideoHeight.set(h); };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => { ro.disconnect(); captionVideoHeight.set(0); };
+  });
   let stageEl = $state(null);
   let showInfo = $state(false);
   let showVision = $state(false);

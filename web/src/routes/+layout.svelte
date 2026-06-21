@@ -1,7 +1,7 @@
 <script>
   import '../app.css';
   import { onMount } from 'svelte';
-  import { theme, mode, settings, loadSettings, subtitleCueRule } from '$lib/state.js';
+  import { theme, mode, settings, loadSettings, subtitleCueRule, captionVideoHeight } from '$lib/state.js';
   import { authStatus } from '$lib/api.js';
   import Login from '$lib/components/Login.svelte';
 
@@ -20,9 +20,10 @@
   });
 
   // Apply the subtitle display style app-wide by rewriting a single injected
-  // <style> with a literal video::cue rule whenever the settings change.
+  // <style> with a literal video::cue rule whenever the settings — or the active
+  // video's rendered height (for device-consistent px sizing) — change.
   $effect(() => {
-    const rule = subtitleCueRule($settings);
+    const rule = subtitleCueRule($settings, $captionVideoHeight);
     let el = document.getElementById('grok-sub-cue');
     if (!el) {
       el = document.createElement('style');

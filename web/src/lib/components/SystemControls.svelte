@@ -61,8 +61,13 @@
   onMount(() => { loadSettings(); poll(); });
   onDestroy(() => clearTimeout(timer));
 
+  // Friendly labels for the optional Autonomous Mode post-sync steps (server step names
+  // are terse). Everything else shows its raw step name, as before.
+  const STEP_LABELS = { embed: 'Updating prompt index', library: 'Importing prompts', autotag: 'Tagging prompts' };
+  const stepLabel = (s) => STEP_LABELS[s] || s;
+  const stepTitle = (name) => STEP_LABELS[name] || title(name);
   const pillText = $derived(
-    status.running ? `${status.job === 'subtitles' ? 'Subtitles' : 'Syncing'}: ${status.step}`
+    status.running ? `${status.job === 'subtitles' ? 'Subtitles' : 'Syncing'}: ${stepLabel(status.step)}`
       : status.step === 'error' ? (status.auth_hint ? 'Auth failed' : 'Failed')
       : status.step === 'done' ? 'Synced' : 'Ready'
   );
@@ -119,6 +124,19 @@
         const th = grab(/thumbnails: (\d+) generated/);
         return [rows && `${rows} rows`, th && th !== '0' && `+${th} new`].filter(Boolean).join(' · ');
       }
+      // Autonomous Mode post-sync steps (server log lines from _run_autonomous_steps).
+      case 'embed': {
+        if (/skipped/.test(t)) return 'skipped';
+        const m = t.match(/embedded ([\d,]+)\/([\d,]+)/);
+        return m ? `${m[1]}/${m[2]} embedded` : '';
+      }
+      case 'library': { const n = grab(/imported ([\d,]+) new/); return n ? (n === '0' ? 'nothing new' : `+${n} imported`) : ''; }
+      case 'autotag': {
+        if (/no new prompts/.test(t)) return 'nothing new';
+        if (/skipped/.test(t)) return 'skipped';
+        const m = t.match(/tagged ([\d,]+)\/([\d,]+)/);
+        return m ? `${m[1]}/${m[2]} tagged` : '';
+      }
       default: { const last = [...step.lines].reverse().find((l) => l.trim()); return last ? last.trim().slice(0, 60) : ''; }
     }
   }
@@ -132,7 +150,7 @@
   });
   const summaryLine = $derived.by(() => {
     if (!steps.length) return status.running ? 'Starting…' : 'No output yet.';
-    if (status.running) return `Running… · ${title(steps[steps.length - 1]?.name || status.step)}`;
+    if (status.running) return `Running… · ${stepTitle(steps[steps.length - 1]?.name || status.step)}`;
     if (errorCount) return `Finished with ${errorCount} error${errorCount === 1 ? '' : 's'} · ${steps.length} step${steps.length === 1 ? '' : 's'}`;
     const newBit = newItems ? ` · ${newItems} new` : ' · nothing new';
     return `Completed · ${steps.length} step${steps.length === 1 ? '' : 's'}${newBit}`;
@@ -292,7 +310,7 @@
                 {:else}
                   <span class="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-[var(--danger)] text-[10px] font-bold leading-none text-white" aria-label="error">✗</span>
                 {/if}
-                <span class="font-semibold">{title(s.name)}</span>
+                <span class="font-semibold">{stepTitle(s.name)}</span>
                 <span class="text-xs {s.code != null && s.code !== 0 ? 'text-[var(--danger-ink)]' : 'text-muted'}">{s.code == null ? 'running…' : s.code === 0 ? 'Done' : `Failed (code ${s.code})`}</span>
                 <span class="ml-auto truncate pl-2 text-right text-xs text-muted">{stepMetric(s)}</span>
               </li>
