@@ -552,15 +552,25 @@ Rules you MUST follow:
           {:else}
             <div class="grid grid-cols-2 gap-2">
               {#each results.items as it (it.id)}
-                <button type="button" onclick={() => remix(it.prompt || '')} title="Load this gallery prompt into Compose for remixing"
-                  class="group flex flex-col rounded-lg border border-line bg-[var(--surface-2)] text-left transition hover:border-[var(--accent)]">
-                  <div class="relative w-full shrink-0 overflow-hidden rounded-t-lg bg-[var(--media-bg)]" style={`aspect-ratio: ${mediaRatio(it)}`}>
-                    {#if it.thumb}<img src={it.thumb} alt="" loading="lazy" class="h-full w-full object-contain transition group-hover:scale-[1.02]" />{/if}
-                    {#if it._score != null}<span class="absolute right-1 top-1 rounded bg-black/55 px-1 text-[0.625rem] font-semibold text-white">{it._score.toFixed(2)}</span>{/if}
+                <!-- Card is a container (not one big button) so Load and Copy can be
+                     separate actions — Copy puts the prompt on the clipboard without
+                     loading it into the composer. -->
+                <div class="group flex flex-col overflow-hidden rounded-lg border border-line bg-[var(--surface-2)] transition hover:border-[var(--accent)]">
+                  <button type="button" onclick={() => remix(it.prompt || '')} title="Load this gallery prompt into Compose for remixing"
+                    class="flex min-w-0 flex-1 flex-col text-left">
+                    <div class="relative w-full shrink-0 overflow-hidden bg-[var(--media-bg)]" style={`aspect-ratio: ${mediaRatio(it)}`}>
+                      {#if it.thumb}<img src={it.thumb} alt="" loading="lazy" class="h-full w-full object-contain transition group-hover:scale-[1.02]" />{/if}
+                      {#if it._score != null}<span class="absolute right-1 top-1 rounded bg-black/55 px-1 text-[0.625rem] font-semibold text-white">{it._score.toFixed(2)}</span>{/if}
+                    </div>
+                    <p class="px-1.5 py-1 text-[0.6875rem] leading-snug text-ink">{it.prompt || ''}</p>
+                  </button>
+                  <div class="mt-auto flex items-center gap-1 px-1.5 pb-1.5">
+                    <button type="button" onclick={() => remix(it.prompt || '')} title="Load this prompt into Compose"
+                      class="rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-[var(--accent)]">Load</button>
+                    <button type="button" onclick={() => copyText_(it.prompt || '')} title="Copy prompt to clipboard"
+                      class="rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition hover:border-[var(--accent)] hover:text-[var(--accent)]">Copy</button>
                   </div>
-                  <p class="px-1.5 py-1 text-[0.6875rem] leading-snug text-ink">{it.prompt || ''}</p>
-                  <span class="mx-1.5 mb-1 inline-flex self-start rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition group-hover:border-[var(--accent)] group-hover:text-[var(--accent)]">Load</span>
-                </button>
+                </div>
               {/each}
             </div>
           {/if}
@@ -615,6 +625,10 @@ Rules you MUST follow:
                       {#if p.count > 1}<span class="text-[0.625rem] text-muted">×{p.count}</span>{:else}<span></span>{/if}
                       <span class="rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted transition group-hover:border-[var(--accent)] group-hover:text-[var(--accent)]">Load</span>
                     </span>
+                  </button>
+                  <button type="button" onclick={() => copyText_(p.text)} title="Copy prompt to clipboard" aria-label="Copy prompt"
+                    class="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-line text-muted transition hover:border-[var(--accent)] hover:text-ink">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   </button>
                   {#if embed.configured && embed.embedded > 0}
                     <button type="button" onclick={() => moreLike(p.text)} title="Find similar prompts" aria-label="Find similar prompts"
