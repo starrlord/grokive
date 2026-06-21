@@ -17,7 +17,7 @@ import httpx
 from curl_cffi import requests as cffi_requests
 from curl_cffi.requests.exceptions import RequestException as CffiRequestException
 
-from mediautil import media_shard
+from mediautil import file_content_hash, media_shard
 
 
 DEFAULT_METADATA = Path("metadata.json")
@@ -30,6 +30,9 @@ GALLERY_ROOT = Path("gallery")
 # IDs the user deleted via the web UI. Populated in main(); process_item refuses to
 # (re)download anything in here, so a deleted item never comes back on the next sync.
 DELETED_IDS: set[str] = set()
+# Count of items re-downloaded in place this run because Grok began serving an HD
+# (upscaled) variant for an id we already had — surfaced in the run summary.
+REFRESHED: int = 0
 GROK_FAVORITES_ENDPOINT = "https://grok.com/rest/media/post/list"
 GROK_FAVORITES_FILTER = "MEDIA_POST_SOURCE_LIKED"
 GROK_CANVAS_LIST_ENDPOINT = "https://grok.com/rest/media/canvas/list"
@@ -724,6 +727,99 @@ def normalize_prompt(prompt: str) -> str:
     return re.sub(r"\s+", " ", prompt.lower()).strip(" \t\r\n.!?;:")
 
 
+def _asset_path(url: str) -> str:
+    """The path part of an asset URL (drops scheme/host and any signing query), so two URLs
+    are compared by what file they point at, not by transient query tokens."""
+    try:
+        return urlparse(url).path
+    except Exception:
+        return url or ""
+
+
+def _is_hd_url(url: str) -> bool:
+    """True if the URL points at Grok's upscaled (HD) variant — its filename stem ends in
+    ``_hd`` (e.g. .../generated_video_hd.mp4). harvest_grok_item already prefers ``hdMediaUrl``,
+    so an upscaled item's listed source_url takes this form."""
+    name = _asset_path(url).rsplit("/", 1)[-1].lower()
+    stem = name.rsplit(".", 1)[0]
+    return stem.endswith("_hd")
+
+
+def _drop_thumbnail(item_id: str) -> None:
+    """Delete the cached thumbnail for an id so the index step regenerates it from the refreshed
+    media (generate_missing only makes MISSING ones). Mirrors thumbnails.thumb_path layout."""
+    try:
+        thumb = GALLERY_ROOT / "thumbnails" / media_shard(item_id) / f"{item_id}.jpg"
+        if thumb.is_file():
+            thumb.unlink()
+    except OSError:
+        pass
+
+
+def refresh_hd(
+    client: httpx.Client,
+    media_spec: RequestSpec,
+    raw: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> bool:
+    """Re-download an item we already have because Grok now serves an HD upscale for it
+    (same id, new asset URL). Overwrites the file in place and refreshes ONLY the changed
+    fields on the existing record — source_url, local_path, dimensions, content_hash —
+    preserving everything else (subtitles, flags, etc.). Drops the stale thumbnail so the
+    index step rebuilds it. Returns True on success."""
+    global REFRESHED
+    item_id = str(raw["id"])
+    new_url = str(raw["source_url"])
+    media_type = resolve_media_type(raw)
+    base = Path("media/videos" if media_type == "video" else "media/images")
+    folder = base / media_shard(item_id)
+    old = by_id[item_id]
+    try:
+        (GALLERY_ROOT / folder).mkdir(parents=True, exist_ok=True)
+        local = download_media(client, media_spec, new_url, GALLERY_ROOT / folder / item_id)
+    except Exception as exc:
+        append_failure(args.failures, {"id": item_id, "source_url": new_url, "error": str(exc)})
+        print(f"failed HD refresh {item_id}: {exc}")
+        return False
+    # Everything past the download is wrapped so a single malformed item can't throw out
+    # of process_item and abort the whole sync (the worker's outer catch would). On failure
+    # the record keeps its old SD URL, so the next sync simply retries.
+    try:
+        new_rel = local.relative_to(GALLERY_ROOT).as_posix()
+        # If the refreshed file landed at a different path (ext change, or old legacy/flat
+        # layout), remove the now-orphaned old file so we don't leave the stale small copy.
+        old_rel = str(old.get("local_path") or "").replace("\\", "/")
+        if old_rel and old_rel != new_rel:
+            try:
+                old_file = GALLERY_ROOT / old_rel
+                if old_file.is_file():
+                    old_file.unlink()
+            except OSError:
+                pass
+        # Merge: keep the existing record (subtitles/flags/etc.) and update only what changed.
+        # Each field is taken from the fresh download only when present, so a sparse list item
+        # never nulls out good existing metadata (e.g. a canvas_id).
+        fresh = normalize_record(raw, local.relative_to(GALLERY_ROOT)).__dict__
+        record = dict(old)
+        record["source_url"] = new_url
+        record["local_path"] = new_rel
+        record["content_hash"] = file_content_hash(local)
+        for key in ("width", "height", "media_type", "model", "canvas_id", "canvas_name"):
+            if fresh.get(key) is not None:
+                record[key] = fresh[key]
+        by_id[item_id] = record
+        save_metadata(args.metadata, list(by_id.values()))
+        _drop_thumbnail(item_id)
+    except Exception as exc:  # noqa: BLE001 - never let one item abort the sync
+        print(f"failed HD refresh record {item_id}: {exc}")
+        return False
+    REFRESHED += 1
+    if not args.quiet:
+        print(f"upgraded {item_id} -> {local} (HD)")
+    return True
+
+
 def process_item(
     client: httpx.Client,
     media_spec: RequestSpec,
@@ -736,6 +832,13 @@ def process_item(
     if item_id in DELETED_IDS:
         return False  # user deleted it; never bring it back
     if item_id in by_id:
+        # Self-heal upscales: if Grok now serves an HD variant for an id we stored at standard
+        # resolution (same id, different asset URL), re-download and replace it in place. Guarded
+        # to UPGRADES only (HD now, not-HD before) so a transient non-HD listing can never
+        # downgrade an HD file we already have.
+        new_url = str(raw.get("source_url") or "")
+        if new_url and _is_hd_url(new_url) and not _is_hd_url(str(by_id[item_id].get("source_url") or "")):
+            refresh_hd(client, media_spec, raw, by_id, args)
         return False
     source_url = str(raw["source_url"])
     media_type = resolve_media_type(raw)
@@ -888,6 +991,8 @@ def main() -> None:
         print(f"refreshed {saved_count} record(s); metadata records: {len(by_id)}")
     else:
         print(f"metadata records: {len(by_id)}")
+    if REFRESHED:
+        print(f"HD upgrades: {REFRESHED}")
 
 
 def normalize_canvas_id(value: str) -> str:

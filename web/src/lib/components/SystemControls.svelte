@@ -115,7 +115,11 @@
     const grab = (re) => { const m = t.match(re); return m && m[1]; };
     switch (step.name) {
       case 'reindex': { const n = grab(/reindex: (\d[\d,]*) records/) || grab(/(\d[\d,]*) records/); return n ? `${n} records` : ''; }
-      case 'download': { const n = grab(/metadata records: (\d[\d,]*)/); return n ? `${n} items` : ''; }
+      case 'download': {
+        const n = grab(/metadata records: (\d[\d,]*)/);
+        const up = grab(/HD upgrades: (\d[\d,]*)/);
+        return [n && `${n} items`, up && `${up} HD`].filter(Boolean).join(' · ');
+      }
       case 'agents': { const c = grab(/found (\d+) agent canvas/); return c ? `${c} canvas` : ''; }
       case 'index': {
         const rows = grab(/index\.db: (\d[\d,]*) media rows/);
