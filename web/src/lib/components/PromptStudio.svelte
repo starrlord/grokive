@@ -32,6 +32,18 @@
   // Phase 1 browse state.
   let embed = $state({ configured: false, embedded: 0, total_unique: 0, missing: 0, running: false, done: 0, total: 0, error: null });
   let themes = $state([]);
+  let themeQ = $state('');
+  // Themes are k-means clusters of the corpus — a naturally small, bounded set (auto-k caps
+  // at 16), not a paged list. So we show them all in a height-capped scroll box and let this
+  // substring filter (over label + tags) jump to one without scanning.
+  let filteredThemes = $derived.by(() => {
+    const q = themeQ.trim().toLowerCase();
+    if (!q) return themes;
+    return themes.filter((t) =>
+      (t.label || '').toLowerCase().includes(q) ||
+      (t.tags || []).some((tag) => tag.toLowerCase().includes(q))
+    );
+  });
   let results = $state(null);
   let resultsLoading = $state(false);
   let pollTimer;
@@ -211,7 +223,8 @@ Rules you MUST follow:
     llmReady = !!s.llm_configured;
     return embed;
   }
-  async function loadThemes() { themes = (await fetchPromptThemes(12)).themes || []; }
+  // No explicit k → backend uses auto-k (caps at 16), the full meaningful set of clusters.
+  async function loadThemes() { themes = (await fetchPromptThemes()).themes || []; }
   function buildIndex() {
     startPromptEmbed();
     embed = { ...embed, running: true };
@@ -586,9 +599,16 @@ Rules you MUST follow:
           {/if}
 
           {#if themes.length}
-            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Themes</div>
-            <div class="mb-4 space-y-1">
-              {#each themes.slice(0, 8) as t (t.label + t.size)}
+            <div class="mb-2 flex items-center gap-2">
+              <span class="shrink-0 text-xs font-bold uppercase tracking-wider text-muted">Themes</span>
+              {#if themes.length > 6}
+                <SearchField bind:value={themeQ} placeholder="Filter…" ariaLabel="themes"
+                  wrapperClass="ml-auto w-32" inputClass="rounded-full border border-line bg-[var(--surface-2)] py-1 pl-2.5 pr-8 text-[0.6875rem] outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+              {/if}
+            </div>
+            <!-- Capped scroll so the full ~16-cluster set never pushes Your prompts off-screen. -->
+            <div class="mb-4 max-h-72 space-y-1 overflow-y-auto pr-1">
+              {#each filteredThemes as t (t.label + t.size)}
                 <button type="button" onclick={() => openTheme(t)} title={`View matching gallery prompts: ${t.rep_prompt}`}
                   class="flex w-full items-center gap-2 rounded-lg border border-line px-1.5 py-1 text-left text-xs transition hover:border-[var(--accent)]">
                   {#if t.cover}<img src={t.cover} alt="" class="h-6 w-6 shrink-0 rounded-full object-cover" />{:else}<span class="h-6 w-6 shrink-0 rounded-full bg-[var(--surface-2)]"></span>{/if}
@@ -596,6 +616,8 @@ Rules you MUST follow:
                   <span class="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[0.625rem] font-semibold text-muted">View</span>
                   <span class="shrink-0 text-muted">{t.size}</span>
                 </button>
+              {:else}
+                <p class="py-4 text-center text-xs text-muted">No themes match.</p>
               {/each}
             </div>
           {/if}

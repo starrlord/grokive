@@ -3693,18 +3693,35 @@ def api_prompts_similar() -> Response:
             exclude = promptstudio.prompt_hash(text)
     if not text.strip():
         return jsonify(ok=True, query="", results=[])
+    hidden = _list_hidden_media_ids()
+    pmap = _prompt_media_ids()
     try:
         qvec = promptstudio.embed_query(
             base, model, text,
             api_key=_embed_api_key(), extra_headers=_embed_extra_headers(),
         )
         hashes, texts, matrix = promptstudio.load_vectors(PROMPT_DB_FILE, model)
+        # Drop prompts that live ONLY in hidden/locked collections before ranking — "find
+        # similar" must never score against or surface locked content, regardless of any
+        # session unlock. Same policy as theme clusters: a prompt shared with any visible
+        # media stays (its visible representative is chosen below).
+        if hidden:
+            keep = [
+                i for i, h in enumerate(hashes)
+                if not pmap.get(h) or any(mid not in hidden for mid in pmap[h])
+            ]
+            if len(keep) != len(hashes):
+                hashes = [hashes[i] for i in keep]
+                texts = [texts[i] for i in keep]
+                matrix = matrix[keep] if matrix.shape[0] else matrix
         neighbors = promptstudio.nearest(qvec, hashes, texts, matrix,
                                          k=_int_arg("k", 24), exclude_hash=exclude)
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], results=[]), 502
-    pmap = _prompt_media_ids()
-    pairs = [(nb, (pmap.get(nb["prompt_hash"]) or [None])[0]) for nb in neighbors]
+    # Representative media id must be VISIBLE, so a prompt shared with a hidden collection
+    # never surfaces a hidden thumbnail.
+    pairs = [(nb, next((mid for mid in (pmap.get(nb["prompt_hash"]) or []) if mid not in hidden), None))
+             for nb in neighbors]
     pairs = [(nb, mid) for nb, mid in pairs if mid]
     records = {str(r["id"]): r for r in db.media_by_ids(DB_FILE, [mid for _, mid in pairs])}
     results = []
