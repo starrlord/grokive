@@ -57,6 +57,7 @@
   let envLocked = $state(false);
   let burn = $state(false);
   let autonomous = $state(false);
+  let showAutonomousInfo = $state(false);
   let llmProvider = $state('local');
   let llmUrl = $state('');
   let llmModel = $state('');
@@ -687,13 +688,20 @@
 
         <section class="mt-6">
           <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Automation</div>
-          <!-- Description lives on hover (title) + the info badge, so the row stays one line. -->
-          <label class="flex cursor-pointer items-center gap-2 text-sm"
-            title="After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.">
-            <input type="checkbox" class="h-4 w-4 shrink-0 accent-[var(--accent)]" bind:checked={autonomous} />
-            <span class="font-semibold">Autonomous Mode</span>
-            <span class="grid h-4 w-4 shrink-0 place-items-center rounded-full border border-line text-[0.625rem] font-bold text-muted" aria-hidden="true">i</span>
-          </label>
+          <!-- The "i" is a real button (tap-toggles the description) so it works on touch, not
+               just desktop hover. It sits OUTSIDE the label so tapping it never flips the toggle. -->
+          <div class="flex items-center gap-2 text-sm">
+            <label class="flex cursor-pointer items-center gap-2">
+              <input type="checkbox" class="h-4 w-4 shrink-0 accent-[var(--accent)]" bind:checked={autonomous} />
+              <span class="font-semibold">Autonomous Mode</span>
+            </label>
+            <button type="button" onclick={() => (showAutonomousInfo = !showAutonomousInfo)}
+              class="grid h-5 w-5 shrink-0 place-items-center rounded-full border border-line text-[0.625rem] font-bold text-muted transition hover:border-[var(--accent)] hover:text-[var(--ink)] pointer-coarse:h-6 pointer-coarse:w-6"
+              aria-label="About Autonomous Mode" aria-expanded={showAutonomousInfo} title="What does Autonomous Mode do?">i</button>
+          </div>
+          {#if showAutonomousInfo}
+            <p class="mt-2 text-xs text-muted">After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.</p>
+          {/if}
         </section>
 
         <section class="mt-6">
