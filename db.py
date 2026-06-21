@@ -211,7 +211,18 @@ def build_index(
             # from Grok at download time, else the previous build's cache, else probe
             # the file once (ffprobe/Pillow) and let the next build read it from cache.
             mw, mh = item.get("width"), item.get("height")
-            if not (mw and mh):
+            src_name = str(item.get("source_url") or "").rsplit("?", 1)[0].rsplit("/", 1)[-1].lower()
+            if item.get("media_type") == "video" and ("_hd" in src_name or "1080" in src_name):
+                # Upscaled-in-place video: Grok's captured `resolution` is the BASE generation
+                # size, and the id-keyed dim_cache still holds the pre-upscale dims (the file
+                # changed under the same id), so a 1424² upscale would wrongly badge as 544p.
+                # Read the real size straight from the file instead.
+                pw, ph = _video_dims(gallery_dir / rel)
+                if pw and ph:
+                    mw, mh = pw, ph
+                elif not (mw and mh):
+                    mw, mh = dim_cache.get(mid) or (mw, mh)
+            elif not (mw and mh):
                 mw, mh = dim_cache.get(mid) or _media_dims(item.get("media_type"), gallery_dir / rel)
             thumb_href = thumb_rel if thumb_path.exists() else None
             media_file = gallery_dir / rel
