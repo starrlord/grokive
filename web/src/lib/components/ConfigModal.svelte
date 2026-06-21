@@ -680,19 +680,19 @@
         <section class="mt-6">
           <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Grok account</div>
           <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-[var(--code-bg)] px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-[var(--code-bg)] px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
-          <textarea class="h-28 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
+          <textarea class="h-20 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
             placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
           <p class="mt-1 text-xs text-muted">{curlNote}</p>
         </section>
 
         <section class="mt-6">
           <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Automation</div>
-          <label class="flex cursor-pointer items-start gap-2 text-sm">
-            <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" bind:checked={autonomous} />
-            <span>
-              <span class="font-semibold">Autonomous Mode</span>
-              <span class="mt-0.5 block text-xs text-muted">After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.</span>
-            </span>
+          <!-- Description lives on hover (title) + the info badge, so the row stays one line. -->
+          <label class="flex cursor-pointer items-center gap-2 text-sm"
+            title="After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.">
+            <input type="checkbox" class="h-4 w-4 shrink-0 accent-[var(--accent)]" bind:checked={autonomous} />
+            <span class="font-semibold">Autonomous Mode</span>
+            <span class="grid h-4 w-4 shrink-0 place-items-center rounded-full border border-line text-[0.625rem] font-bold text-muted" aria-hidden="true">i</span>
           </label>
         </section>
 
