@@ -513,10 +513,24 @@ def grok_post_and_children(post: dict[str, Any]) -> list[tuple[dict[str, Any], d
     return items
 
 
-def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> dict[str, Any] | None:
+def _best_media_url(item: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """Pick the highest-resolution media URL for a Grok item, returning ``(url, source_node)``.
+    The item's own ``mediaUrl`` is the SD original; upscales are exposed on the item OR its
+    nested ``videos[]`` entry as ``hd1080MediaUrl`` (1080p) and ``hdMediaUrl`` (720p). We must
+    check the nested video node too — the favorites list keeps the post's ``mediaUrl`` at SD
+    while the upscaled variants live on its ``videos[0]``. source_node is whichever node the URL
+    came from, so the caller reads matching resolution metadata from it."""
+    nodes = [item]
+    vids = item.get("videos")
+    if isinstance(vids, list):
+        nodes += [v for v in vids if isinstance(v, dict)]
+    for field in ("hd1080MediaUrl", "hdMediaUrl"):
+        for node in nodes:
+            candidate = node.get(field)
+            if isinstance(candidate, str) and candidate:
+                return candidate, node
     url = (
-        item.get("hdMediaUrl")
-        or item.get("mediaUrl")
+        item.get("mediaUrl")
         or item.get("imageUrl")
         or item.get("videoUrl")
         or item.get("url")
@@ -524,6 +538,11 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         or item.get("fileUrl")
         or item.get("sourceUrl")
     )
+    return url, item
+
+
+def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> dict[str, Any] | None:
+    url, src = _best_media_url(item)
     if not isinstance(url, str) or not is_media_url(url):
         return None
 
@@ -553,7 +572,7 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         parent_id = parent_item_id
     else:
         parent_id = normalize_prompt(str(prompt))
-    res = item.get("resolution") or (parent or {}).get("resolution") or {}
+    res = src.get("resolution") or item.get("resolution") or (parent or {}).get("resolution") or {}
     width = res.get("width") if isinstance(res, dict) else None
     height = res.get("height") if isinstance(res, dict) else None
     return {
@@ -736,13 +755,17 @@ def _asset_path(url: str) -> str:
         return url or ""
 
 
-def _is_hd_url(url: str) -> bool:
-    """True if the URL points at Grok's upscaled (HD) variant — its filename stem ends in
-    ``_hd`` (e.g. .../generated_video_hd.mp4). harvest_grok_item already prefers ``hdMediaUrl``,
-    so an upscaled item's listed source_url takes this form."""
+def _media_res_rank(url: str) -> int:
+    """Resolution tier of a Grok asset URL, inferred from its filename, so an upscale can be
+    told apart from a downgrade. 3 = 1080p (generated_video_1080_hd.mp4), 2 = HD/720p
+    (…_hd.mp4), 1 = base/SD (generated_video.mp4) or anything else. Grok exposes these tiers
+    as hd1080MediaUrl / hdMediaUrl / mediaUrl respectively (see _best_media_url)."""
     name = _asset_path(url).rsplit("/", 1)[-1].lower()
-    stem = name.rsplit(".", 1)[0]
-    return stem.endswith("_hd")
+    if "1080" in name:
+        return 3
+    if name.rsplit(".", 1)[0].endswith("_hd"):
+        return 2
+    return 1
 
 
 def _drop_thumbnail(item_id: str) -> None:
@@ -763,11 +786,11 @@ def refresh_hd(
     by_id: dict[str, dict[str, Any]],
     args: argparse.Namespace,
 ) -> bool:
-    """Re-download an item we already have because Grok now serves an HD upscale for it
-    (same id, new asset URL). Overwrites the file in place and refreshes ONLY the changed
-    fields on the existing record — source_url, local_path, dimensions, content_hash —
-    preserving everything else (subtitles, flags, etc.). Drops the stale thumbnail so the
-    index step rebuilds it. Returns True on success."""
+    """Re-download an item we already have because Grok now offers a higher-resolution variant
+    (an upscale — e.g. SD→1080p), same id, new asset URL. Overwrites the file in place and
+    refreshes ONLY the changed fields on the existing record — source_url, local_path,
+    dimensions, content_hash — preserving everything else (subtitles, flags, etc.). Drops the
+    stale thumbnail so the index step rebuilds it. Returns True on success."""
     global REFRESHED
     item_id = str(raw["id"])
     new_url = str(raw["source_url"])
@@ -816,7 +839,7 @@ def refresh_hd(
         return False
     REFRESHED += 1
     if not args.quiet:
-        print(f"upgraded {item_id} -> {local} (HD)")
+        print(f"upgraded {item_id} -> {local} (upscaled)")
     return True
 
 
@@ -832,12 +855,13 @@ def process_item(
     if item_id in DELETED_IDS:
         return False  # user deleted it; never bring it back
     if item_id in by_id:
-        # Self-heal upscales: if Grok now serves an HD variant for an id we stored at standard
-        # resolution (same id, different asset URL), re-download and replace it in place. Guarded
-        # to UPGRADES only (HD now, not-HD before) so a transient non-HD listing can never
-        # downgrade an HD file we already have.
+        # Self-heal upscales: if Grok now offers a HIGHER-resolution variant for an id we
+        # already have (e.g. SD→1080p, or 720p→1080p), re-download and replace it in place.
+        # Strictly-higher tier guard means a transient lower-res listing can never downgrade
+        # a file we already upgraded.
         new_url = str(raw.get("source_url") or "")
-        if new_url and _is_hd_url(new_url) and not _is_hd_url(str(by_id[item_id].get("source_url") or "")):
+        old_url = str(by_id[item_id].get("source_url") or "")
+        if new_url and _media_res_rank(new_url) > _media_res_rank(old_url):
             refresh_hd(client, media_spec, raw, by_id, args)
         return False
     source_url = str(raw["source_url"])
