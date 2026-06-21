@@ -513,23 +513,19 @@ def grok_post_and_children(post: dict[str, Any]) -> list[tuple[dict[str, Any], d
     return items
 
 
-def _best_media_url(item: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
-    """Pick the highest-resolution media URL for a Grok item, returning ``(url, source_node)``.
-    The item's own ``mediaUrl`` is the SD original; upscales are exposed on the item OR its
-    nested ``videos[]`` entry as ``hd1080MediaUrl`` (1080p) and ``hdMediaUrl`` (720p). We must
-    check the nested video node too — the favorites list keeps the post's ``mediaUrl`` at SD
-    while the upscaled variants live on its ``videos[0]``. source_node is whichever node the URL
-    came from, so the caller reads matching resolution metadata from it."""
-    nodes = [item]
-    vids = item.get("videos")
-    if isinstance(vids, list):
-        nodes += [v for v in vids if isinstance(v, dict)]
+def _best_media_url(item: dict[str, Any]) -> Any:
+    """Pick the highest-resolution media URL from an item's OWN fields. Grok exposes upscales as
+    ``hd1080MediaUrl`` (1080p) and ``hdMediaUrl`` (720p) alongside the SD ``mediaUrl``.
+
+    We deliberately do NOT descend into nested ``videos[]``: a post's video children are SEPARATE
+    items with their own ids and are visited independently by grok_post_and_children, so reaching
+    in would stamp a child video's URL onto the parent image's record (which mis-typed videos as
+    images and broke their thumbnails). Each node already carries its own hd* fields."""
     for field in ("hd1080MediaUrl", "hdMediaUrl"):
-        for node in nodes:
-            candidate = node.get(field)
-            if isinstance(candidate, str) and candidate:
-                return candidate, node
-    url = (
+        candidate = item.get(field)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return (
         item.get("mediaUrl")
         or item.get("imageUrl")
         or item.get("videoUrl")
@@ -538,11 +534,10 @@ def _best_media_url(item: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
         or item.get("fileUrl")
         or item.get("sourceUrl")
     )
-    return url, item
 
 
 def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> dict[str, Any] | None:
-    url, src = _best_media_url(item)
+    url = _best_media_url(item)
     if not isinstance(url, str) or not is_media_url(url):
         return None
 
@@ -572,7 +567,7 @@ def harvest_grok_item(item: dict[str, Any], parent: dict[str, Any] | None) -> di
         parent_id = parent_item_id
     else:
         parent_id = normalize_prompt(str(prompt))
-    res = src.get("resolution") or item.get("resolution") or (parent or {}).get("resolution") or {}
+    res = item.get("resolution") or (parent or {}).get("resolution") or {}
     width = res.get("width") if isinstance(res, dict) else None
     height = res.get("height") if isinstance(res, dict) else None
     return {
@@ -768,6 +763,17 @@ def _media_res_rank(url: str) -> int:
     return 1
 
 
+def _record_mistyped(record: dict[str, Any]) -> bool:
+    """True if a stored record's media_type disagrees with its source_url's actual file type —
+    the signature of the earlier bug that stamped a child video's URL onto an image record
+    (video bytes saved under media/images, so its thumbnail couldn't be made). Only judged when
+    the URL carries a definitive extension; canvas /content URLs are extensionless and trusted."""
+    url = str(record.get("source_url") or "")
+    if not Path(urlparse(url).path).suffix:
+        return False
+    return media_type_for(url) != str(record.get("media_type") or "")
+
+
 def _drop_thumbnail(item_id: str) -> None:
     """Delete the cached thumbnail for an id so the index step regenerates it from the refreshed
     media (generate_missing only makes MISSING ones). Mirrors thumbnails.thumb_path layout."""
@@ -858,10 +864,12 @@ def process_item(
         # Self-heal upscales: if Grok now offers a HIGHER-resolution variant for an id we
         # already have (e.g. SD→1080p, or 720p→1080p), re-download and replace it in place.
         # Strictly-higher tier guard means a transient lower-res listing can never downgrade
-        # a file we already upgraded.
+        # a file we already upgraded. Also re-fetch records left mis-typed by the earlier
+        # nested-videos bug (a video URL saved onto an image record) so they self-correct.
+        old = by_id[item_id]
         new_url = str(raw.get("source_url") or "")
-        old_url = str(by_id[item_id].get("source_url") or "")
-        if new_url and _media_res_rank(new_url) > _media_res_rank(old_url):
+        upgrade = bool(new_url) and _media_res_rank(new_url) > _media_res_rank(str(old.get("source_url") or ""))
+        if upgrade or _record_mistyped(old):
             refresh_hd(client, media_spec, raw, by_id, args)
         return False
     source_url = str(raw["source_url"])
