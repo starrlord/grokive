@@ -3726,14 +3726,32 @@ def api_prompts_themes() -> Response:
         rebuild_db()
     k_arg = request.args.get("k")
     k = int(k_arg) if (k_arg and k_arg.isdigit()) else None
+    hidden = _list_hidden_media_ids()
+    pmap = _prompt_media_ids()
     try:
         hashes, texts, matrix = promptstudio.load_vectors(PROMPT_DB_FILE, model)
+        # Drop prompts that exist only in hidden collections from the corpus before
+        # clustering — unconditionally, regardless of any session unlock. This is a
+        # global discovery surface (like Recent / All Media / facets), where unlocking
+        # a collection lets you open it but never surfaces its contents here. A prompt
+        # shared with any visible media stays.
+        if hidden:
+            keep = [
+                i for i, h in enumerate(hashes)
+                if not pmap.get(h) or any(mid not in hidden for mid in pmap[h])
+            ]
+            if len(keep) != len(hashes):
+                hashes = [hashes[i] for i in keep]
+                texts = [texts[i] for i in keep]
+                matrix = matrix[keep] if matrix.shape[0] else matrix
         clusters = promptstudio.cluster_prompts(hashes, texts, matrix, k=k)
     except Exception as exc:  # noqa: BLE001
         return jsonify(ok=False, error=str(exc)[:200], themes=[]), 502
-    pmap = _prompt_media_ids()
     for c in clusters:
-        c["_cover_id"] = (pmap.get(c["rep_hash"]) or [None])[0]
+        # Cover from a VISIBLE media id, so a prompt shared with a hidden collection
+        # never surfaces a hidden thumbnail.
+        ids = pmap.get(c["rep_hash"]) or []
+        c["_cover_id"] = next((mid for mid in ids if mid not in hidden), None)
     cover_ids = [c["_cover_id"] for c in clusters if c["_cover_id"]]
     records = {str(r["id"]): r for r in db.media_by_ids(DB_FILE, cover_ids)}
     themes = []
