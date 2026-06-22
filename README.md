@@ -10,15 +10,17 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 
 ## Screenshots
 
-| Library | Lightbox player |
+| Library | Collections |
 | :---: | :---: |
-| [![The justified photo grid with filters and playlists](screenshots/web/main.jpg)](screenshots/web/main.jpg) | [![The lightbox video player with prompt and actions](screenshots/web/player.jpg)](screenshots/web/player.jpg) |
-| **Tag browser** | **Playlist editor** |
-| [![The searchable tag-cloud modal](screenshots/web/tags.jpg)](screenshots/web/tags.jpg) | [![The playlist editor with drag-to-reorder, play, and export](screenshots/web/playlist.jpg)](screenshots/web/playlist.jpg) |
-| **Config** | **Login** |
-| [![The Config panel: appearance, Grok account cURL, and Whisper subtitles](screenshots/web/config.jpg)](screenshots/web/config.jpg) | [![The themed login screen](screenshots/web/login.jpg)](screenshots/web/login.jpg) |
-| **Prompt Studio** | **Beat Montage** |
-| [![The Prompt Studio two-stage composer with suggestion chips](screenshots/web/studio.jpg)](screenshots/web/studio.jpg) | [![The Song Beat Montage panel with style, cut-tightness, and aspect controls](screenshots/web/montage.jpg)](screenshots/web/montage.jpg) |
+| [![The justified media grid with facet filters and resolution badges](screenshots/web/main.jpg)](screenshots/web/main.jpg) | [![Collections and playlists in the Library](screenshots/web/collections.jpg)](screenshots/web/collections.jpg) |
+| **Lightbox player** | **Tag & filter browser** |
+| [![The lightbox player with prompt, favorite, and copy-prompt actions](screenshots/web/player.jpg)](screenshots/web/player.jpg) | [![The searchable tag, resolution, and model filter modal](screenshots/web/tags.jpg)](screenshots/web/tags.jpg) |
+| **Prompt Studio** | **Config** |
+| [![Prompt Studio — the two-stage composer with mined themes and personas](screenshots/web/studio.jpg)](screenshots/web/studio.jpg) | [![The Config panel: appearance, Grok account, AI providers, and Autonomous Mode](screenshots/web/config.jpg)](screenshots/web/config.jpg) |
+| **Grok Imagine** | **Beat Montage** |
+| [![Grok Imagine — generate new images and video in-app](screenshots/web/imagine.jpg)](screenshots/web/imagine.jpg) | [![Beat-synced Song Montage built from selected videos](screenshots/web/montage.jpg)](screenshots/web/montage.jpg) |
+| **Multi-select** | **Login** |
+| [![Multi-select mode with bulk actions: play, collection, archive, playlist, export, montage, delete](screenshots/web/multiselect.jpg)](screenshots/web/multiselect.jpg) | [![The themed sign-in screen](screenshots/web/login.jpg)](screenshots/web/login.jpg) |
 
 ## Contents
 
