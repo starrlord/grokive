@@ -134,6 +134,10 @@ export const relockAllCollections = () => postLock('/api/collections/relock-all'
 export const removeCollectionLock = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/remove-lock`, { password });
 export const forceUnlockCollection = (id, adminPassword) => postLock(`/api/collections/${encodeURIComponent(id)}/force-unlock`, { admin_password: adminPassword });
 
+// --- Agent canvases (rename / hard-delete; mutate the underlying media records) ---
+export const renameCanvas = (id, name) => postLock(`/api/canvas/${encodeURIComponent(id)}/rename`, { name });
+export const deleteCanvas = (id) => postLock(`/api/canvas/${encodeURIComponent(id)}/delete`, {});
+
 // --- Folder import (upload a local folder into a new collection) ------------
 // One file per request with byte-level upload progress (XHR — fetch can't report
 // upload progress). Pass an AbortSignal to cancel an in-flight upload.

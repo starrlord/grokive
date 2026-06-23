@@ -11,7 +11,7 @@
 
   let { onrefresh = () => {} } = $props();
 
-  let status = $state({ running: false, step: 'idle', job: 'sync', log: [], finished_at: '', auth_hint: false });
+  let status = $state({ running: false, step: 'idle', job: 'sync', log: [], finished_at: '', media_ready_at: null, auth_hint: false });
   let showLog = $state(false);
   let showConfig = $state(false);
   let showStats = $state(false);
@@ -20,6 +20,11 @@
   // Only announce a finished job we actually watched run (so a leftover 'done'
   // status doesn't fire a toast on every page load).
   let observedRunning = false;
+  // The server reports media_ready_at the instant the core download/index steps
+  // finish — before the optional (slow) autotagging post-steps that keep the job
+  // 'running'. Refresh the gallery on that milestone so new videos appear right
+  // away. One-shot per run; the final 'done' refresh below still picks up new tags.
+  let mediaRefreshed = false;
 
   // Single self-scheduling poll loop. `polling` is set synchronously at the top so a
   // Sync click during the in-flight request can't spawn a second concurrent loop, and
@@ -34,11 +39,15 @@
     try { status = await syncStatus(); } catch { polling = false; return; }
     if (status.running) {
       observedRunning = true;
+      // Surface freshly-indexed media as soon as the core sync is done, without
+      // waiting for the autotagging post-steps that keep the job 'running'.
+      if (status.media_ready_at && !mediaRefreshed) { mediaRefreshed = true; onrefresh(); }
       schedule();
     } else {
       polling = false;
       if (!observedRunning) return;
       observedRunning = false;
+      mediaRefreshed = false;
       const subs = status.job === 'subtitles';
       if (status.step === 'done') {
         onrefresh();
@@ -49,7 +58,7 @@
       }
     }
   }
-  function kick() { observedRunning = true; if (!polling) poll(); }
+  function kick() { observedRunning = true; mediaRefreshed = false; if (!polling) poll(); }
 
   async function doSync() { await startSync(); kick(); }
   async function doSubs() {
@@ -63,7 +72,7 @@
 
   // Friendly labels for the optional Autonomous Mode post-sync steps (server step names
   // are terse). Everything else shows its raw step name, as before.
-  const STEP_LABELS = { embed: 'Updating prompt index', library: 'Importing prompts', autotag: 'Tagging prompts' };
+  const STEP_LABELS = { embed: 'Updating prompt index', library: 'Importing prompts', subtitles: 'Generating subtitles', autotag: 'Tagging prompts' };
   const stepLabel = (s) => STEP_LABELS[s] || s;
   const stepTitle = (name) => STEP_LABELS[name] || title(name);
   const pillText = $derived(
@@ -135,6 +144,12 @@
         return m ? `${m[1]}/${m[2]} embedded` : '';
       }
       case 'library': { const n = grab(/imported ([\d,]+) new/); return n ? (n === '0' ? 'nothing new' : `+${n} imported`) : ''; }
+      case 'subtitles': {
+        if (/skipped/.test(t)) return 'skipped';
+        if (/no videos need subtitles/.test(t)) return 'nothing new';
+        const m = t.match(/subtitled ([\d,]+)\/([\d,]+)/);
+        return m ? `${m[1]}/${m[2]} subtitled` : '';
+      }
       case 'autotag': {
         if (/no new prompts/.test(t)) return 'nothing new';
         if (/skipped/.test(t)) return 'skipped';

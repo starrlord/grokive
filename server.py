@@ -223,6 +223,10 @@ _sync = {
     "returncode": None,
     "started_at": None,
     "finished_at": None,
+    # Set the instant the core download/index steps finish — before the optional
+    # (and slow) Autonomous Mode post-steps. Lets the UI show new media right away
+    # instead of waiting for prompt autotagging to complete. None until reached.
+    "media_ready_at": None,
     "log": deque(maxlen=400),
     "auth_hint": False,       # heuristic: looks like an auth/cookie problem
 }
@@ -281,15 +285,23 @@ def _inproc_step(label: str, fn) -> int:
 
 def _run_autonomous_steps() -> None:
     """Autonomous Mode post-sync automation: update the prompt index, import new library prompts
-    (excluding locked/hidden collections), then AI-tag ONLY the freshly imported ones. Each step
-    is independently gated by its own config (a missing endpoint logs a skip, never an error) and
-    is best-effort, so it can't fail the sync that just succeeded."""
+    (excluding locked/hidden collections), generate subtitles for any videos still missing them
+    (when a subtitle endpoint is configured), then AI-tag ONLY the freshly imported prompts. Each
+    step is independently gated by its own config (a missing endpoint logs a skip, never an error)
+    and is best-effort, so it can't fail the sync that just succeeded."""
     new_records: list = []
 
     def _do_import() -> None:
         nonlocal new_records
         merged, new_records, _ = _import_library_into_saved(exclude_hidden=True)
         _log(f"imported {len(new_records)} new prompt(s) — library now {len(merged)}")
+
+    def _do_subtitles() -> None:
+        if not _whisper_url():
+            _log("skipped — no subtitle endpoint configured")
+            return
+        done, total = _generate_missing_subtitles()
+        _log("no videos need subtitles" if not total else f"subtitled {done}/{total} video(s)")
 
     def _do_autotag() -> None:
         if not _llm_url():
@@ -303,6 +315,7 @@ def _run_autonomous_steps() -> None:
 
     _inproc_step("embed", lambda: _run_embed_build_inline(_log))
     _inproc_step("library", _do_import)
+    _inproc_step("subtitles", _do_subtitles)
     _inproc_step("autotag", _do_autotag)
 
 
@@ -326,8 +339,12 @@ def _sync_worker() -> None:
                 _sync["step"] = "error"
                 break
         else:
-            # All download/index steps succeeded → run optional post-sync automation
-            # (best-effort; never flips the sync to error). Off unless the toggle is set.
+            # All download/index steps succeeded → media is now indexed and visible
+            # to the API. Mark the milestone so the UI can refresh the gallery NOW,
+            # before the optional (and potentially slow) autotagging post-steps run.
+            _sync["media_ready_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            # Run optional post-sync automation (best-effort; never flips the sync to
+            # error). Off unless the toggle is set.
             if _autonomous_enabled():
                 _run_autonomous_steps()
             _sync["step"] = "done"
@@ -352,6 +369,7 @@ def start_sync() -> bool:
         _sync["auth_hint"] = False
         _sync["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _sync["finished_at"] = None
+        _sync["media_ready_at"] = None
         _sync["log"].clear()
     threading.Thread(target=_sync_worker, daemon=True).start()
     return True
@@ -718,36 +736,53 @@ def _video_items() -> list[dict]:
     return out
 
 
-def _subtitles_worker() -> None:
-    rc = 0
-    try:
-        videos = _video_items()
-        todo = []
-        for item in videos:
-            rel = str(item.get("local_path", "")).replace("\\", "/")
-            path = (GALLERY_DIR / rel).resolve()
-            if path.exists() and not path.with_suffix(".srt").exists():
-                todo.append(path)
-        total = len(todo)
-        _log(f"{total} video(s) need subtitles ({len(videos)} total, "
-             f"{len(videos) - total} already done)")
-        for index, path in enumerate(todo, start=1):
-            remaining = total - index
-            _sync["step"] = f"{index}/{total}"
-            _log(f"[{index}/{total}] {path.name} …")
-            try:
-                srt = _whisper_srt(path)
-                path.with_suffix(".srt").write_text(srt, encoding="utf-8")
-                vtt = _srt_to_vtt(srt)
-                if vtt:
-                    path.with_suffix(".vtt").write_text(vtt, encoding="utf-8")
-                note = "no speech/audio" if not srt.strip() else "ok"
-                _log(f"  {note} ({remaining} remaining)")
-            except Exception as exc:
-                _log(f"  failed: {exc}")
+def _generate_missing_subtitles(progress=None) -> tuple[int, int]:
+    """Generate sidecar .srt/.vtt for every video that lacks them, then rebuild index.db
+    (only when something was produced) so the new tracks surface in the UI. Returns
+    (done, total): total = videos that needed subtitles, done = those that finished without
+    raising (a clip with no speech still counts as done). `progress(index, total)` is invoked
+    before each file — the manual job uses it to drive the status pill; the autonomous step
+    leaves it None and relies on the log. Shared by the manual job and the post-sync step."""
+    videos = _video_items()
+    todo = []
+    for item in videos:
+        rel = str(item.get("local_path", "")).replace("\\", "/")
+        path = (GALLERY_DIR / rel).resolve()
+        if path.exists() and not path.with_suffix(".srt").exists():
+            todo.append(path)
+    total = len(todo)
+    _log(f"{total} video(s) need subtitles ({len(videos)} total, "
+         f"{len(videos) - total} already done)")
+    done = 0
+    for index, path in enumerate(todo, start=1):
+        remaining = total - index
+        if progress:
+            progress(index, total)
+        _log(f"[{index}/{total}] {path.name} …")
+        try:
+            srt = _whisper_srt(path)
+            path.with_suffix(".srt").write_text(srt, encoding="utf-8")
+            vtt = _srt_to_vtt(srt)
+            if vtt:
+                path.with_suffix(".vtt").write_text(vtt, encoding="utf-8")
+            note = "no speech/audio" if not srt.strip() else "ok"
+            _log(f"  {note} ({remaining} remaining)")
+            done += 1
+        except Exception as exc:
+            _log(f"  failed: {exc}")
+    if total:
         # Rebuild the index so the new subtitle tracks show up in the UI.
         _log("rebuilding index...")
         rebuild_db()
+    return done, total
+
+
+def _subtitles_worker() -> None:
+    rc = 0
+    try:
+        def _pill(index: int, total: int) -> None:
+            _sync["step"] = f"{index}/{total}"
+        _generate_missing_subtitles(progress=_pill)
         _sync["step"] = "done"
     except Exception as exc:  # pragma: no cover - defensive
         rc = 1
@@ -772,6 +807,7 @@ def start_subtitles() -> bool:
         _sync["auth_hint"] = False
         _sync["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         _sync["finished_at"] = None
+        _sync["media_ready_at"] = None
         _sync["log"].clear()
     threading.Thread(target=_subtitles_worker, daemon=True).start()
     return True
@@ -934,6 +970,7 @@ def api_sync_status() -> Response:
         returncode=snap["returncode"],
         started_at=snap["started_at"],
         finished_at=snap["finished_at"],
+        media_ready_at=snap["media_ready_at"],
         auth_hint=snap["auth_hint"],
         log=log_tail,
     )
@@ -4721,26 +4758,15 @@ def _purge_ids_from_collections(ids: set) -> None:
         _atomic_write_json(COLLECTIONS_FILE, data)
 
 
-@app.post("/api/media/delete")
-def api_media_delete() -> Response:
-    """Hard-delete media: remove files from disk, drop from metadata + index, purge
-    from library/playlists, and blocklist the ids so future syncs never re-pull them."""
-    payload = request.get_json(silent=True) or {}
-    raw_ids = payload.get("ids")
-    if not isinstance(raw_ids, list) or not raw_ids:
-        return jsonify(ok=False, error="No items to delete."), 400
-    ids = {str(i) for i in raw_ids if str(i)}
-    if not ids:
-        return jsonify(ok=False, error="No items to delete."), 400
+def _delete_ids(ids: set) -> int:
+    """Hard-delete the given media ids: remove files from disk, drop from metadata +
+    index, purge from library/playlists/collections, and blocklist the synced ones so
+    future syncs never re-pull them. Returns the number of metadata records removed.
 
-    # Strict load: a present-but-unreadable metadata.json must abort the delete
-    # before we blocklist these ids / purge them from library/playlists/collections.
-    # Otherwise a transient read error would permanently blocklist items that were
-    # never actually removed.
-    try:
-        loaded = _load_json_strict(METADATA_FILE, [])
-    except CorruptStateError as exc:
-        return jsonify(ok=False, error=str(exc)), 503
+    Strict-loads metadata.json and raises CorruptStateError if it's present but
+    unreadable — the caller MUST surface that (503) before anything is blocklisted, so a
+    transient read error can't permanently blocklist items that were never removed."""
+    loaded = _load_json_strict(METADATA_FILE, [])
     items = loaded if isinstance(loaded, list) else []
     kept, removed = [], 0
     for item in items:
@@ -4766,8 +4792,79 @@ def api_media_delete() -> Response:
         db.delete_media(DB_FILE, list(ids))
     except Exception as exc:  # pragma: no cover - defensive
         print(f"index delete failed: {exc}")
+    return removed
 
-    return jsonify(ok=True, deleted=removed, blocklisted=len(blocklist_ids))
+
+@app.post("/api/media/delete")
+def api_media_delete() -> Response:
+    """Hard-delete media: remove files from disk, drop from metadata + index, purge
+    from library/playlists, and blocklist the ids so future syncs never re-pull them."""
+    payload = request.get_json(silent=True) or {}
+    raw_ids = payload.get("ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify(ok=False, error="No items to delete."), 400
+    ids = {str(i) for i in raw_ids if str(i)}
+    if not ids:
+        return jsonify(ok=False, error="No items to delete."), 400
+    try:
+        removed = _delete_ids(ids)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    blocklisted = len({i for i in ids if not i.startswith(("import_", "montage_"))})
+    return jsonify(ok=True, deleted=removed, blocklisted=blocklisted)
+
+
+@app.post("/api/canvas/<cid>/rename")
+def api_canvas_rename(cid: str) -> Response:
+    """Rename an agent canvas. canvas_name is denormalized onto every member record, so
+    this rewrites it on ALL metadata records sharing this canvas_id (the stable grouping
+    key) and rebuilds the derived index so the new name surfaces in the canvas list and
+    headers. The HD-upscale re-download path deliberately no longer re-applies Grok's
+    canvas_name (see gdownloader.refresh_hd), so a rename survives future syncs."""
+    cid = str(cid)
+    name = str((request.get_json(silent=True) or {}).get("name", "")).strip()[:120]
+    if not name:
+        return jsonify(ok=False, error="Name cannot be empty."), 400
+    try:
+        loaded = _load_json_strict(METADATA_FILE, [])
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    items = loaded if isinstance(loaded, list) else []
+    found, changed = 0, 0
+    for item in items:
+        if isinstance(item, dict) and str(item.get("canvas_id") or "") == cid:
+            found += 1
+            if item.get("canvas_name") != name:
+                item["canvas_name"] = name
+                changed += 1
+    if not found:
+        return jsonify(ok=False, error="Canvas not found."), 404
+    if changed:
+        _atomic_write_json(METADATA_FILE, items)
+        rebuild_db()
+    return jsonify(ok=True, renamed=changed, name=name)
+
+
+@app.post("/api/canvas/<cid>/delete")
+def api_canvas_delete(cid: str) -> Response:
+    """Hard-delete a whole agent canvas: delete every media item belonging to it (files,
+    metadata, index) and blocklist the synced ones so a future sync won't re-pull the
+    canvas. Reuses the same machinery as /api/media/delete."""
+    cid = str(cid)
+    try:
+        loaded = _load_json_strict(METADATA_FILE, [])
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    items = loaded if isinstance(loaded, list) else []
+    ids = {str(it.get("id")) for it in items
+           if isinstance(it, dict) and str(it.get("canvas_id") or "") == cid and it.get("id")}
+    if not ids:
+        return jsonify(ok=False, error="Canvas not found."), 404
+    try:
+        removed = _delete_ids(ids)
+    except CorruptStateError as exc:
+        return jsonify(ok=False, error=str(exc)), 503
+    return jsonify(ok=True, deleted=removed)
 
 
 # --------------------------------------------------------------------------- #

@@ -834,7 +834,12 @@ def refresh_hd(
         record["source_url"] = new_url
         record["local_path"] = new_rel
         record["content_hash"] = file_content_hash(local)
-        for key in ("width", "height", "media_type", "model", "canvas_id", "canvas_name"):
+        # canvas_name is intentionally excluded: a canvas is user-renamable and the rename
+        # lives on each member's canvas_name in metadata.json. Re-applying Grok's incoming
+        # name on an HD upscale would clobber that rename, so we keep the existing record's
+        # name. (canvas_id, the stable grouping key, is still refreshed if present. See
+        # server.api_canvas_rename.)
+        for key in ("width", "height", "media_type", "model", "canvas_id"):
             if fresh.get(key) is not None:
                 record[key] = fresh[key]
         by_id[item_id] = record

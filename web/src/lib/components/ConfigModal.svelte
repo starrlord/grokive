@@ -700,7 +700,7 @@
               aria-label="About Autonomous Mode" aria-expanded={showAutonomousInfo} title="What does Autonomous Mode do?">i</button>
           </div>
           {#if showAutonomousInfo}
-            <p class="mt-2 text-xs text-muted">After each Sync, automatically update the prompt index, import new prompts into your library, and AI-tag the newly imported ones (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.</p>
+            <p class="mt-2 text-xs text-muted">After each Sync, automatically update the prompt index, import new prompts into your library, generate subtitles for any videos still missing them (when a subtitle endpoint is configured), and AI-tag the newly imported prompts (when an AI provider is configured). Existing prompts are never re-tagged. Progress shows in the Sync status pill.</p>
           {/if}
         </section>
 

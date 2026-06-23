@@ -4,7 +4,7 @@
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import { toast } from '$lib/toast.js';
-  import { fetchMedia, fetchFacets, fetchLibrary, mediaByIds } from '$lib/api.js';
+  import { fetchMedia, fetchFacets, fetchLibrary, mediaByIds, renameCanvas, deleteCanvas } from '$lib/api.js';
   import {
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
@@ -32,6 +32,7 @@
   import ScrollToTop from '$lib/components/ScrollToTop.svelte';
   import PromptStudio from '$lib/components/PromptStudio.svelte';
   import ImagineStudio from '$lib/components/ImagineStudio.svelte';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
   import Toaster from '$lib/components/Toaster.svelte';
 
   const PAGE_SIZE = 120;
@@ -49,6 +50,9 @@
   let collectionTotal = $state(0);
   let collectionName = $state('');
   let activeCanvasName = $state('');
+  let canvasName = $state('');          // bound to the drilled-in canvas rename input
+  let confirmingCanvas = $state(null);  // the canvas pending delete-confirmation
+  let canvasSig = '';                   // tracks the open canvas so we only reseed the input on change
   let showCollectionPicker = $state(false);
   let groupByBase = $state(false); // collection view: cluster items by their base image
   let showMovie = $state(false);
@@ -100,9 +104,13 @@
   const montageVideoIds = $derived(videoSelection.filter((id) => byId.get(id)?.model !== 'Beat Montage'));
 
   async function load(reset) {
-    if (loading) return;
+    // A reset (view/filter change) must SUPERSEDE an in-flight load, not be dropped —
+    // otherwise switching to e.g. All Media while a prior fetch is still pending silently
+    // skips its page-1 fetch (the sig effect never retries), leaving stale items/total and
+    // dead infinite scroll until a reload. Append calls (reset=false) still coalesce.
+    if (loading && !reset) return;
+    const mine = ++reqId; // bump first, so any superseded in-flight load self-discards at the mine!==reqId guard
     loading = true;
-    const mine = ++reqId;
     const nextPage = reset ? 1 : page + 1;
     try {
       const res = await fetchMedia($filters, nextPage, PAGE_SIZE);
@@ -266,6 +274,21 @@
     return () => io.disconnect();
   });
 
+  // Self-heal for the "missed first transition" gap. IntersectionObserver only fires on
+  // intersection CHANGES, and recent/all/favorites/archive share ONE sentinel node (so the
+  // observer isn't recreated on a view switch). If a reset load() lands while the sentinel
+  // is already within the rootMargin — e.g. a view switch with the viewport parked, which
+  // collapses the page back to one screen — that single became-intersecting event can be
+  // swallowed (the callback's `loading` guard), and scroll goes inert until a reload. This
+  // effect re-runs whenever a load settles (it reads loading/items/total/sentinel) and pulls
+  // the next page if the sentinel is still in range; the observer keeps handling real
+  // scrolling. Mirrors the group-by-base drain below; scoped to the media views (the
+  // collection branch has its own loader/sentinel).
+  $effect(() => {
+    if (loading || activeCollection || !sentinel || items.length >= total) return;
+    if (sentinel.getBoundingClientRect().top < window.innerHeight + 900) load(false);
+  });
+
   // Group-by-base mode clusters the WHOLE collection and its families' Export/Montage
   // act on every clip — so a >500-item collection (which otherwise loads page-by-page
   // on scroll) must be drained up front, or families and their exports would be
@@ -303,6 +326,45 @@
       mediaType: 'all',
       period: 'all'
     }));
+  }
+  // Seed the rename input from the canvas you're viewing, but only when the canvas
+  // itself changes — so a facets refresh (e.g. right after a rename) doesn't clobber
+  // what you're typing. Mirrors how collectionName is reseeded on collection change.
+  $effect(() => {
+    const cid = $filters.canvas;
+    if (!cid) { canvasSig = ''; return; }
+    if (cid === canvasSig) return;
+    canvasSig = cid;
+    canvasName = activeCanvasTitle;
+  });
+  async function saveCanvasName() {
+    const cid = $filters.canvas;
+    if (!cid) return;
+    const name = canvasName.trim();
+    const current = activeCanvas?.name || activeCanvasName || '';
+    if (!name || name === current) { canvasName = current; return; } // empty/unchanged → revert
+    try {
+      await renameCanvas(cid, name);
+      activeCanvasName = name; // keep the title/fallback in step before facets reload
+      toast('Canvas renamed', { type: 'success' });
+      await refreshFacets();
+    } catch (e) {
+      canvasName = current; // restore the input so it never shows an unsaved name
+      toast(e?.message || 'Rename failed', { type: 'error' });
+    }
+  }
+  async function deleteCanvasConfirmed(c) {
+    const cid = c?.id || $filters.canvas;
+    confirmingCanvas = null;
+    if (!cid) return;
+    try {
+      const r = await deleteCanvas(cid);
+      toast(`Canvas deleted · ${r.deleted ?? 0} item${r.deleted === 1 ? '' : 's'} removed`, { type: 'success' });
+      if ($filters.canvas === cid) closeCanvas(); // drop back to the canvas landing if we were inside it
+      await refreshFacets();
+    } catch (e) {
+      toast(e?.message || 'Delete failed', { type: 'error' });
+    }
   }
   async function playPlaylist(pl) {
     const list = (await mediaByIds(pl.ids)).filter((v) => v.media_type === 'video');
@@ -569,8 +631,10 @@
           Back
         </button>
         <div class="min-w-0 flex-1">
-          <h1 class="line-clamp-2 text-base font-extrabold text-ink sm:text-lg" title={activeCanvasTitle}>{activeCanvasTitle}</h1>
-          <p class="text-sm text-muted">{displayTotal.toLocaleString()} items</p>
+          <input class="w-full rounded-lg border border-transparent bg-transparent px-1.5 py-1 text-base font-extrabold text-ink outline-none transition hover:border-line focus:border-[var(--accent)] focus:bg-[var(--surface-2)] sm:text-lg"
+            aria-label="Canvas name" title="Rename canvas" bind:value={canvasName} maxlength="120"
+            onblur={saveCanvasName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+          <p class="px-1.5 text-sm text-muted">{displayTotal.toLocaleString()} items</p>
         </div>
         <MediaTypeTabs class="ml-auto" />
         <SortSelect />
@@ -580,6 +644,11 @@
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!(activeCanvas?.videos || displayItems.some((it) => it.media_type === 'video'))}
           onclick={() => playCanvas(activeCanvas || { id: $filters.canvas, name: activeCanvasTitle, videos: displayTotal })}>Play videos</button>
+        <button type="button" class="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-line transition hover:border-[var(--danger-hover)] hover:bg-[var(--danger-hover)] hover:text-white"
+          title="Delete canvas" aria-label="Delete this canvas"
+          onclick={() => (confirmingCanvas = activeCanvas || { id: $filters.canvas, name: activeCanvasTitle })}>
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+        </button>
       </div>
 
       {#if displayItems.length === 0 && !loading}
@@ -602,7 +671,7 @@
     {:else if $filters.view === 'canvases'}
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {#each facets.canvases || [] as c (c.id)}
-          <article class="group overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
+          <article class="group relative overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
             <button type="button" class="relative block aspect-square w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => openCanvas(c)}>
               {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-105" />{/if}
               <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim)] to-transparent px-3 pb-2.5 pt-8 text-[var(--media-control-ink)]">
@@ -610,6 +679,13 @@
                 <span class="block text-xs opacity-80">{c.count} items · {c.videos} video</span>
               </span>
             </button>
+            <!-- Hover/focus (always-on for touch): delete the whole canvas. -->
+            <div class="absolute right-2 top-2 z-10 flex gap-1.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
+              <button type="button" class="grid h-8 w-8 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--danger-hover)] hover:bg-[var(--danger-hover)] hover:text-white"
+                title="Delete canvas" aria-label={`Delete canvas ${c.name}`} onclick={(e) => { e.stopPropagation(); confirmingCanvas = c; }}>
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+              </button>
+            </div>
             <div class="flex items-center gap-2 p-2">
               <button type="button" class="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--accent)] text-[var(--on-accent)] disabled:opacity-45"
                 title="Play videos" aria-label={`Play ${c.name} videos`} disabled={!c.videos} onclick={() => playCanvas(c)}>▶</button>
@@ -683,6 +759,14 @@
 
 {#if showCollectionPicker}
   <CollectionPickerModal ids={$selection} onclose={() => (showCollectionPicker = false)} />
+{/if}
+
+{#if confirmingCanvas}
+  <ConfirmDialog title="Delete canvas?"
+    message={`"${confirmingCanvas.name}"${confirmingCanvas.count ? ` and its ${confirmingCanvas.count} item${confirmingCanvas.count === 1 ? '' : 's'}` : ' and all its media'} will be permanently deleted from your library — the files are removed, not just the grouping. This can't be undone.`}
+    confirmLabel="Delete canvas"
+    onconfirm={() => deleteCanvasConfirmed(confirmingCanvas)}
+    oncancel={() => (confirmingCanvas = null)} />
 {/if}
 
 {#if showMovie}
