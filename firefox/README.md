@@ -30,6 +30,11 @@ parties, no cloud, no telemetry.
 - **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere.
 - **grok.com toolbar** — a compact floating pill with Random / Enhance / Save / Star buttons that
   write directly into the page's prompt field (falls back to clipboard if it can't find one).
+- **Reference images** — a 📎 button on the grok.com toolbar opens your Grokive **collections**;
+  pick one to browse its image thumbnails and **copy** any image to the clipboard as PNG, ready to
+  paste into Grok Imagine as a reference image. Thumbnails and full images are fetched through the
+  background (so auth + CORS never get in the way), and the full image is pre-warmed on hover so the
+  copy is instant.
 - **Imagine quota readout** — on Grok Imagine pages, the toolbar shows a compact ⚡ badge with
   your most-urgent remaining count; hover (or tap) it to expand the full per-bucket breakdown —
   image (Img / Pro / Edit) and video (480p / 720p) generations — each with a live countdown to
@@ -50,6 +55,9 @@ Grokive server at the configured **Server URL** using these endpoints:
 | `POST /api/prompts/responses/add` | Save a prompt into a folder (append + dedupe). |
 | `POST /api/prompts/enhance` | Rewrite / enhance a prompt's text. |
 | `POST /api/prompts/generate` | Generate variations of a prompt. |
+| `GET /api/collections` | List your saved collections (covers + image/item counts). |
+| `GET /api/media?collection=<id>&type=image` | List the images in a collection. |
+| `GET /thumbnails/…` & `/media/…` | Fetch a thumbnail / full image as bytes (for the References panel). |
 
 - A **folder** is just a label on each prompt. Prompts with no folder show up as **Unfiled**.
 - New prompts are saved into the **`Firefox`** folder by default (configurable in Options).
@@ -165,13 +173,21 @@ copy it to the clipboard, and show a notification with a short preview. (You can
 
 ### grok.com toolbar
 
-On `grok.com`, a compact floating pill appears (bottom-right) with four buttons:
+On `grok.com`, a compact floating pill appears (bottom-right) with five buttons:
 
 - **🎲 Random** — inserts a random prompt into the Grok input field (or copies it to the
   clipboard if no field is found).
 - **✨ Enhance** — enhances the current field text in place, using your default dialogue level.
 - **💾 Save** — saves the current field text to your save folder.
 - **⭐ Star** — saves *and* stars the current field text (favorites it in Grokive).
+- **📎 References** — opens the reference-image browser (see below).
+
+**Reference images.** Click **📎** to open a panel of your Grokive **collections** (each with a
+cover and image count; locked collections show 🔒 and need unlocking in Grokive first). Click a
+collection to see its image thumbnails, then click any thumbnail to **copy that image to the
+clipboard** — then paste it (Ctrl/Cmd+V) into Grok Imagine as a reference image. Images are copied
+as PNG. The panel opens anchored to the toolbar (above it by default), closes on **Esc** or an
+outside click, and lazy-loads thumbnails as you scroll.
 
 **Imagine quota readout.** On Grok Imagine pages (`grok.com/imagine`), the pill shows a compact
 **⚡ badge** carrying your most-urgent remaining count, colour-coded (green = plenty, amber = low,
@@ -193,8 +209,8 @@ You can turn this toolbar off in Options.
 
 ## Privacy
 
-The extension sends your prompts, library, and AI requests **only** to the Grokive server you
-configure — nothing goes to any third party, and there is no analytics or telemetry. The one
+The extension sends your prompts, library, collection images, and AI requests **only** to the
+Grokive server you configure — nothing goes to any third party, and there is no analytics or telemetry. The one
 other request it makes is the **Imagine quota read**: a same-origin call to `grok.com`'s own
 quota endpoint, made only while you're on a Grok Imagine page, using the session you're already
 logged in with. It reads your generation limits and sends nothing new anywhere.

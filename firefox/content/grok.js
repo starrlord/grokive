@@ -542,13 +542,9 @@
       wrap.classList.toggle('gks-pop-open');
       badge.setAttribute('aria-expanded', wrap.classList.contains('gks-pop-open') ? 'true' : 'false');
     });
-    // Tapping elsewhere closes a tap-opened popover.
-    document.addEventListener('pointerdown', (ev) => {
-      if (wrap.classList.contains('gks-pop-open') && !wrap.contains(ev.target)) {
-        wrap.classList.remove('gks-pop-open');
-        badge.setAttribute('aria-expanded', 'false');
-      }
-    });
+    // Outside-tap close is handled by ONE top-level listener (registered in init,
+    // alongside the References outside-click handler) keyed off the live `quotaEl`,
+    // so it isn't re-added — and leaked — every time the toolbar is remounted.
 
     wrap.appendChild(badge);
     wrap.appendChild(pop);
@@ -578,8 +574,8 @@
     } else if (quotaPollTimer) {
       clearInterval(quotaPollTimer);
       quotaPollTimer = null;
-      quotaState = { v480: null, v720: null };
-      renderQuota();   // hides the block once off Imagine
+      quotaState = {};   // keys are the QUOTA_TIERS bucket names; empty hides every tier
+      renderQuota();     // hides the block once off Imagine
     }
   }
 
@@ -605,6 +601,456 @@
 
   // ---- Toolbar construction ----------------------------------------------------
   let toolbarEl = null;
+
+  // ---- References panel (browse collections → copy an image) ------------------
+  // Lists your saved Grokive collections, drills into one to show its image
+  // thumbnails, and copies a chosen image to the clipboard as PNG so you can paste
+  // it straight into Grok Imagine as a reference image (verified: the Imagine
+  // input accepts a pasted clipboard image). Thumbnails and full images are fetched
+  // through the background (fetchImageData) — the content script can't reach the
+  // Grokive server directly (CORS) and a cross-site <img> would drop the Lax
+  // session cookie — then cached as data: URLs for the page session.
+  let refsPanelEl = null;        // panel root (lazily built, kept across opens)
+  let refsBodyEl = null;         // scroll container + IntersectionObserver root
+  let refsTitleEl = null;
+  let refsBackEl = null;
+  let refsStatusEl = null;
+  let refsView = 'collections';  // 'collections' | 'images'
+  let refsCurrentCollection = null;
+  let refsObserver = null;       // lazy-loads thumbnails as they scroll into view
+  const refsImageCache = new Map();    // media/thumbnail path -> data: URL (page session)
+  const refsImageInflight = new Map(); // path -> in-flight fetch promise (dedup hover+click)
+  const REFS_CACHE_CAP = 300;          // bound the cache so a long session can't grow forever
+
+  function cacheRefImage(path, dataUrl) {
+    refsImageCache.set(path, dataUrl);
+    if (refsImageCache.size > REFS_CACHE_CAP) {
+      const oldest = refsImageCache.keys().next().value;   // FIFO eviction
+      if (oldest !== undefined) refsImageCache.delete(oldest);
+    }
+  }
+
+  // Fetch (or reuse) an image's bytes as a data: URL through the background. The
+  // in-flight map means hover-prefetch and the click never duplicate the same
+  // request; resolved bytes are cached (capped) for the page session.
+  function getRefImageData(path) {
+    if (!path) return Promise.reject(new Error('Missing image path.'));
+    if (refsImageCache.has(path)) return Promise.resolve(refsImageCache.get(path));
+    if (refsImageInflight.has(path)) return refsImageInflight.get(path);
+    const p = send({ type: 'fetchImageData', href: path }).then((res) => {
+      if (res && res.ok && res.data && res.data.dataUrl) {
+        cacheRefImage(path, res.data.dataUrl);
+        return res.data.dataUrl;
+      }
+      throw new Error((res && res.error) || 'Could not load the image.');
+    }).finally(() => refsImageInflight.delete(path));
+    refsImageInflight.set(path, p);
+    return p;
+  }
+
+  function refsIsOpen() {
+    return !!(refsPanelEl && refsPanelEl.classList.contains('gks-refs-open'));
+  }
+
+  function setRefsStatus(message, kind) {
+    if (!refsStatusEl) return;
+    refsStatusEl.textContent = message || '';
+    refsStatusEl.classList.toggle('gks-refs-status-err', kind === 'error');
+    refsStatusEl.style.display = message ? '' : 'none';
+  }
+
+  // A fresh observer per render: the scroll root is stable but old observed nodes
+  // are gone after innerHTML clears, and disconnecting avoids leaking them.
+  function resetRefsObserver() {
+    if (refsObserver) { try { refsObserver.disconnect(); } catch (e) { /* noop */ } }
+    // Capture the instance so the callback always unobserves on its OWN observer,
+    // never a later one assigned to refsObserver after a re-render.
+    const obs = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const img = entry.target;
+        obs.unobserve(img);
+        loadRefThumb(img);
+      }
+    }, { root: refsBodyEl, rootMargin: '150px' });
+    refsObserver = obs;
+    return obs;
+  }
+
+  async function loadRefThumb(img) {
+    const path = img.getAttribute('data-src');
+    if (!path) return;
+    try {
+      const dataUrl = await getRefImageData(path);
+      if (img.isConnected) {   // a re-render may have replaced the element
+        img.src = dataUrl;
+        img.classList.add('gks-refs-loaded');
+      }
+    } catch (e) {
+      if (img.isConnected) img.classList.add('gks-refs-broken');
+    }
+  }
+
+  // data: URL -> PNG Blob via canvas. Normalises jpg/webp to image/png (the one
+  // raster type every clipboard reliably accepts); a data: URL is same-origin so
+  // the canvas isn't tainted and toBlob() works.
+  function dataUrlToPngBlob(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          if (!canvas.width || !canvas.height) { reject(new Error('Image had no dimensions.')); return; }
+          canvas.getContext('2d').drawImage(img, 0, 0);
+          canvas.toBlob((blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error('Could not encode the image as PNG.'));
+          }, 'image/png');
+        } catch (e) { reject(e); }
+      };
+      img.onerror = () => reject(new Error('Could not decode the image.'));
+      img.src = dataUrl;
+    });
+  }
+
+  // Warm the cache with the FULL image on hover so the click-time copy is instant.
+  // Pure latency optimisation — the clipboard write itself works regardless (the
+  // clipboardWrite permission means it needs no transient activation). No-op on touch.
+  function prefetchRefImage(href) {
+    if (!href) return;
+    getRefImageData(href).catch(() => { /* a real failure surfaces on click */ });
+  }
+
+  async function copyRefImage(item, tile) {
+    if (!item || !item.href) { toast('No image to copy.', 'error'); return; }
+    if (!navigator.clipboard || typeof window.ClipboardItem === 'undefined') {
+      toast('This browser can’t copy images to the clipboard.', 'error');
+      return;
+    }
+    setBusy(tile, true);
+    try {
+      const dataUrl = await getRefImageData(item.href);
+      const pngBlob = await dataUrlToPngBlob(dataUrl);
+      await navigator.clipboard.write([new window.ClipboardItem({ 'image/png': pngBlob })]);
+      toast('Image copied — paste it into Grok ✓', 'ok');
+    } catch (e) {
+      toast((e && e.message) ? e.message : 'Copy failed.', 'error');
+    } finally {
+      setBusy(tile, false);
+    }
+  }
+
+  // ---- Press-and-hold preview --------------------------------------------------
+  // Hold a thumbnail to peek a big version; release to dismiss it (without copying)
+  // so you can move to another tile or deliberately click Copy. Quick click = copy.
+  let refsPreviewEl = null;
+  let refsPreviewImg = null;
+  let refsPressTimer = null;       // long-press timer (null once it fires/cancels)
+  let refsPreviewActive = false;   // a preview is currently shown
+  let refsPreviewToken = 0;        // guards the async full-image swap against a re-press
+  let refsSuppressClick = false;   // swallow the click that trails a hold
+  const REFS_LONGPRESS_MS = 350;
+
+  function buildRefsPreview() {
+    const ov = document.createElement('div');
+    ov.className = 'gks-refs-preview';
+    const img = document.createElement('img');
+    img.className = 'gks-refs-preview-img';
+    img.alt = '';
+    img.draggable = false;
+    ov.appendChild(img);
+    document.body.appendChild(ov);
+    refsPreviewEl = ov;
+    refsPreviewImg = img;
+    return ov;
+  }
+
+  function showRefPreview(item) {
+    if (!item) return;
+    if (!refsPreviewEl) buildRefsPreview();
+    const token = ++refsPreviewToken;
+    refsPreviewActive = true;
+    // Instant feedback: show the already-loaded thumbnail scaled up, then upgrade
+    // to the full image when it resolves (usually already cached via hover-prefetch).
+    const thumbUrl = refsImageCache.get(item.thumb);
+    if (thumbUrl) { refsPreviewImg.src = thumbUrl; refsPreviewImg.style.visibility = 'visible'; }
+    else { refsPreviewImg.removeAttribute('src'); refsPreviewImg.style.visibility = 'hidden'; }
+    refsPreviewEl.classList.add('gks-refs-preview-open');
+    getRefImageData(item.href).then((full) => {
+      if (token === refsPreviewToken && refsPreviewActive) {
+        refsPreviewImg.src = full;
+        refsPreviewImg.style.visibility = 'visible';
+      }
+    }).catch(() => { /* keep the thumb / dim backdrop until release */ });
+  }
+
+  function hideRefPreview() {
+    if (refsPreviewEl) refsPreviewEl.classList.remove('gks-refs-preview-open');
+    refsPreviewActive = false;
+    refsPreviewToken++;   // invalidate any in-flight full-image swap
+  }
+
+  function startRefPress(item, ev) {
+    if (ev && ev.button != null && ev.button !== 0) return;   // primary button / touch only
+    if (refsPressTimer) clearTimeout(refsPressTimer);
+    refsPressTimer = setTimeout(() => {
+      refsPressTimer = null;
+      showRefPreview(item);
+    }, REFS_LONGPRESS_MS);
+  }
+
+  // Pointer left the tile before the hold fired — cancel the pending preview. An
+  // already-shown preview stays until release (handled by the document listeners).
+  function cancelPendingRefPress() {
+    if (refsPressTimer) { clearTimeout(refsPressTimer); refsPressTimer = null; }
+  }
+
+  function endRefPress() {
+    if (refsPressTimer) { clearTimeout(refsPressTimer); refsPressTimer = null; }
+    if (refsPreviewActive) {
+      hideRefPreview();
+      // Swallow the click the browser fires right after this release so the hold
+      // doesn't also copy; clear next tick (same trick as the toolbar drag guard).
+      refsSuppressClick = true;
+      setTimeout(() => { refsSuppressClick = false; }, 0);
+    }
+  }
+
+  function renderRefCollections(list) {
+    setRefsStatus('');
+    refsBodyEl.innerHTML = '';
+    if (!list.length) {
+      setRefsStatus('No collections yet. Make one in Grokive first.');
+      return;
+    }
+    resetRefsObserver();
+    // Compact vertical list: small cover + name + count per row, so many fit in
+    // the narrow panel and long names truncate instead of overflowing.
+    const wrap = document.createElement('div');
+    wrap.className = 'gks-refs-list';
+    for (const c of list) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'gks-refs-row';
+      const count = (c.imageCount != null) ? c.imageCount : (c.itemCount != null ? c.itemCount : null);
+      row.title = (c.locked && !c.unlocked)
+        ? (c.name + ' — locked; unlock it in Grokive to browse')
+        : (c.name + (count != null ? (' — ' + count + ' image' + (count === 1 ? '' : 's')) : ''));
+
+      const cover = document.createElement('span');
+      cover.className = 'gks-refs-row-cover';
+      if (c.locked && !c.unlocked) {
+        cover.classList.add('gks-refs-locked');
+        cover.textContent = '🔒';
+      } else if (c.cover) {
+        const im = document.createElement('img');
+        im.alt = '';
+        im.setAttribute('data-src', c.cover);
+        cover.appendChild(im);
+        refsObserver.observe(im);
+      } else {
+        cover.classList.add('gks-refs-empty');
+        cover.textContent = '🖼';
+      }
+
+      const name = document.createElement('span');
+      name.className = 'gks-refs-row-name';
+      name.textContent = c.name;
+
+      row.appendChild(cover);
+      row.appendChild(name);
+      if (count != null) {
+        const cnt = document.createElement('span');
+        cnt.className = 'gks-refs-row-count';
+        cnt.textContent = String(count);
+        row.appendChild(cnt);
+      }
+      row.addEventListener('click', () => openRefCollection(c));
+      wrap.appendChild(row);
+    }
+    refsBodyEl.appendChild(wrap);
+  }
+
+  function renderRefImages(images, collection) {
+    setRefsStatus('');
+    refsBodyEl.innerHTML = '';
+    if (!images.length) {
+      setRefsStatus(
+        (collection && collection.locked && !collection.unlocked)
+          ? 'This collection is locked. Unlock it in Grokive to see its images.'
+          : 'No images in this collection.'
+      );
+      return;
+    }
+    resetRefsObserver();
+    const grid = document.createElement('div');
+    grid.className = 'gks-refs-grid gks-refs-imgs';
+    for (const it of images) {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'gks-refs-thumb';
+      tile.title = (it.prompt ? truncate(it.prompt, 140) + ' — ' : '') + 'Click to copy · press & hold to preview';
+
+      const im = document.createElement('img');
+      im.alt = '';
+      im.draggable = false;
+      im.setAttribute('data-src', it.thumb);
+
+      const overlay = document.createElement('span');
+      overlay.className = 'gks-refs-copy';
+      overlay.textContent = '📋 Copy';
+
+      tile.appendChild(im);
+      tile.appendChild(overlay);
+      tile.addEventListener('mouseenter', () => { prefetchRefImage(it.href); });
+      // Press & hold → big preview; quick click → copy. The release of a hold sets a
+      // flag (in endRefPress) so the trailing click doesn't also copy.
+      tile.addEventListener('pointerdown', (ev) => startRefPress(it, ev));
+      tile.addEventListener('pointerleave', cancelPendingRefPress);
+      tile.addEventListener('contextmenu', (ev) => { if (refsPreviewActive || refsPressTimer) ev.preventDefault(); });
+      tile.addEventListener('click', () => {
+        if (refsSuppressClick) return;   // this click just ended a press-and-hold preview
+        copyRefImage(it, tile);
+      });
+      grid.appendChild(tile);
+      refsObserver.observe(im);
+    }
+    refsBodyEl.appendChild(grid);
+  }
+
+  async function loadRefCollectionsView() {
+    refsView = 'collections';
+    refsCurrentCollection = null;
+    if (refsBackEl) refsBackEl.hidden = true;
+    if (refsTitleEl) refsTitleEl.textContent = 'Reference images';
+    setRefsStatus('Loading collections…');
+    refsBodyEl.innerHTML = '';
+    const res = await send({ type: 'getCollections' });
+    if (!refsIsOpen() || refsView !== 'collections') return;   // closed/navigated away
+    if (!res.ok) { setRefsStatus(res.error || 'Could not load collections.', 'error'); return; }
+    renderRefCollections((res.data && res.data.collections) || []);
+  }
+
+  async function openRefCollection(c) {
+    refsView = 'images';
+    refsCurrentCollection = c;
+    if (refsBackEl) refsBackEl.hidden = false;
+    if (refsTitleEl) refsTitleEl.textContent = c.name || 'Collection';
+    setRefsStatus('Loading images…');
+    refsBodyEl.innerHTML = '';
+    const res = await send({ type: 'getCollectionImages', collectionId: c.id });
+    if (!refsIsOpen() || refsCurrentCollection !== c) return;
+    if (!res.ok) { setRefsStatus(res.error || 'Could not load images.', 'error'); return; }
+    renderRefImages((res.data && res.data.images) || [], c);
+  }
+
+  function buildRefsPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'gks-refs';
+
+    const head = document.createElement('div');
+    head.className = 'gks-refs-head';
+
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'gks-refs-back';
+    back.textContent = '‹ Collections';
+    back.hidden = true;
+    back.addEventListener('click', loadRefCollectionsView);
+
+    const title = document.createElement('span');
+    title.className = 'gks-refs-title';
+    title.textContent = 'Reference images';
+
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'gks-refs-x';
+    x.title = 'Close';
+    x.textContent = '×';
+    x.addEventListener('click', closeRefsPanel);
+
+    head.appendChild(back);
+    head.appendChild(title);
+    head.appendChild(x);
+
+    const body = document.createElement('div');
+    body.className = 'gks-refs-body';
+
+    const status = document.createElement('div');
+    status.className = 'gks-refs-status';
+    status.style.display = 'none';
+
+    panel.appendChild(head);
+    panel.appendChild(body);
+    panel.appendChild(status);
+
+    refsPanelEl = panel;
+    refsBodyEl = body;
+    refsTitleEl = title;
+    refsBackEl = back;
+    refsStatusEl = status;
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  // Anchor the panel to the toolbar: open upward when there's room above (the
+  // default bottom-right home), else downward. Right edges align.
+  function positionRefsPanel() {
+    if (!refsPanelEl || !toolbarEl) return;
+    const r = toolbarEl.getBoundingClientRect();
+    const margin = 8;
+    const panelW = Math.min(380, window.innerWidth - margin * 2);
+    let left = Math.round(r.right - panelW);            // align right edges with the bar
+    if (left + panelW > window.innerWidth - margin) left = window.innerWidth - margin - panelW;
+    if (left < margin) left = margin;                   // never clip off either edge
+    refsPanelEl.style.width = panelW + 'px';
+    refsPanelEl.style.left = left + 'px';
+    refsPanelEl.style.right = 'auto';
+    const spaceAbove = r.top - margin * 2;
+    const spaceBelow = window.innerHeight - r.bottom - margin * 2;
+    if (spaceAbove >= 260 || spaceAbove >= spaceBelow) {
+      refsPanelEl.style.bottom = (window.innerHeight - r.top + margin) + 'px';
+      refsPanelEl.style.top = 'auto';
+      refsPanelEl.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceAbove) + 'px';
+    } else {
+      refsPanelEl.style.top = (r.bottom + margin) + 'px';
+      refsPanelEl.style.bottom = 'auto';
+      refsPanelEl.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceBelow) + 'px';
+    }
+  }
+
+  function openRefsPanel() {
+    if (!refsPanelEl) buildRefsPanel();
+    positionRefsPanel();
+    refsPanelEl.classList.add('gks-refs-open');
+    loadRefCollectionsView();
+  }
+
+  function closeRefsPanel() {
+    if (refsPanelEl) refsPanelEl.classList.remove('gks-refs-open');
+    hideRefPreview();   // never leave a peek overlay up after the panel closes
+  }
+
+  function toggleRefsPanel() {
+    if (refsIsOpen()) closeRefsPanel();
+    else openRefsPanel();
+  }
+
+  function destroyRefsPanel() {
+    if (refsObserver) { try { refsObserver.disconnect(); } catch (e) { /* noop */ } refsObserver = null; }
+    try { if (refsPanelEl && refsPanelEl.parentNode) refsPanelEl.parentNode.removeChild(refsPanelEl); } catch (e) { /* noop */ }
+    refsPanelEl = refsBodyEl = refsTitleEl = refsBackEl = refsStatusEl = null;
+    refsView = 'collections';
+    refsCurrentCollection = null;
+    refsImageCache.clear();      // release the cached data: URLs with the panel
+    refsImageInflight.clear();
+    if (refsPressTimer) { clearTimeout(refsPressTimer); refsPressTimer = null; }
+    try { if (refsPreviewEl && refsPreviewEl.parentNode) refsPreviewEl.parentNode.removeChild(refsPreviewEl); } catch (e) { /* noop */ }
+    refsPreviewEl = refsPreviewImg = null;
+    refsPreviewActive = false;
+  }
 
   // Saved position lives under its OWN storage key (not `settings`, which the
   // background validates/strips to known keys). Values are viewport px (left/top).
@@ -690,11 +1136,14 @@
     const btnSave = mkBtn('💾', 'Save the current prompt to your saveFolder', doSave);
     const btnStar = mkBtn('⭐', 'Save & star the current prompt (Grokive favorites)', doStar);
     btnStar.classList.add('gks-btn-star');
+    const btnRefs = mkBtn('📎', 'Reference images — browse collections & copy one to paste into Grok', () => toggleRefsPanel());
+    btnRefs.classList.add('gks-btn-refs');
 
     group.appendChild(btnRandom);
     group.appendChild(btnEnhance);
     group.appendChild(btnSave);
     group.appendChild(btnStar);
+    group.appendChild(btnRefs);
 
     // Close button hides the toolbar for this page session.
     const close = document.createElement('button');
@@ -706,6 +1155,7 @@
       ev.preventDefault();
       ev.stopPropagation();
       bar.classList.add('gks-hidden');
+      closeRefsPanel();
     });
 
     // --- Drag-to-move (the handle is the grip) -------------------------------
@@ -725,6 +1175,7 @@
         bar.classList.add('gks-dragging');
         bar.style.right = 'auto';
         bar.style.bottom = 'auto';
+        closeRefsPanel();   // the panel is anchored to the bar; don't leave it stranded
       }
       bar.style.left = (startLeft + dx) + 'px';
       bar.style.top = (startTop + dy) + 'px';
@@ -761,6 +1212,7 @@
       ev.stopPropagation();
       if (justDragged) return;           // this "click" was just the end of a drag
       bar.classList.toggle('gks-collapsed');
+      closeRefsPanel();                  // the 📎 button is hidden while collapsed
       // Width changes on collapse/expand — re-clamp a custom-positioned bar so it
       // can't overflow off-screen after growing.
       if (bar.style.left && bar.style.left !== 'auto') {
@@ -786,6 +1238,7 @@
 
   function removeToolbar() {
     stopQuota();
+    destroyRefsPanel();
     try {
       if (toolbarEl && toolbarEl.parentNode) toolbarEl.parentNode.removeChild(toolbarEl);
     } catch (e) { /* noop */ }
@@ -823,7 +1276,36 @@
       if (toolbarEl && toolbarEl.style.left && toolbarEl.style.left !== 'auto') {
         clampToViewport(toolbarEl);
       }
+      if (refsIsOpen()) positionRefsPanel();
     });
+  } catch (e) { /* noop */ }
+
+  // Close the References panel on an outside click or Escape. The toolbar itself
+  // is exempt so the 📎 button keeps toggling it (capture phase so a page that
+  // stops propagation can't trap the click).
+  try {
+    document.addEventListener('pointerdown', (ev) => {
+      if (!refsIsOpen()) return;
+      if (refsPanelEl.contains(ev.target)) return;
+      if (toolbarEl && toolbarEl.contains(ev.target)) return;
+      closeRefsPanel();
+    }, true);
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && refsIsOpen()) closeRefsPanel();
+    });
+    // Quota popover: close on an outside tap. Registered ONCE here (not inside
+    // buildQuota) so a toolbar remount can't leak a stale, detached handler.
+    document.addEventListener('pointerdown', (ev) => {
+      if (!quotaEl || !quotaEl.classList.contains('gks-pop-open')) return;
+      if (quotaEl.contains(ev.target)) return;
+      quotaEl.classList.remove('gks-pop-open');
+      const b = quotaEl.querySelector('.gks-quota-badge');
+      if (b) b.setAttribute('aria-expanded', 'false');
+    });
+    // Release anywhere ends a press-and-hold preview — a safety net in case the
+    // pointer left the tile before lifting (the overlay itself is pointer-events:none).
+    document.addEventListener('pointerup', endRefPress);
+    document.addEventListener('pointercancel', endRefPress);
   } catch (e) { /* noop */ }
 
   // Refresh the quota when the tab comes back to the foreground so a backgrounded

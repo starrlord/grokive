@@ -1,6 +1,6 @@
 <script>
   import { selection, filters, setFavorites, setStashed, addPlaylist, setSelectMode, clearSelection, addSelection, removeMedia, movieJob } from '$lib/state.js';
-  import { exportSelection } from '$lib/api.js';
+  import { exportSelection, exportImagesZip } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import ParticleField from './ParticleField.svelte';
@@ -11,7 +11,7 @@
   const movieRunning = $derived($movieJob.running);
   const moviePct = $derived(Math.round(($movieJob.progress || 0) * 100));
 
-  let { videoIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {} } = $props();
+  let { videoIds = [], imageIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
@@ -66,12 +66,20 @@
     name = '';
     setSelectMode(false);
   }
+  // Images-only selection exports a store-only ZIP; any video present keeps the
+  // existing MP4-merge path (the images are ignored, exactly as before).
+  const imagesOnly = $derived(!videoIds.length && imageIds.length > 0);
   async function doExport() {
-    if (!videoIds.length) return;
+    if (!videoIds.length && !imageIds.length) return;
     busy = true;
     try {
-      await exportSelection(videoIds);
-      toast(`Exported selection (${videoIds.length})`, { type: 'success' });
+      if (videoIds.length) {
+        await exportSelection(videoIds);
+        toast(`Exported selection (${videoIds.length})`, { type: 'success' });
+      } else {
+        await exportImagesZip(imageIds, collection?.name || '');
+        toast(`Exported ${imageIds.length} image${imageIds.length === 1 ? '' : 's'} (ZIP)`, { type: 'success' });
+      }
     } catch (e) {
       toast(e.message || 'Export failed.', { type: 'error' });
     } finally {
@@ -136,13 +144,14 @@
         </div>
       </details>
       <button class="select-btn export-btn" class:export-active={busy}
-              disabled={!videoIds.length || busy} onclick={doExport} aria-busy={busy}>
+              disabled={busy || (!videoIds.length && !imageIds.length)} onclick={doExport} aria-busy={busy}
+              title={imagesOnly ? 'Download the selected images as a .zip' : 'Merge & download the selected videos as one MP4'}>
         {#if busy}
           <span class="export-orbit" aria-hidden="true"></span>
-          <span>Preparing MP4</span>
+          <span>{imagesOnly ? 'Zipping…' : 'Preparing MP4'}</span>
         {:else}
           <span class="text-xs">⇩</span>
-          <span>Export</span>
+          <span>{imagesOnly ? 'Export ZIP' : 'Export'}</span>
         {/if}
       </button>
       <button class="select-btn" disabled={!videoIds.length} onclick={() => onbasket()}

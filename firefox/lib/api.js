@@ -437,6 +437,145 @@
     }
   }
 
+  // --- Collections + reference images -------------------------------------
+  // The grok.com toolbar's "References" panel browses your saved collections and
+  // copies a raw image to the clipboard so you can paste it into Grok Imagine as
+  // a reference image. As with everything else, the network lives HERE in the
+  // background: the content script can't fetch the Grokive server directly (CORS),
+  // and a cross-site <img> from grok.com would drop the Lax session cookie when
+  // auth is on — so even image bytes are proxied through here, where the cookie
+  // and login-retry already work.
+
+  // { type:'getCollections' } -> [{ id, name, cover, imageCount, itemCount, locked, unlocked }]
+  // Order is preserved (the server's collections.json order, same as the web UI).
+  async function getCollections() {
+    try {
+      const s = await getSettingsRaw();
+      const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/collections'));
+      if (!res.ok || !json) {
+        return { ok: false, error: extractError(res, json, 'Could not load collections') };
+      }
+      const raw = Array.isArray(json.collections) ? json.collections : [];
+      const collections = raw
+        .map((c) => ({
+          id: String(c && c.id != null ? c.id : ''),
+          name: String((c && c.name) || 'Untitled'),
+          // Summaries give a chosen cover plus a few recent covers; take the first.
+          cover: (c && (c.cover || (Array.isArray(c.covers) ? c.covers[0] : null))) || null,
+          imageCount: (c && typeof c.image_count === 'number') ? c.image_count : null,
+          itemCount: (c && typeof c.item_count === 'number') ? c.item_count : null,
+          locked: !!(c && c.locked),
+          unlocked: !!(c && c.unlocked)
+        }))
+        .filter((c) => c.id);
+      return ok({ collections: collections });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // { type:'getCollectionImages', collectionId } -> [{ id, thumb, href, prompt, w, h }]
+  // Images only (videos can't be reference images). A locked-and-not-unlocked
+  // collection comes back empty from the server — the caller surfaces that.
+  async function getCollectionImages(collectionId) {
+    try {
+      const s = await getSettingsRaw();
+      const cid = (collectionId == null) ? '' : String(collectionId).trim();
+      if (!cid) return { ok: false, error: 'Missing collection id.' };
+      // view=collections matches the web UI's collection browser: it bypasses the
+      // "hide archived/stashed from Recent" rule (the default `recent` view would
+      // hide reference images the user has archived, making the collection look empty).
+      const path = '/api/media?view=collections&type=image&sort=new&page_size=300&collection=' + encodeURIComponent(cid);
+      const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, path));
+      if (!res.ok || !json) {
+        return { ok: false, error: extractError(res, json, 'Could not load images') };
+      }
+      const items = Array.isArray(json.items) ? json.items : [];
+      const images = [];
+      for (const it of items) {
+        if (!it || it.media_type !== 'image' || !it.href) continue;
+        images.push({
+          id: String(it.id == null ? '' : it.id),
+          thumb: it.thumb || it.href,   // fall back to the full image if no thumb
+          href: it.href,
+          prompt: it.prompt || '',
+          w: it.thumb_w || it.media_w || null,
+          h: it.thumb_h || it.media_h || null
+        });
+      }
+      return ok({ images: images, total: (typeof json.total === 'number') ? json.total : images.length });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // Defense-in-depth: only ever fetch the Grokive server's OWN media/thumbnail
+  // routes, so this proxy can't be coerced into fetching an arbitrary URL.
+  function isAllowedMediaPath(p) {
+    return /^\/(media|thumbnails)\//.test(p);
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      try {
+        const fr = new FileReader();
+        fr.onload = () => resolve(fr.result);
+        fr.onerror = () => reject(new Error('Could not read the image bytes.'));
+        fr.readAsDataURL(blob);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  // { type:'fetchImageData', href } -> { dataUrl, type }
+  // Fetch a /media or /thumbnails resource here (auth cookie + credentials ride
+  // along; no CORS; no cross-site SameSite drop) and hand it back as a data: URL.
+  // The content script renders that directly in an <img> or turns it into a Blob
+  // for the clipboard. A data: URL is same-origin to the page, so the canvas it's
+  // later drawn onto (to normalise to PNG) is NOT tainted.
+  async function fetchImageData(href) {
+    try {
+      const s = await getSettingsRaw();
+      let p = (href == null) ? '' : String(href).trim();
+      if (!p) return { ok: false, error: 'Missing image path.' };
+      if (!p.startsWith('/')) p = '/' + p;            // stored paths are relative
+      if (!isAllowedMediaPath(p)) {
+        return { ok: false, error: 'Refusing to fetch a non-media path.' };
+      }
+      // Prime auth so the (auth-gated) media route sees the session cookie.
+      const authErr = await ensureAuth(s);
+      if (authErr) return { ok: false, error: authErr };
+
+      let res = await rawFetch(s.baseUrl, p, { method: 'GET' });
+      if (res.status === 401) {
+        const loggedIn = await tryLogin(s);
+        if (loggedIn) res = await rawFetch(s.baseUrl, p, { method: 'GET' });
+        if (res && res.status === 401) {
+          // Mirror withAuth's clearer message instead of a bare HTTP 401.
+          return { ok: false, error: 'Login failed — check credentials, or run the server with AUTH_DISABLED=true.' };
+        }
+      }
+      if (!res.ok) {
+        return { ok: false, error: 'Image fetch failed (HTTP ' + res.status + ').' };
+      }
+      const blob = await res.blob();
+      if (!blob || !blob.size) return { ok: false, error: 'The image came back empty.' };
+      // Bound the messaging channel: the bytes cross runtime.sendMessage as a base64
+      // data: URL (~33% larger). Match the server's own 30 MB upload ceiling.
+      if (blob.size > 30 * 1024 * 1024) {
+        return { ok: false, error: 'Image is too large to copy (' + Math.round(blob.size / (1024 * 1024)) + ' MB).' };
+      }
+      const dataUrl = await blobToDataUrl(blob);
+      if (typeof dataUrl !== 'string' || dataUrl.indexOf('data:') !== 0) {
+        return { ok: false, error: 'Could not read the image bytes.' };
+      }
+      return ok({ dataUrl: dataUrl, type: blob.type || '' });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
   // --- Expose on the shared background global ------------------------------
   // background.js reads self.GrokiveAPI (see manifest background.scripts order).
   self.GrokiveAPI = {
@@ -450,6 +589,9 @@
     generate: generate,
     savePrompt: savePrompt,
     starPrompt: starPrompt,
+    getCollections: getCollections,
+    getCollectionImages: getCollectionImages,
+    fetchImageData: fetchImageData,
     copyToClipboard: copyToClipboard,
     // Internal helper reused by the 'random-prompt' command in background.js:
     getSettingsRaw: getSettingsRaw

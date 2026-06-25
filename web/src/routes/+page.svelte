@@ -98,6 +98,9 @@
   const selectableIds = $derived(currentGridItems.map((it) => it.id));
   const byId = $derived(new Map([...items, ...collectionItems].map((it) => [it.id, it])));
   const videoSelection = $derived($selection.filter((id) => byId.get(id)?.media_type === 'video'));
+  // Images-only ZIP export: the Export button bundles these when no video is selected
+  // (a mixed selection keeps exporting the videos as an MP4 — see SelectBar).
+  const imageSelection = $derived($selection.filter((id) => byId.get(id)?.media_type === 'image'));
   // Inputs for the Montage panel: videos only, and never other montages (a montage
   // can't be a source clip). videoSelection itself keeps montages — they're still
   // valid to play / export / add to a playlist.
@@ -394,6 +397,14 @@
     if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
+  // Photo slideshow of a collection's images (videos skipped). Resolves the full id list
+  // — not just the loaded grid — so the slideshow spans every photo, not only what's
+  // scrolled into view.
+  async function slideshowCollection(c) {
+    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'image');
+    if (!list.length) { toast('No photos in this collection to show.', { type: 'error' }); return; }
+    lb = { list, index: 0, autoAdvance: false, autoSlideshow: true, title: c.name };
+  }
   async function enqueueCollectionToBasket(c) {
     // The collection card's music icon pours every montage-eligible video in the
     // collection into the cross-library queue (basket) — so several collections can
@@ -482,6 +493,30 @@
     const list = loaded.filter((it) => it.media_type === 'video');
     if (!list.length) { toast('No playable videos in this canvas.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name || 'Canvas' };
+  }
+  // Photo slideshow of a canvas's images (videos skipped). Same bounded-pagination shape
+  // as playCanvas, but fetches images and opens the lightbox in slideshow mode.
+  async function slideshowCanvas(c) {
+    const canvasFilters = {
+      ...$filters, view: 'canvases', canvas: c.id, mediaType: 'image',
+      query: '', tags: [], models: [], resolutions: [], period: 'all'
+    };
+    const CANVAS_PAGE = 500;
+    let nextPage = 1;
+    let loaded = [];
+    let expected = Infinity;
+    while (loaded.length < expected) {
+      const res = await fetchMedia(canvasFilters, nextPage, CANVAS_PAGE);
+      const batch = res.items || [];
+      loaded = [...loaded, ...batch];
+      expected = res.total || loaded.length;
+      nextPage += 1;
+      if (batch.length < CANVAS_PAGE) break;
+      if (nextPage > Math.ceil(expected / CANVAS_PAGE) + 1) break;
+    }
+    const list = loaded.filter((it) => it.media_type === 'image');
+    if (!list.length) { toast('No photos in this canvas to show.', { type: 'error' }); return; }
+    lb = { list, index: 0, autoAdvance: false, autoSlideshow: true, title: c.name || 'Canvas' };
   }
   async function playFavorites() {
     // Play every favorited video (not just the loaded page) in the current sort
@@ -598,6 +633,9 @@
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           Group
         </button>
+        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
+          disabled={!currentGridItems.some((it) => it.media_type === 'image')}
+          title="Play a photo slideshow of this collection's images" onclick={() => slideshowCollection(activeCollection)}>Slideshow</button>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
       </div>
@@ -641,6 +679,10 @@
         {#if hasCanvasRefinements}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={clearCanvasRefinements}>Reset filters ✕</button>
         {/if}
+        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
+          disabled={!displayItems.some((it) => it.media_type === 'image')}
+          title="Play a photo slideshow of this canvas's images"
+          onclick={() => slideshowCanvas(activeCanvas || { id: $filters.canvas, name: activeCanvasTitle })}>Slideshow</button>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
           disabled={!(activeCanvas?.videos || displayItems.some((it) => it.media_type === 'video'))}
           onclick={() => playCanvas(activeCanvas || { id: $filters.canvas, name: activeCanvasTitle, videos: displayTotal })}>Play videos</button>
@@ -740,7 +782,7 @@
 </div>
 
 {#if $selectMode}
-  <SelectBar videoIds={videoSelection} {selectableIds} collection={activeCollection}
+  <SelectBar videoIds={videoSelection} imageIds={imageSelection} {selectableIds} collection={activeCollection}
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
     onmovie={() => { movieVideoIds = montageVideoIds; showMovie = true; }}
@@ -749,7 +791,7 @@
 {/if}
 
 {#if lb}
-  <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} title={lb.title}
+  <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} autoSlideshow={lb.autoSlideshow} title={lb.title}
     onopenrelated={openRelatedLightbox} onclose={() => (lb = null)} />
 {/if}
 

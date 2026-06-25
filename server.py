@@ -2233,6 +2233,85 @@ def api_export() -> Response:
     return _export_response(_video_paths_for_ids(ids), payload.get("name") or "export")
 
 
+def _image_paths_for_ids(ids: list) -> list[Path]:
+    """Ordered, existing IMAGE files for a list of item ids (order preserved). The
+    list form of _image_path_for_id: ignores videos, missing files, and anything that
+    would escape the gallery root (path traversal). Used by the images-only ZIP export."""
+    index = _metadata_index()
+    gallery_root = GALLERY_DIR.resolve()
+    paths: list[Path] = []
+    for raw_id in ids or []:
+        item = index.get(str(raw_id))
+        if not item or item.get("media_type") != "image":
+            continue
+        rel = str(item.get("local_path", "")).replace("\\", "/")
+        if not rel:
+            continue
+        candidate = (GALLERY_DIR / rel).resolve()
+        if candidate != gallery_root and gallery_root not in candidate.parents:
+            continue
+        if candidate.exists():
+            paths.append(candidate)
+    return paths
+
+
+@app.post("/api/export/images")
+def api_export_images() -> Response:
+    """Bundle the selected IMAGE ids into a store-only .zip and stream it. Store-only
+    (ZIP_STORED) because JPG/PNG/WebP are already compressed — deflate would burn CPU
+    for ~0 gain. Videos are never included here; mixed/video exports keep using
+    /api/export (the MP4 merge). The temp file is deleted after streaming."""
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get("ids")
+    if not isinstance(ids, list) or not ids:
+        return jsonify(ok=False, error="No images selected to export."), 400
+
+    paths = _image_paths_for_ids(ids)
+    if not paths:
+        return jsonify(ok=False, error="No image files to export are available on the server."), 400
+
+    # Name: the caller's name (collection) or the first image's filename stem, + a
+    # datetimestamp. The server owns the final filename so the client just honours
+    # Content-Disposition (same pattern as the backup export).
+    base = str(payload.get("name") or "").strip() or paths[0].stem
+    safe = re.sub(r"[^\w.-]+", "_", base).strip("_") or "images"
+    filename = f"{safe}_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="ga-zip-"))
+    zip_path = tmpdir / "export.zip"
+    try:
+        used: set[str] = set()
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            for path in paths:
+                arc = path.name
+                while arc in used:  # de-dupe colliding basenames across folders
+                    stem, ext = os.path.splitext(arc)
+                    arc = f"{stem}_{len(used)}{ext}"
+                used.add(arc)
+                zf.write(path, arcname=arc)
+        size = zip_path.stat().st_size
+    except Exception as exc:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify(ok=False, error=f"Zip failed: {exc}"), 500
+
+    def generate():
+        try:
+            with open(zip_path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(262144), b""):
+                    yield chunk
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return Response(
+        generate(),
+        mimetype="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(size),
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Generate Movie (beat-synced montage from selected videos + an uploaded song).
 # Runs as a single background job — same threading+poll model as Sync, with its
@@ -4259,14 +4338,29 @@ def api_prompts_responses_get() -> Response:
     return jsonify(responses=data)
 
 
+# Serializes EVERY read-modify-write of saved_responses.json. waitress is multithreaded, so
+# without this two concurrent writers (e.g. autonomous tagging + a user save) interleave between
+# their read and their write and silently lose updates. Hold it across the WHOLE read→write, not
+# just the write — _atomic_write_json only prevents torn files, not lost updates.
+_responses_lock = threading.Lock()
+
+
 @app.post("/api/prompts/responses")
 def api_prompts_responses_post() -> Response:
-    """Replace the whole saved-responses list (client owns it). Validate, normalise, atomic write."""
+    """Apply a client's saved-responses list as an UPSERT that can never shrink the file.
+
+    Records are updated/inserted by id in the order given; any record currently on disk whose id
+    the client did NOT send is preserved (appended). This makes a stale or truncated client POST
+    harmless — it can add or reorder, but it can no longer wipe records it didn't know about. (The
+    old behaviour blindly replaced the file AND capped it at 2000 entries, so any edit made with
+    >2000 saved silently destroyed everything past 2000.) Deletion has its own by-id endpoint,
+    since an upsert intentionally never removes."""
     incoming = (request.get_json(silent=True) or {}).get("responses")
     if not isinstance(incoming, list):
         return jsonify(ok=False, error="Expected a 'responses' array."), 400
     clean = []
-    for entry in incoming[:2000]:
+    seen_ids = set()
+    for entry in incoming:  # no cap — the client holds the full list and round-trips it whole
         if not isinstance(entry, dict):
             continue
         text = str(entry.get("text", "")).strip()[:2000]
@@ -4282,16 +4376,24 @@ def api_prompts_responses_post() -> Response:
                     tags.append(s)
                 if len(tags) >= 20:
                     break
+        rid = str(entry.get("id") or "")[:64] or ("rs-" + secrets.token_hex(6))
         clean.append({
-            "id": str(entry.get("id") or "")[:64] or str(len(clean)),
+            "id": rid,
             "text": text,
             "created_at": str(entry.get("created_at", ""))[:32],
             "folder": str(entry.get("folder", "")).strip()[:40],
             "tags": tags,
             "starred": bool(entry.get("starred")),
         })
-    _atomic_write_json(RESPONSES_FILE, clean)
-    return jsonify(ok=True, count=len(clean))
+        seen_ids.add(rid)
+    with _responses_lock:
+        current = _read_responses()
+        # Never shrink: keep any on-disk record the client didn't send (a stale/truncated client,
+        # or a row another writer appended since the client last loaded).
+        preserved = [r for r in current if str(r.get("id")) not in seen_ids]
+        merged = clean + preserved
+        _atomic_write_json(RESPONSES_FILE, merged)
+    return jsonify(ok=True, count=len(merged))
 
 
 @app.post("/api/prompts/responses/add")
@@ -4307,33 +4409,27 @@ def api_prompts_responses_add() -> Response:
         return jsonify(ok=False, error="No text provided.", responses=[]), 400
     folder = str(payload.get("folder") or "").strip()[:40]
     starred = bool(payload.get("starred"))
-    current: list = []
-    if RESPONSES_FILE.exists():
-        try:
-            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                current = [x for x in loaded if isinstance(x, dict)]
-        except Exception:
-            current = []
-    existing = next((x for x in current if str(x.get("text", "")).strip() == text), None)
-    if existing is not None:
-        # already saved — leave folder/tags as-is, but UPGRADE to starred if requested.
-        if starred and not existing.get("starred"):
-            existing["starred"] = True
-            _atomic_write_json(RESPONSES_FILE, current)
-            return jsonify(ok=True, added=False, starred=True, responses=current)
-        return jsonify(ok=True, added=False, responses=current)
-    entry = {
-        "id": "rs-" + secrets.token_hex(6),
-        "text": text,
-        "created_at": datetime.date.today().isoformat(),
-        "folder": folder,
-        "tags": [],
-        "starred": starred,
-    }
-    current = [entry] + current
-    _atomic_write_json(RESPONSES_FILE, current)
-    return jsonify(ok=True, added=True, responses=current)
+    with _responses_lock:
+        current = _read_responses()
+        existing = next((x for x in current if str(x.get("text", "")).strip() == text), None)
+        if existing is not None:
+            # already saved — leave folder/tags as-is, but UPGRADE to starred if requested.
+            if starred and not existing.get("starred"):
+                existing["starred"] = True
+                _atomic_write_json(RESPONSES_FILE, current)
+                return jsonify(ok=True, added=False, starred=True, responses=current)
+            return jsonify(ok=True, added=False, responses=current)
+        entry = {
+            "id": "rs-" + secrets.token_hex(6),
+            "text": text,
+            "created_at": datetime.date.today().isoformat(),
+            "folder": folder,
+            "tags": [],
+            "starred": starred,
+        }
+        current = [entry] + current
+        _atomic_write_json(RESPONSES_FILE, current)
+        return jsonify(ok=True, added=True, responses=current)
 
 
 @app.post("/api/prompts/responses/star")
@@ -4345,20 +4441,29 @@ def api_prompts_responses_star() -> Response:
     rid = str(payload.get("id") or "").strip()
     if not rid:
         return jsonify(ok=False, error="No prompt id provided.", responses=[]), 400
-    current: list = []
-    if RESPONSES_FILE.exists():
-        try:
-            loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                current = [x for x in loaded if isinstance(x, dict)]
-        except Exception:
-            current = []
-    record = next((x for x in current if str(x.get("id", "")) == rid), None)
-    if record is None:
-        return jsonify(ok=False, error="Unknown prompt id.", responses=current), 404
-    record["starred"] = bool(payload.get("starred"))
-    _atomic_write_json(RESPONSES_FILE, current)
-    return jsonify(ok=True, responses=current)
+    with _responses_lock:
+        current = _read_responses()
+        record = next((x for x in current if str(x.get("id", "")) == rid), None)
+        if record is None:
+            return jsonify(ok=False, error="Unknown prompt id.", responses=current), 404
+        record["starred"] = bool(payload.get("starred"))
+        _atomic_write_json(RESPONSES_FILE, current)
+        return jsonify(ok=True, responses=current)
+
+
+@app.post("/api/prompts/responses/delete")
+def api_prompts_responses_delete() -> Response:
+    """Delete ONE saved response by id (read-modify-write) and return the full list. Separate from
+    the full-list upsert, which intentionally never removes — so deletes go through here."""
+    rid = str((request.get_json(silent=True) or {}).get("id") or "").strip()
+    if not rid:
+        return jsonify(ok=False, error="No prompt id provided.", responses=[]), 400
+    with _responses_lock:
+        current = _read_responses()
+        remaining = [r for r in current if str(r.get("id")) != rid]
+        if len(remaining) != len(current):
+            _atomic_write_json(RESPONSES_FILE, remaining)
+        return jsonify(ok=True, responses=remaining)
 
 
 def _library_unique_prompts(exclude_hidden: bool = False) -> dict:
@@ -4424,25 +4529,26 @@ def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool 
     grow it. Returns ``(merged, new_entries, backup_path)`` — ``new_entries`` is the delta added
     this call (empty list + no write when nothing is new). Shared by the manual import endpoint
     and Autonomous Mode's post-sync step."""
-    current = _read_responses()
-    have = {promptstudio.prompt_hash(t) for t in
-            (str(x.get("text", "")).strip() for x in current) if t}
-    uniq = _library_unique_prompts(exclude_hidden=exclude_hidden)
-    missing = [(h, r) for h, r in uniq.items() if h not in have]
-    if not missing:
-        return current, [], ""
-    missing.sort(key=lambda hr: hr[1]["created"], reverse=True)  # newest first
-    today = datetime.date.today().isoformat()
-    new_entries = [{
-        "id": "rs-" + secrets.token_hex(6),
-        "text": r["text"][:2000],
-        "created_at": (r["created"][:10] or today),
-        "folder": folder,
-        "tags": [],
-    } for _, r in missing]
-    merged = current + new_entries  # keep existing/curated on top; imports appended
-    backup = _atomic_write_json(RESPONSES_FILE, merged)
-    return merged, new_entries, backup
+    with _responses_lock:
+        current = _read_responses()
+        have = {promptstudio.prompt_hash(t) for t in
+                (str(x.get("text", "")).strip() for x in current) if t}
+        uniq = _library_unique_prompts(exclude_hidden=exclude_hidden)
+        missing = [(h, r) for h, r in uniq.items() if h not in have]
+        if not missing:
+            return current, [], ""
+        missing.sort(key=lambda hr: hr[1]["created"], reverse=True)  # newest first
+        today = datetime.date.today().isoformat()
+        new_entries = [{
+            "id": "rs-" + secrets.token_hex(6),
+            "text": r["text"][:2000],
+            "created_at": (r["created"][:10] or today),
+            "folder": folder,
+            "tags": [],
+        } for _, r in missing]
+        merged = current + new_entries  # keep existing/curated on top; imports appended
+        backup = _atomic_write_json(RESPONSES_FILE, merged)
+        return merged, new_entries, backup
 
 
 def _autotag_records(records: list, *, log=None) -> int:
@@ -4454,12 +4560,16 @@ def _autotag_records(records: list, *, log=None) -> int:
     base, model = _llm_url(), _llm_model()
     if not base or not records:
         return 0
-    current = _read_responses()
-    by_id = {str(r.get("id")): r for r in current}
-    folders = sorted({str(r.get("folder")).strip() for r in current if str(r.get("folder")).strip()})
-    vocab = sorted({t for r in current for t in (r.get("tags") or []) if isinstance(t, str)})
+    # Do the SLOW LLM work on a snapshot WITHOUT holding the lock (it can run for minutes),
+    # collecting per-id patches. We re-read and apply them under the lock at the very end, so a
+    # concurrent user save/add during the loop is never clobbered by a stale full-file rewrite.
+    snapshot = _read_responses()
+    by_id = {str(r.get("id")): r for r in snapshot}
+    folders = sorted({str(r.get("folder")).strip() for r in snapshot if str(r.get("folder")).strip()})
+    vocab = sorted({t for r in snapshot for t in (r.get("tags") or []) if isinstance(t, str)})
     api_key, headers = _llm_api_key(), _llm_extra_headers()
-    total, tagged = len(records), 0
+    total = len(records)
+    patches: dict = {}  # id -> {"folder": str, "add_tags": [str]}
     for i, rec in enumerate(records, 1):
         target = by_id.get(str(rec.get("id")))
         if target is None:
@@ -4480,25 +4590,46 @@ def _autotag_records(records: list, *, log=None) -> int:
             continue
         new_tags = [t for t in (out.get("tags") or []) if isinstance(t, str) and t]
         folder = str(out.get("folder") or "").strip()
-        changed = False
+        patch: dict = {}
         if new_tags:
-            merged_tags = list(target.get("tags") or [])
+            patch["add_tags"] = new_tags
             for t in new_tags:
-                if t not in merged_tags:
-                    merged_tags.append(t)
                 if t not in vocab:
                     vocab.append(t)  # keep new vocab available to later items in this batch
-            target["tags"] = merged_tags[:20]
-            changed = True
         if folder:
-            target["folder"] = folder[:40]
+            patch["folder"] = folder[:40]
             if folder not in folders:
                 folders.append(folder)
-            changed = True
-        if changed:
-            tagged += 1
-    if tagged:  # nothing changed (e.g. every call failed) → don't rewrite/back up the file
-        _atomic_write_json(RESPONSES_FILE, current)
+        if patch:
+            patches[str(rec.get("id"))] = patch
+    if not patches:
+        return 0
+    # Apply the patches by id onto the LATEST file under the lock (NOT the pre-loop snapshot),
+    # so anything added/edited during the long LLM loop survives.
+    with _responses_lock:
+        current = _read_responses()
+        cur_by_id = {str(r.get("id")): r for r in current}
+        tagged = 0
+        for rid, patch in patches.items():
+            target = cur_by_id.get(rid)
+            if target is None:
+                continue  # deleted/changed since the snapshot — skip
+            changed = False
+            add_tags = patch.get("add_tags")
+            if add_tags:
+                merged_tags = list(target.get("tags") or [])
+                for t in add_tags:
+                    if t not in merged_tags:
+                        merged_tags.append(t)
+                target["tags"] = merged_tags[:20]
+                changed = True
+            if patch.get("folder"):
+                target["folder"] = patch["folder"]
+                changed = True
+            if changed:
+                tagged += 1
+        if tagged:
+            _atomic_write_json(RESPONSES_FILE, current)
     return tagged
 
 

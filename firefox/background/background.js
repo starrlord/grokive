@@ -56,6 +56,15 @@
       case 'starPrompt':
         return API.starPrompt(msg.id, msg.starred);
 
+      case 'getCollections':
+        return API.getCollections();
+
+      case 'getCollectionImages':
+        return API.getCollectionImages(msg.collectionId);
+
+      case 'fetchImageData':
+        return API.fetchImageData(msg.href);
+
       case 'getSettings':
         return API.getSettings();
 

@@ -4,7 +4,7 @@ import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
   getSettings, deleteMedia, movieStatus, dismissMovie,
-  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, starResponseRemote, importLibraryPrompts,
+  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, starResponseRemote, deleteResponseRemote, importLibraryPrompts,
   getImagineSessions, imagineJobsAll
 } from './api.js';
 import { toast } from './toast.js';
@@ -55,6 +55,22 @@ mode.subscribe((v) => {
   persist('ga.mode', v);
   if (typeof document !== 'undefined') document.documentElement.dataset.mode = v;
 });
+
+// Seconds each photo shows during a lightbox slideshow. localStorage-backed (same tier
+// as theme/mode) so the user's pace sticks across sessions. Clamped to a sane 1–30s.
+const _clampSlide = (n) => { const v = Math.round(Number(n)); return Number.isFinite(v) ? Math.max(1, Math.min(30, v)) : 5; };
+export const slideSeconds = writable(_clampSlide(LS('ga.slideSeconds', 5)));
+slideSeconds.subscribe((v) => persist('ga.slideSeconds', _clampSlide(v)));
+export const setSlideSeconds = (n) => slideSeconds.set(_clampSlide(n));
+
+// Last-set player volume (0..1), a per-device preference. localStorage-backed (same tier
+// as theme/mode/slideSeconds) so a desktop user's chosen level sticks across Lightbox opens
+// and page reloads. Read/written directly (not via a store) by the player, which applies it
+// to each new <video>. This is the VOLUME LEVEL only — it never affects the muted-first
+// autoplay path that iOS/mobile relies on. Clamped 0..1, default 1.
+const _clampVolume = (n) => { const v = Number(n); return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1; };
+export const loadVolume = () => _clampVolume(LS('ga.volume', 1));
+export const saveVolume = (n) => persist('ga.volume', _clampVolume(n));
 
 // --- Filter / view state ----------------------------------------------------
 export const filters = writable({
@@ -705,9 +721,19 @@ export function setSavedResponses(list) {
   savedResponses.set(list);
   persistSavedResponses();
 }
-export function removeSavedResponse(id) {
-  savedResponses.update((r) => r.filter((x) => x.id !== id));
-  persistSavedResponses();
+// Delete by-id via the dedicated endpoint. The full-list save is now an UPSERT that never
+// removes (so a stale/truncated client can't wipe records), which means a delete CANNOT go
+// through persistSavedResponses anymore — it would just be re-added on next load.
+export async function removeSavedResponse(id) {
+  const prev = get(savedResponses);
+  savedResponses.update((r) => r.filter((x) => x.id !== id));   // optimistic
+  try {
+    const d = await deleteResponseRemote(id);
+    if (Array.isArray(d.responses)) savedResponses.set(d.responses);
+  } catch {
+    savedResponses.set(prev);   // revert on failure
+    toast("Couldn't delete — check your connection.", { type: 'error' });
+  }
 }
 // Toggle the `starred` flag on one saved response. Optimistically flip it in the store, then persist
 // by-id (NOT the full-list save — that would clobber concurrent edits). Revert + toast on failure.

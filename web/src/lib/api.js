@@ -107,6 +107,35 @@ export const exportPlaylist = (id, name) =>
 export const exportSelection = (ids, name = 'selection') =>
   fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, name }) }).then((r) => downloadBlob(r, name));
 
+// Stream a response to the browser as a download, honouring the server's
+// Content-Disposition filename (falls back to `fallback` when absent). Used where the
+// server owns the final name (timestamped ZIPs) rather than the client appending one.
+async function downloadNamed(response, fallback) {
+  if (!response.ok) {
+    let msg = 'Download failed.';
+    try { const j = await response.json(); if (j.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  const blob = await response.blob();
+  let name = fallback;
+  const m = /filename="?([^";]+)"?/.exec(response.headers.get('Content-Disposition') || '');
+  if (m) name = m[1];
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 15000);
+}
+// Images-only selection → store-only .zip (the server names it after the collection
+// or first image + a timestamp). `name` is the collection name when in a collection,
+// otherwise '' so the server falls back to the first image's filename stem.
+export const exportImagesZip = (ids, name = '') =>
+  fetch('/api/export/images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, name }) })
+    .then((r) => downloadNamed(r, 'images.zip'));
+
 // --- Delete (hard-delete + blocklist) --------------------------------------
 export const deleteMedia = (ids) =>
   fetch('/api/media/delete', {
@@ -254,23 +283,7 @@ export async function fetchProviderModels(body) {
 // timestamped Content-Disposition filename.
 export async function exportBackup(includeSecrets = false) {
   const res = await fetch(`/api/backup/export?secrets=${includeSecrets ? 1 : 0}`);
-  if (!res.ok) {
-    let msg = 'Backup failed.';
-    try { const j = await res.json(); if (j.error) msg = j.error; } catch {}
-    throw new Error(msg);
-  }
-  const blob = await res.blob();
-  let name = 'grokive-backup.zip';
-  const m = /filename="?([^";]+)"?/.exec(res.headers.get('Content-Disposition') || '');
-  if (m) name = m[1];
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 15000);
+  return downloadNamed(res, 'grokive-backup.zip');
 }
 // Replace the live state with the contents of a backup .zip (destructive — the
 // server snapshots the prior state into /data/backups first). Returns the summary.
@@ -488,6 +501,16 @@ export async function starResponseRemote(id, starred) {
   });
   const d = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(d.error || 'Could not save.');
+  return d; // { ok, responses }
+}
+// Delete ONE saved response by id (server read-modify-write) and get the full list back. By-id
+// because the full-list POST is now an upsert that never removes — deletes must go through here.
+export async function deleteResponseRemote(id) {
+  const res = await fetch('/api/prompts/responses/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Could not delete.');
   return d; // { ok, responses }
 }
 // Merge media-library prompts (metadata.json) into Saved, server-side: backed up first, deduped,

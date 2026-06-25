@@ -1,4 +1,5 @@
 <script module>
+  import { loadVolume, saveVolume } from '$lib/state.js';
   // One AudioContext shared across all lightbox opens — browsers cap how many you
   // can create. Routing the <video> through a context that's resumed inside a user
   // gesture makes the *context* the authorized audio output, so every subsequent
@@ -13,13 +14,16 @@
     return sharedAudioCtx;
   }
   let desktopSoundEnabled = false;
-  let desktopVolume = 1;
+  // Last-set desktop volume (0..1). Seeded from localStorage so the chosen level sticks
+  // across Lightbox opens AND page reloads (a per-device preference). Kept in sync below
+  // via onVolumeChange. Volume LEVEL only — the muted-first autoplay path is untouched.
+  let desktopVolume = loadVolume();
 </script>
 
 <script>
   import { onDestroy } from 'svelte';
-  import { fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, captionVideoHeight } from '$lib/state.js';
+  import { fade, fly } from 'svelte/transition';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, captionVideoHeight, slideSeconds, setSlideSeconds } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -36,7 +40,10 @@
     setTimeout(() => (b.textContent = prev), 1200);
   }
 
-  let { list = [], index = 0, autoAdvance = false, title = '', onclose = () => {}, onopenrelated = () => {} } = $props();
+  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {} } = $props();
+  // Honour reduced-motion for the slide crossfade (and skip it entirely there).
+  const reduceMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const FADE_MS = 360;
   let i = $state(index);
   $effect(() => { i = index; });
 
@@ -51,13 +58,46 @@
   const item = $derived(liveList[i] || null);
   let confirmingDelete = $state(false);
   let autoplayVideos = $state(false);
+  // Photo slideshow mode (image-only). The ▶ control drives this when the open item is
+  // an image; videos keep using autoplayVideos. The two are mutually exclusive.
+  let slideshow = $state(false);
   $effect(() => {
     list;
     index;
     autoplayVideos = autoAdvance;
+    slideshow = autoSlideshow;
   });
   const nextPlayableVideo = $derived(liveList.findIndex((it, idx) => idx >= i && it.media_type === 'video'));
   const hasPlayableVideo = $derived(nextPlayableVideo !== -1);
+  const isImage = $derived(item?.media_type === 'image');
+  // Next IMAGE strictly after the current position (slideshow skips videos, stops at the end).
+  const nextImageIdx = $derived(liveList.findIndex((it, idx) => idx > i && it.media_type === 'image'));
+  const hasMoreImages = $derived(nextImageIdx !== -1);
+  const playing = $derived(autoplayVideos || slideshow);
+  function toggleSlideshow() {
+    slideshow = !slideshow;
+    if (slideshow) autoplayVideos = false;
+  }
+  // Advance the slideshow one photo per interval, skipping videos. Pauses while any
+  // panel/dialog is open and self-clears on every change (step, mode off, unmount).
+  $effect(() => {
+    if (!slideshow) return;
+    // A panel/dialog open is a PAUSE — keep the slideshow armed and resume on close.
+    if (showInfo || showVision || showSubStyle || confirmingDelete) return;
+    const it = item;
+    // The auto-advance never lands on a video; the only way here is manual arrow nav.
+    // Treat that as ending the photo slideshow so the ▶/pace controls don't desync.
+    if (!it || it.media_type !== 'image') { slideshow = false; return; }
+    const target = nextImageIdx;                       // next photo, or -1 at the end
+    // Warm the next photo so the crossfade dissolves into a decoded image, not a blank frame.
+    if (target !== -1 && typeof Image !== 'undefined') { const pre = new Image(); pre.src = liveList[target].href; }
+    const ms = Math.max(1, Number($slideSeconds) || 5) * 1000;
+    const t = setTimeout(() => {
+      if (target === -1) slideshow = false;            // reached the last photo → stop
+      else i = target;
+    }, ms);
+    return () => clearTimeout(t);
+  });
   function doDelete() {
     confirmingDelete = false;
     if (item) removeMedia([item.id]);
@@ -148,7 +188,10 @@
   // desktop too; iOS/touch stays on the existing muted-first unlock path.
   function onVolumeChange() {
     if (!videoEl) return;
-    if (!coarsePointer) desktopVolume = videoEl.volume;
+    // Persist the chosen LEVEL per device (desktop only — touch stays on muted-first
+    // autoplay and never exposes a level slider pre-tap). Saving the level can't trigger
+    // an unmuted autoplay, so iOS is unaffected.
+    if (!coarsePointer) { desktopVolume = videoEl.volume; saveVolume(videoEl.volume); }
     if (!videoEl.muted) {
       wantSound = true;
       if (!coarsePointer) desktopSoundEnabled = true;
@@ -287,6 +330,17 @@
     if (e.key === 'Escape') { if (document.fullscreenElement) return; if (showVision) { showVision = false; return; } if (showInfo) { showInfo = false; return; } close(); }
     else if (e.key === 'ArrowLeft') step(-1);
     else if (e.key === 'ArrowRight') step(1);
+    else if (e.key === ' ' || e.code === 'Space') {
+      // Space = play/pause. Skip when a control/field is focused (let it activate
+      // natively) or the vision composer is open. On an image it toggles the photo
+      // slideshow; on a video it pauses/resumes the clip.
+      const t = e.target;
+      const interactive = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'BUTTON' || t.tagName === 'A' || t.tagName === 'SELECT' || t.tagName === 'VIDEO' || t.isContentEditable);
+      if (interactive || showVision) return;
+      e.preventDefault();
+      if (isImage) { if (slideshow || hasMoreImages) toggleSlideshow(); }
+      else if (videoEl) { videoEl.paused ? videoEl.play?.().catch(() => {}) : videoEl.pause?.(); }
+    }
     else if (e.key === 'f' || e.key === 'F') toggleFs();
     else if (e.key === 'i' || e.key === 'I') showInfo = !showInfo;
     else if (e.key === 'Delete') confirmingDelete = true;
@@ -311,7 +365,12 @@
         <video bind:this={videoEl} controls={showControls} autoplay playsinline onended={onended} onvolumechange={onVolumeChange}
                style={fitStyle(item)} class="lightbox-media rounded-lg bg-[var(--media-bg)]"></video>
       {:else}
-        <img src={item.href} alt="" style={fitStyle(item)} class="lightbox-media rounded-lg" />
+        <!-- Keyed by href so each photo is its own element: the outgoing + incoming
+             images share grid cell 1/1 (see CSS) and crossfade. Honours reduced-motion. -->
+        {#key item.href}
+          <img src={item.href} alt="" decoding="async" style={fitStyle(item)} class="lightbox-media rounded-lg"
+               transition:fade={{ duration: reduceMotion ? 0 : FADE_MS }} />
+        {/key}
       {/if}
     </div>
 
@@ -350,12 +409,12 @@
       {/if}
       <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
         title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => { showInfo = !showInfo; if (showInfo) showVision = false; }}>ⓘ</button>
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {autoplayVideos ? 'text-[var(--accent)]' : ''}"
-        title={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
-        aria-label={autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here'}
-        aria-pressed={autoplayVideos}
-        disabled={!autoplayVideos && !hasPlayableVideo}
-        onclick={toggleAutoplayVideos}>▶</button>
+      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {playing ? 'text-[var(--accent)]' : ''}"
+        title={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
+        aria-label={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
+        aria-pressed={playing}
+        disabled={isImage ? (!slideshow && !hasMoreImages) : (!autoplayVideos && !hasPlayableVideo)}
+        onclick={isImage ? toggleSlideshow : toggleAutoplayVideos}>▶</button>
       <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
         title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
         <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
@@ -380,6 +439,22 @@
     <div class="lightbox-counter glass pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted transition-opacity duration-300 {counterVisible ? 'opacity-100' : 'opacity-0'}" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
       {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
+
+    <!-- Slideshow pace control (shown only while a slideshow runs). A −/＋ stepper, not a
+         number input, so iOS never pops the on-screen keyboard inside the fullscreen viewer.
+         Persisted via slideSeconds so the chosen pace sticks across sessions. -->
+    {#if slideshow && isImage}
+      <div class="slide-speed glass absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-full p-1"
+           style="bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + 2.75rem);">
+        <button class="grid h-8 w-8 place-items-center rounded-full text-lg font-bold leading-none disabled:opacity-40"
+          aria-label="Less time per photo" title="Less time per photo"
+          disabled={$slideSeconds <= 1} onclick={() => setSlideSeconds($slideSeconds - 1)}>−</button>
+        <span class="min-w-[4.5rem] text-center text-xs font-bold tabular-nums">{$slideSeconds}s / photo</span>
+        <button class="grid h-8 w-8 place-items-center rounded-full text-lg font-bold leading-none disabled:opacity-40"
+          aria-label="More time per photo" title="More time per photo"
+          disabled={$slideSeconds >= 30} onclick={() => setSlideSeconds($slideSeconds + 1)}>＋</button>
+      </div>
+    {/if}
 
     <!-- Info panel: hidden by default, slides up over the bottom when opened -->
     {#if showInfo}
@@ -464,6 +539,10 @@
 
   .lightbox-media {
     object-fit: contain;
+    /* Pin the media to a single grid cell so that, during a slideshow crossfade, the
+       outgoing and incoming <img> stack and overlap (centred by the stage's
+       place-items-center) instead of auto-flowing into two stacked rows. */
+    grid-area: 1 / 1;
   }
 
   @media (orientation: landscape) and (max-height: 520px) {

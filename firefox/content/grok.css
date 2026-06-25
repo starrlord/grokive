@@ -342,3 +342,285 @@
 .gks-toast.gks-toast-err {
   border-left-color: #f87171;
 }
+
+/* References panel — browse collections, copy an image to paste into Grok. Opens
+   anchored to the toolbar (position set inline in JS). Same dark palette. */
+.gks-refs {
+  position: fixed;
+  z-index: 2147483646; /* level with the toolbar, under the toast */
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  background: #14181d;
+  border: 1px solid #262b33;
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  color: #e6e9ee;
+  -webkit-font-smoothing: antialiased;
+}
+
+.gks-refs.gks-refs-open {
+  display: flex;
+}
+
+/* Reset inside the panel so grok.com's own CSS can't reflow it. */
+.gks-refs,
+.gks-refs * {
+  box-sizing: border-box;
+}
+
+.gks-refs-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-bottom: 1px solid #262b33;
+}
+
+.gks-refs-back {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a93a0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.gks-refs-back:hover {
+  color: #e6e9ee;
+  background: #1b2129;
+}
+
+.gks-refs-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gks-refs-x {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: #8a93a0;
+  font-family: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.gks-refs-x:hover {
+  color: #e6e9ee;
+  background: #1b2129;
+}
+
+.gks-refs-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+}
+
+.gks-refs-grid {
+  display: grid;
+  width: 100%;
+}
+
+.gks-refs-imgs {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+/* Collections are a compact vertical LIST (small cover + name + count per row) so
+   many fit at once in the narrow panel and long names truncate, never clip. */
+.gks-refs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gks-refs-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid #262b33;
+  border-radius: 10px;
+  background: #0b0d10;
+  color: #e6e9ee;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.gks-refs-row:hover {
+  background: #1b2129;
+  border-color: #3a4250;
+}
+
+.gks-refs-row-cover {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #0e1116;
+  color: #4a525e;
+  font-size: 18px;
+}
+
+.gks-refs-row-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.gks-refs-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.gks-refs-row-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #8a93a0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Image tile: square thumbnail with a "Copy" overlay on hover/focus. */
+.gks-refs-thumb {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  min-width: 0;            /* let grid tracks shrink instead of overflowing the panel */
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  user-select: none;             /* press & hold is a peek, not a text/image selection */
+  -webkit-touch-callout: none;   /* suppress the iOS long-press save-image callout */
+  border: 1px solid #262b33;
+  border-radius: 8px;
+  background: #0e1116;
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+
+.gks-refs-thumb:hover {
+  border-color: #7c6cff;
+}
+
+.gks-refs-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.gks-refs-loaded {
+  opacity: 1 !important;
+}
+
+.gks-refs-copy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(11, 13, 16, 0.55);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.gks-refs-thumb:hover .gks-refs-copy,
+.gks-refs-thumb:focus-visible .gks-refs-copy {
+  opacity: 1;
+}
+
+.gks-refs-thumb.gks-busy {
+  cursor: progress;
+}
+
+.gks-refs-thumb.gks-busy .gks-refs-copy {
+  opacity: 1;
+  animation: gks-pulse 0.9s ease-in-out infinite;
+}
+
+.gks-refs-status {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-top: 1px solid #262b33;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #8a93a0;
+  text-align: center;
+}
+
+.gks-refs-status-err {
+  color: #f87171;
+}
+
+/* Press-and-hold preview: a dim full-viewport backdrop with the image centered
+   large. pointer-events:none so the held pointer keeps talking to the tile (and a
+   release anywhere still reaches the document's pointerup handler). */
+.gks-refs-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+.gks-refs-preview.gks-refs-preview-open {
+  display: flex;
+}
+
+.gks-refs-preview-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #0e1116;
+  box-shadow: 0 16px 60px rgba(0, 0, 0, 0.6);
+}
