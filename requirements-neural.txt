@@ -1,0 +1,7 @@
+# Steady beats + REAL downbeats for Generate Movie via madmom's RNN + DBN downbeat
+# tracker (the gold-standard tracker). This is the modern fork — the 2018 madmom on
+# PyPI won't build on Python 3.11+ / NumPy 2.x; this one is a drop-in `import madmom`
+# and builds a Cython extension, so the image ships git + build-essential. CPU-only,
+# ~tens of MB (no torch / no GPU). It is BAKED into the image at build time.
+# moviegen falls back to librosa automatically if it's absent (e.g. local Python 3.10).
+git+https://github.com/imcmurray/madmom-modern.git

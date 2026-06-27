@@ -102,12 +102,40 @@ PRESETS: dict[str, dict] = {
                   # Squaring the ratio and raising the weight keeps reuse mild up to a clip's
                   # fair share, then steep past it — forcing the planner to spread across the
                   # whole library. See overuse_p in plan_cuts.
-                  "overuse_w": 1.0, "overuse_p": 2.0},
+                  "overuse_w": 1.0, "overuse_p": 2.0,
+                  # Reserve the most-cinematic clip for the strongest drop, and ramp the
+                  # held shots leading into it down to 0.35x (tension -> release). Classic/
+                  # moody never set these keys, so they + the golden tests are byte-for-byte
+                  # unchanged. See hero_shot/breakdown_slowmo in plan_cuts.
+                  "hero_shot": True, "breakdown_slowmo": 0.35},
     "moody":     {"enhanced_analysis": True,  "rhythm": "phrase",  "motion_weight": 0.0,
                   "transitions": "accents", "fill": "fit",   "push_in": 0.12, "punch": 0.0,
                   "overuse_w": W_OVERUSE, "overuse_p": 1.0},
+    # "musicvideo" (UI: "Music Video") — the high-energy PMV/velocity-edit style:
+    # cinematic's cover-framed, motion-favouring, library-spreading base PLUS sub-beat
+    # "machine-gun" cutting (onset-driven flurries in loud passages, see machine_gun in
+    # plan_cuts), harder + more frequent zoom punches, a white flash on loud downbeat
+    # cuts, and a saturated neon grade. The most intense preset.
+    "musicvideo": {"enhanced_analysis": True, "rhythm": "density", "motion_weight": W_MOTION,
+                   "transitions": "accents", "fill": "cover", "push_in": 0.06, "punch": 0.22,
+                   "overuse_w": 1.0, "overuse_p": 2.0, "scene_aware": True,
+                   "machine_gun": True, "grade": "neon", "flash": 0.05,
+                   "rgb_split": 0.006, "shake": 0.04,
+                   # The PMV slow-mo-into-the-drop + hero slam, same ramp as cinematic.
+                   # Only fires when the song has a quiet held pocket before the drop —
+                   # the machine-gunned loud sections have no slowable held shots, so on a
+                   # wall-to-wall banger it stays out of the way.
+                   "hero_shot": True, "breakdown_slowmo": 0.35},
 }
 DEFAULT_PRESET = "classic"
+
+# Named colour grades appended to the per-segment render filtergraph. CPU-only —
+# eq/colorbalance have no CUDA equivalent, so a graded segment leaves the NVENC path.
+# "neon": push saturation + contrast and lift the shadows cool/magenta — the
+# over-cooked music-video look that fuses heterogeneous clips into one world.
+GRADES: dict[str, str] = {
+    "neon": "eq=saturation=1.35:contrast=1.10:gamma=0.96,colorbalance=bs=0.06:rh=0.04",
+}
 
 # Phrase-rhythm tunables (moody preset). Calm passages hold a single shot for a
 # whole musical phrase; loud passages cut in 1- or ½-beat bursts.
@@ -122,6 +150,24 @@ MIN_TRANSITION_GAP = 3.0   # seconds
 DROP_RISE = 0.15           # smoothed per-beat energy jump that marks a "drop"
 DROP_LEVEL = 0.50          # ...and the drop beat must be at least this loud (0..1)
 
+# Music Video preset — sub-beat "machine-gun" cutting + on-beat white flash.
+MACHINE_GUN_ENERGY = 0.55   # only add sub-beat cuts where the smoothed energy is >= this
+MACHINE_GUN_MIN_BEATS = 0.5 # keep every sub-beat cut at least this many beats from any other
+FLASH_ENERGY = 0.50         # white-flash a downbeat cut only when that beat is at least this loud
+
+# Scene-cut detection (PySceneDetect's content-diff idea, computed straight off the
+# motion curve we already have — a hard cut is a sharp frame-diff spike, so no extra
+# decode pass and no OpenCV). Deliberately conservative: single-shot AI clips yield
+# none, so no spurious penalties. Used only by scene-aware presets (Music Video).
+SCENE_SPIKE_ABS = 0.62     # a cut frame's peak-normalized motion must clear this
+SCENE_SPIKE_REL = 3.5      # ...and be at least this many times the local baseline
+SCENE_LOCAL_WIN = 6        # samples each side that form the local baseline
+# Planner penalties when scene-aware (Music Video) — mugen-style segment rejection:
+# drop candidate windows that straddle an internal scene cut or are near-static.
+W_SCENE_SPAN = 0.6
+W_LOWCONTRAST = 0.5
+LOWCONTRAST_FLOOR = 0.045  # mean normalized motion below this reads as dead footage
+
 # Accent-transition tunables (cinematic preset only).
 TRANSITION_MIN = 0.30     # seconds; shorter is too quick to register as a transition
 TRANSITION_MAX = 0.70     # seconds; longer steals too much of a fast shot
@@ -131,6 +177,18 @@ _TRANSITION_SECTION = "dissolve"            # at a structural section start
 _TRANSITION_DROP = "fadeblack"              # on an energy drop / downbeat hit
 _TRANSITION_VARIANTS_SECTION = ["dissolve", "fade", "smoothleft", "smoothright"]
 _TRANSITION_VARIANTS_DROP = ["fadeblack", "fadewhite", "circleopen"]
+
+# Cinematic "breakdown" slow-motion (cinematic preset only). Real setpts slow-mo on the
+# 1-2 held shots leading INTO the strongest drop — a decel ramp, then the reserved hero
+# shot SLAMS at full speed (tension -> release). Render-time only via
+# EDLEntry.playback_speed, so the timeline still tiles exactly. Deliberately surgical so
+# it adds a single dramatic moment without draining the energetic density pacing.
+SLOWMO_MIN_SPEED = 0.3       # clamp floor for breakdown_slowmo (never crawl footage to a halt)
+SLOWMO_MAX_SHOT_SPEED = 0.7  # a slowed shot must reach at least this slow, else skip (not worth it)
+SLOWMO_MAX_ENTRIES = 2       # at most this many shots slowed (a 2-shot decel ramp into the drop)
+SLOWMO_RAMP_S = 4.5          # ...and at most this many seconds of footage, total
+SLOWMO_LOOKBACK_S = 6.0      # only slow shots within this many seconds before the drop
+SLOWMO_MIN_SRC = 0.5         # min source seconds a slowed shot pulls (floors its speed, doesn't skip)
 
 # "Let clips speak" (audio ducking). When enabled, in the song's quiet pockets we
 # hold on a clip that has a real spoken line — read from its .srt/.vtt sidecar —
@@ -185,6 +243,14 @@ class BeatGrid:
     # Transient onset times (seconds). Populated only by the enhanced analysis;
     # empty in classic mode, so anything reading this stays backward compatible.
     onsets: list[float] = field(default_factory=list)
+    # Which engine produced the beats/downbeats and the device it ran on — surfaced so
+    # a render can report whether madmom actually ran.
+    engine: str = "librosa"
+    device: str = "cpu"
+    # When madmom was requested but we fell back to librosa, WHY (exception text or
+    # "not installed"). Empty when madmom ran or wasn't requested. Threaded into the
+    # result so a silent fallback stays diagnosable after the scratch log is purged.
+    engine_note: str = ""
 
 
 @dataclass
@@ -195,6 +261,7 @@ class MotionCurve:
     fps_analyzed: float
     samples: list[float] = field(default_factory=list)  # normalized 0..1
     _prefix: list[float] = field(default_factory=list, repr=False)
+    scene_cuts: list[float] = field(default_factory=list, repr=False)  # internal shot-change times
 
     def __post_init__(self) -> None:
         # Prefix sums for O(1) window means.
@@ -203,6 +270,7 @@ class MotionCurve:
         for s in self.samples:
             acc += s
             self._prefix.append(acc)
+        self.scene_cuts = self._detect_scene_cuts()
 
     def best_window(self, length: float) -> tuple[float, float, float]:
         """Best-motion window of ``length`` seconds.
@@ -233,6 +301,32 @@ class MotionCurve:
         n = max(1, round(length * fps))
         hi = max(lo + 1, min(len(self.samples), lo + n))
         return (self._prefix[hi] - self._prefix[lo]) / (hi - lo)
+
+    def _detect_scene_cuts(self) -> list[float]:
+        """Internal shot-change times (s): sharp, isolated frame-diff spikes. Empty
+        for single-shot footage (the common case for AI clips). See SCENE_* tunables."""
+        s, fps = self.samples, self.fps_analyzed
+        n = len(s)
+        if n < 3 or fps <= 0:
+            return []
+        w = SCENE_LOCAL_WIN
+        cuts: list[float] = []
+        for i in range(1, n):
+            if s[i] < SCENE_SPIKE_ABS or s[i] < s[i - 1]:
+                continue
+            lo, hi = max(0, i - w), min(n, i + w + 1)
+            neigh = [s[j] for j in range(lo, hi) if j != i]
+            base = sum(neigh) / len(neigh) if neigh else 0.0
+            if s[i] >= SCENE_SPIKE_REL * base:
+                cuts.append(i / fps)
+        return cuts
+
+    def spans_scene_cut(self, start: float, length: float) -> bool:
+        """True if an internal scene cut falls strictly inside the rendered window
+        (so the shot would cut across a hidden shot change). 0.05s edge margin so a
+        shot that merely STARTS/ENDS on a cut doesn't count."""
+        a, b = start + 0.05, start + length - 0.05
+        return any(a < c < b for c in self.scene_cuts)
 
     def top_windows(self, length: float, k: int = 3) -> list[tuple[float, float, float]]:
         """Up to ``k`` strong, well-separated motion windows of ``length`` seconds,
@@ -282,6 +376,11 @@ class EDLEntry:
     # Set when this shot is a held "let it speak" moment: the clip's own dialogue
     # plays while the song ducks under it (see the speech helpers + _duck_and_mux).
     speak: bool = False
+    # Render-time slow-motion factor (ffmpeg setpts). 1.0 = real time; <1.0 = slow-mo.
+    # Pure render metadata — NEVER alters duration/place_at/in_point/out_point, so the
+    # clip fills the SAME timeline slot (it just consumes proportionally less source,
+    # which setpts stretches back to fill). The duration-tiling invariant stays exact.
+    playback_speed: float = 1.0
 
 
 @dataclass
@@ -339,7 +438,55 @@ def probe_duration(path: Path) -> float:
 # Stage 1 — audio analysis -> BeatGrid
 # --------------------------------------------------------------------------- #
 
-def analyze_audio(song_path: Path, *, enhanced: bool = False) -> BeatGrid:
+_MADMOM_NOTE = ""  # why the last madmom attempt fell back to librosa (for the result readout)
+
+
+def _madmom_beats(song_path: Path):
+    """Steady beats + REAL downbeats from madmom's RNN + DBN downbeat tracker
+    (madmom-modern — the Python-3.12 / NumPy-2 fork; the 2018 madmom won't build).
+    madmom is the gold-standard downbeat tracker and gives a rock-steady grid
+    (verified: ~143 BPM, inter-beat-interval CV 3%, correct bar phase) where beat_this's
+    neural model octave-locked to a jittery half-tempo (73 BPM, CV 25%) on the same
+    track — even with its DBN mode. CPU-only, ~tens of MB (no torch). Returns
+    ``(beat_times, downbeat_times, tempo, "cpu")`` or ``None`` when madmom isn't
+    installed (e.g. the local Python-3.10 venv) so the caller falls back to librosa — a
+    pure upgrade with no hard dependency.
+
+    The win over librosa: librosa has no downbeat tracker, so otherwise every preset
+    fakes downbeats as every-4th-beat; madmom gives the real bar-ones that the
+    Cinematic phrase/section structure needs.
+    """
+    global _MADMOM_NOTE
+    _MADMOM_NOTE = ""
+    import sys
+    try:
+        import statistics
+        from madmom.features.downbeats import RNNDownBeatProcessor, DBNDownBeatTrackingProcessor
+        act = RNNDownBeatProcessor()(str(song_path))                      # per-frame beat+downbeat activations
+        res = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], fps=100)(act)  # rows: [time, position-in-bar]
+        if res is None or len(res) < 2:
+            _MADMOM_NOTE = "madmom returned no beats"
+            print("[moviegen] madmom returned no beats; using librosa", file=sys.stderr)
+            return None
+        beats = [float(t) for t in res[:, 0]]
+        downbeats = [float(t) for t, pos in res if int(round(pos)) == 1]  # bar position 1 == downbeat
+        diffs = [b - a for a, b in zip(beats, beats[1:]) if b > a]
+        tempo = 60.0 / statistics.median(diffs) if diffs else 0.0
+        print(f"[moviegen] madmom beats: {len(beats)} beats / {len(downbeats)} downbeats "
+              f"@ {tempo:.0f} BPM", file=sys.stderr)
+        return beats, downbeats, tempo, "cpu"
+    except (ImportError, ModuleNotFoundError) as exc:  # not installed (e.g. local py3.10) -> expected
+        _MADMOM_NOTE = "madmom not installed"
+        print(f"[moviegen] madmom not installed ({exc}); using librosa", file=sys.stderr)
+        return None
+    except Exception as exc:  # installed but failed at runtime -> the case worth surfacing
+        _MADMOM_NOTE = f"madmom error: {type(exc).__name__}: {exc}"
+        print(f"[moviegen] madmom unavailable ({exc}); using librosa", file=sys.stderr)
+        return None
+
+
+def analyze_audio(song_path: Path, *, enhanced: bool = False,
+                  beat_engine: str = "librosa") -> BeatGrid:
     """librosa beat grid + per-beat energy + sections.
 
     ``enhanced=False`` (classic) uses ``beat_track`` with median-energy-crossing
@@ -349,8 +496,10 @@ def analyze_audio(song_path: Path, *, enhanced: bool = False) -> BeatGrid:
     envelope (tighter beats), records transient onset times, falls back to PLP
     pulse peaks when beat tracking degenerates on tempo-varying material, and
     derives real structural sections via ``librosa.segment`` instead of the
-    median heuristic. Downbeats stay every-4th-beat in both modes (true downbeat
-    tracking needs madmom and is out of scope).
+    median heuristic. Downbeats are every-4th-beat in both librosa modes; set
+    ``beat_engine="neural"`` (env ``BEAT_ENGINE``) to get REAL beats + downbeats
+    from madmom instead (see ``_madmom_beats``; it falls back to librosa when
+    madmom isn't installed or errors, recording why in ``BeatGrid.engine_note``).
     """
     import numpy as np
     import librosa
@@ -359,7 +508,23 @@ def analyze_audio(song_path: Path, *, enhanced: bool = False) -> BeatGrid:
     duration = float(len(y) / sr) if sr else 0.0
 
     onsets: list[float] = []
-    if enhanced:
+    downbeat_times: list[float] | None = None  # real downbeats (neural engine); else None
+    engine, device = "librosa", "cpu"          # which beat engine actually ran (for the readout)
+    neural = _madmom_beats(song_path) if beat_engine in ("neural", "madmom") else None
+    engine_note = _MADMOM_NOTE if (neural is None and beat_engine in ("neural", "madmom")) else ""
+    if neural is not None:
+        # Real beats + downbeats from madmom; still derive onsets + structural sections
+        # below (madmom gives neither). The neural engine always implies "enhanced".
+        beat_list, downbeat_times, tempo, device = neural
+        engine = "madmom"
+        beat_times = np.asarray(beat_list, dtype=float)
+        beat_frames = (librosa.time_to_frames(beat_times, sr=sr)
+                       if len(beat_times) else np.asarray([], dtype=int))
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
+        onsets = [float(t) for t in librosa.frames_to_time(onset_frames, sr=sr)]
+        enhanced = True
+    elif enhanced:
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         tempo, beat_frames = librosa.beat.beat_track(
             onset_envelope=onset_env, sr=sr, units="frames")
@@ -370,9 +535,10 @@ def analyze_audio(song_path: Path, *, enhanced: bool = False) -> BeatGrid:
             beat_frames = np.flatnonzero(librosa.util.localmax(pulse))
         onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
         onsets = [float(t) for t in librosa.frames_to_time(onset_frames, sr=sr)]
+        beat_times = librosa.frames_to_time(beat_frames, sr=sr)
     else:
         tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+        beat_times = librosa.frames_to_time(beat_frames, sr=sr)
     tempo = float(np.atleast_1d(tempo)[0])
 
     # Per-beat RMS energy, normalized 0..1.
@@ -393,15 +559,19 @@ def analyze_audio(song_path: Path, *, enhanced: bool = False) -> BeatGrid:
     else:
         sections = _sections_median(times, energies, duration)
 
-    # Map each beat to its section + downbeat flag.
+    # Map each beat to its section + downbeat flag. Real downbeats from the neural
+    # engine when present; otherwise the every-4th-beat 4/4 heuristic.
+    db_round = {round(d, 2) for d in downbeat_times} if downbeat_times is not None else None
     beats: list[Beat] = []
     for i, t in enumerate(times):
         sid = next((s.id for s in sections if s.start <= t < s.end), sections[-1].id)
-        beats.append(Beat(time=float(t), is_downbeat=(i % 4 == 0),
+        is_db = (round(float(t), 2) in db_round) if db_round is not None else (i % 4 == 0)
+        beats.append(Beat(time=float(t), is_downbeat=is_db,
                           energy=float(energies[i]), section_id=sid))
 
     return BeatGrid(duration=duration, tempo=tempo, beats=beats,
-                    sections=sections, onsets=onsets)
+                    sections=sections, onsets=onsets, engine=engine, device=device,
+                    engine_note=engine_note)
 
 
 def _sections_median(times: list[float], energies: list[float], duration: float) -> list[Section]:
@@ -830,6 +1000,60 @@ def _accent_times(grid: BeatGrid, T: float) -> list[tuple[float, bool]]:
     return kept
 
 
+def _hero_clip(curves: list[MotionCurve], length: float) -> str | None:
+    """The single most cinematic clip to reserve for the drop: the one whose best
+    motion window (over a ``length``-second span) has the highest mean motion.
+    Deterministic — iterates by ascending clip_id so ties resolve to the smallest id."""
+    best: str | None = None
+    best_v = -1.0
+    for c in sorted(curves, key=lambda x: int(x.clip_id)):
+        m = max((w[0] for w in c.top_windows(length, TOP_WINDOWS_K)), default=0.0)
+        if m > best_v:
+            best_v, best = m, c.clip_id
+    return best
+
+
+def _apply_breakdown_slowmo(entries: list[EDLEntry], drop: float | None,
+                            speed: float) -> None:
+    """Real slow-mo decel RAMP into ``drop`` — the held shot nearest the drop is slowed
+    the most (to ``speed``), and the shot before it eases back toward real time, so motion
+    visibly dilates into the slam (the drop entry itself stays full-speed). Mutates ONLY
+    ``playback_speed`` on existing entries, so the duration-tiling invariant is untouched.
+    Skips spoken shots (don't fight the duck), xfade-target shots, and shots too short to
+    slow without judder; bounded to stay surgical."""
+    if drop is None or len(entries) < 2:
+        return
+    speed = _clamp(speed, SLOWMO_MIN_SPEED, 1.0)
+    if speed >= 1.0:
+        return
+    h = min(range(len(entries)), key=lambda k: abs(entries[k].place_at - drop))
+    acc = 0.0
+    n = 0
+    prev = 0.0                               # previous (closer) shot's speed -> keeps the ramp monotonic
+    for k in range(h - 1, 0, -1):           # never index 0 (keep a clean pre-roll); the
+        e = entries[k]                       # drop entry h is left at 1.0x (the slam)
+        if drop - e.place_at > SLOWMO_LOOKBACK_S:
+            break                            # too far ahead of the drop to read as a ramp
+        if e.speak:
+            break                            # never override a ducked spoken line
+        if e.transition_dur > 0:
+            continue                         # leave xfade-target shots alone
+        floor = SLOWMO_MIN_SRC / e.duration  # slowest this clip's source actually allows
+        if floor > SLOWMO_MAX_SHOT_SPEED:
+            continue                         # too short to slow meaningfully -> skip
+        # Decel ramp: the nearest slowed shot (n=0) gets the full slow-down; each earlier
+        # shot eases back toward 1.0, so the deceleration builds into the drop. A short shot
+        # can't slow past its source (floor); `prev` keeps the ramp monotonic (closer=slower).
+        desired = speed + (1.0 - speed) * (n / max(1, SLOWMO_MAX_ENTRIES))
+        shot_speed = _clamp(max(desired, floor, prev), SLOWMO_MIN_SPEED, SLOWMO_MAX_SHOT_SPEED)
+        e.playback_speed = round(shot_speed, 4)
+        prev = shot_speed
+        acc += e.duration
+        n += 1
+        if acc >= SLOWMO_RAMP_S or n >= SLOWMO_MAX_ENTRIES:
+            break
+
+
 def _assign_accent_transitions(grid: BeatGrid, curves: list[MotionCurve],
                                entries: list[EDLEntry], explore: bool,
                                rng: random.Random) -> None:
@@ -881,12 +1105,124 @@ def _assign_accent_transitions(grid: BeatGrid, curves: list[MotionCurve],
         last_assigned = bt
 
 
+# --------------------------------------------------------------------------- #
+# Structural cadence (Cinematic) — follow the montage blueprint: vary the cut rate by
+# section (the golden rule — never one constant speed), phrase-align to real bar
+# downbeats (from madmom), accelerate through the build, hold the breakdown/outro.
+# The existing accent-transition + zoom-punch machinery (driven by _accent_times)
+# lands the accents on the energy drops / section changes.
+# --------------------------------------------------------------------------- #
+
+def _cadence_beats(intensity: float, tightness: float) -> int:
+    """Beats per cut for a section of the given 0..1 energy — calm sections hold for
+    bars, loud sections cut every beat. Tightness scales the whole curve."""
+    if intensity >= 0.80:
+        base = 1
+    elif intensity >= 0.62:
+        base = 2
+    elif intensity >= 0.45:
+        base = 4
+    elif intensity >= 0.30:
+        base = 8
+    else:
+        base = 16
+    return max(1, round(base * _lerp(1.8, 0.6, _clamp(tightness, 0.0, 1.0))))
+
+
+def _accel_ramp(s0: float, s1: float, beat: float,
+                start_beats: float, end_beats: float) -> list[float]:
+    """Interior cut times in [s0, s1) whose spacing shrinks geometrically from
+    ``start_beats`` to ``end_beats`` — the accelerating 'build' that loads anticipation
+    into the drop at s1. Normalised so the spacings exactly fill the span."""
+    span = s1 - s0
+    if span <= beat * end_beats * 1.5:
+        return []
+    n = max(2, int(round(span / (0.5 * (start_beats + end_beats) * beat))))
+    r = (end_beats / start_beats) ** (1.0 / max(1, n - 1))
+    lens = [start_beats * r ** i for i in range(n)]
+    scale = span / (sum(lens) * beat)
+    out: list[float] = []
+    t = s0
+    for L in lens[:-1]:
+        t += L * beat * scale
+        out.append(t)
+    return out
+
+
+def _structural_boundaries(grid: BeatGrid, beats: list, times: list[float],
+                           energies: list[float], T: float, tightness: float) -> list[float]:
+    """Section-aware cut grid for Cinematic's 'structural' rhythm (the blueprint):
+    per-section cadence from energy, phrase-snapped section starts, an accelerating
+    ramp through a build, long holds in calm/breakdown sections, a J-cut intro (first
+    picture on the first downbeat) and an L-cut outro (one held shot to the end)."""
+    beat_times = [b.time for b in beats]
+    if not beat_times:
+        return [0.0, T]
+    tempo = grid.tempo if grid.tempo and grid.tempo > 0 else 120.0
+    beat = 60.0 / tempo
+    bar = 4.0 * beat
+    downbeats = [b.time for b in beats if b.is_downbeat] or beat_times
+    first_db = downbeats[0]
+    sections = sorted(grid.sections, key=lambda s: s.start)
+
+    def snap_beat(t: float) -> float:
+        return min(beat_times, key=lambda x: abs(x - t))
+
+    def snap_phrase(t: float, phrase_bars: int = 8) -> float:
+        step = phrase_bars * bar
+        return first_db + round((t - first_db) / step) * step if step > 0 else t
+
+    bounds = [0.0]
+    n = len(sections)
+    peak_idx = max(range(n), key=lambda i: sections[i].intensity) if n else -1
+    for si, sec in enumerate(sections):
+        nxt = sections[si + 1] if si + 1 < n else None
+        s0 = 0.0 if si == 0 else _clamp(snap_phrase(sec.start), bounds[-1], T)
+        s1 = T if nxt is None else _clamp(snap_phrase(sec.end), s0, T)
+        if s1 <= s0 + 1e-3:
+            continue
+        if s0 > bounds[-1] + 1e-3:
+            bounds.append(snap_beat(s0))
+        cursor = bounds[-1]
+        # INTRO J-cut: first picture begins on the first downbeat (sound leads).
+        if si == 0 and s0 + 1e-3 < first_db < s0 + 2 * bar:
+            cb = snap_beat(first_db)
+            if cb > cursor + 1e-3:
+                bounds.append(cb)
+                cursor = cb
+        # OUTRO L-cut: a quiet, short final section holds a single shot to the end.
+        if nxt is None and si > 0 and sec.intensity <= 0.5 and (s1 - s0) <= 4 * bar:
+            continue
+        # BUILD: only the section right before the loudest one (and rising into it) gets
+        # the accelerating ramp — the single pre-drop that loads anticipation. (A looser
+        # "any rising section" rule turned calm verses into ramps.)
+        if (nxt is not None and si + 1 == peak_idx
+                and nxt.intensity - sec.intensity >= 0.10 and sec.intensity < 0.6):
+            for c in _accel_ramp(cursor, s1, beat, 4.0, 1.0):
+                cb = snap_beat(c)
+                if bounds[-1] + 1e-3 < cb < T:
+                    bounds.append(cb)
+            continue
+        # else: even cadence chosen from this section's energy.
+        cad = _cadence_beats(sec.intensity, tightness)
+        t = cursor + cad * beat
+        while t < s1 - 1e-3:
+            cb = snap_beat(t)
+            if bounds[-1] + 1e-3 < cb < T:
+                bounds.append(cb)
+            t += cad * beat
+    bounds.append(T)
+    return sorted(set(b for b in bounds if 0.0 <= b <= T))
+
+
 def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
               tightness: float, target_duration: float | None,
               seed: int | None = None, transitions: str = "none",
               rhythm: str = "density", motion_weight: float = W_MOTION,
+              machine_gun: bool = False, scene_aware: bool = False,
               overuse_w: float = W_OVERUSE, overuse_p: float = 1.0,
-              forced_speech: list[SpeechMoment] | None = None) -> EDL:
+              forced_speech: list[SpeechMoment] | None = None,
+              hero_shot: bool = False, breakdown_slowmo: float = 0.0) -> EDL:
     """Turn a beat grid + motion curves into an ordered cut list.
 
     ``rhythm="density"`` (default): cut density tracks the song's *local* energy
@@ -942,6 +1278,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     # --- boundaries ------------------------------------------------------- #
     if rhythm == "phrase":
         boundaries = _phrase_boundaries(times, energies, T, tightness)
+    elif rhythm == "structural":
+        boundaries = _structural_boundaries(grid, beats, times, energies, T, tightness)
     else:
         # density: driven by local energy (continuous build).
         boundaries = [0.0]
@@ -965,6 +1303,34 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
                 if 1e-3 < snapped < T - 1e-3:
                     boundaries.append(snapped)
     boundaries = sorted(set(boundaries))
+
+    # Sub-beat "machine-gun" cutting (Music Video). In loud passages, add cuts at
+    # transient onsets — the flurry that detonates on the drop. grid.onsets is
+    # populated only by the enhanced analysis (empty otherwise -> no-op). Each onset
+    # snaps to a half-beat candidate grid (beats + their midpoints) so a cut can land
+    # BETWEEN beats instead of collapsing onto a beat we'd already cut on; it's gated
+    # to loud beats and kept >= MACHINE_GUN_MIN_BEATS apart from every other boundary
+    # so each slot stays a few frames long (sub-frame slots drift off the invariant).
+    if machine_gun and grid.onsets:
+        bp = 60.0 / grid.tempo if grid.tempo and grid.tempo > 0 else (T / max(1, len(beats)))
+        min_sub = MACHINE_GUN_MIN_BEATS * bp
+        cand: list[float] = []
+        for j in range(len(times)):
+            cand.append(times[j])
+            if j + 1 < len(times):
+                cand.append((times[j] + times[j + 1]) / 2.0)
+        extra: list[float] = []
+        for ot in grid.onsets:
+            if not (1e-3 < ot < T - 1e-3) or energy_at(ot) < MACHINE_GUN_ENERGY:
+                continue
+            snapped = min(cand, key=lambda t: abs(t - ot)) if cand else ot
+            if not (1e-3 < snapped < T - 1e-3):
+                continue
+            if any(abs(snapped - b) < min_sub for b in boundaries) or \
+               any(abs(snapped - e) < min_sub for e in extra):
+                continue
+            extra.append(snapped)
+        boundaries = sorted(set(boundaries + extra))
 
     # "Let clips speak": carve out each chosen line as exactly one interval — add
     # its edges and drop any boundary that would split it, so a single held shot
@@ -999,6 +1365,26 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     use_count: dict[str, int] = {c.clip_id: 0 for c in curves}
     n_intervals = max(1, len(boundaries) - 1)
     max_uses = max(1, -(-n_intervals // len(curves)))  # ceil
+
+    # Cinematic-only (gated, default-off, density rhythm). Anchor BOTH features to the
+    # single strongest drop: reserve the most-cinematic clip for the drop interval, and
+    # slow the held shots leading into it. Other presets / golden tests pass neither
+    # kwarg, so hero_drop/hero_cid stay None and every block below is skipped.
+    hero_drop: float | None = None
+    hero_cid: str | None = None
+    if (hero_shot or breakdown_slowmo > 0.0) and rhythm == "density":
+        drops = [t for t, is_drop in _accent_times(grid, T) if is_drop]
+        if drops:
+            # Anchor to the biggest quiet->loud CONTRAST (a real breakdown->drop), not the
+            # loudest absolute drop: a drop deep in a loud section has a busy, fast pre-roll
+            # with no held shots to slow, whereas a drop coming out of a quiet pocket gives
+            # BOTH the slowable held shots AND the most dramatic slam.
+            def _contrast(t: float) -> float:
+                return energy_at(t) - min(energy_at(t - x) for x in (1.0, 2.0, 3.0, 4.0, 5.0))
+            hero_drop = max(drops, key=lambda t: (_contrast(t), energy_at(t), -t))
+        if hero_shot:
+            median_len = (boundaries[-1] - boundaries[0]) / max(1, len(boundaries) - 1)
+            hero_cid = _hero_clip(curves, median_len)
 
     for idx in range(len(boundaries) - 1):
         b0, b1 = boundaries[idx], boundaries[idx + 1]
@@ -1051,12 +1437,28 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
                              - W_WINDOW_FIT * window_fit
                              - recent_pen
                              - overuse_pen)
+                    if scene_aware:
+                        # mugen-style rejection: avoid dead footage and shots that
+                        # cut across a hidden internal scene change.
+                        if actual_mean < LOWCONTRAST_FLOOR:
+                            score -= W_LOWCONTRAST
+                        if c.spans_scene_cut(in_point, d):
+                            score -= W_SCENE_SPAN
                     scored.append((score, c, in_point))
 
         if not scored:  # no clip long enough; use the longest, full length
             c = max(curves, key=lambda x: x.duration)
             d = min(d, c.duration)
             scored = [(0.0, c, 0.0)]
+
+        # Hero reservation: the drop belongs to the most-cinematic clip. Restrict this
+        # interval's candidates to the hero clip's windows when it fits here (clips too
+        # short were already dropped by the length filter, so an empty result degrades
+        # cleanly to normal scoring). Its best window then wins the sort/exploration.
+        if hero_cid is not None and hero_drop is not None and b0 <= hero_drop < b1:
+            hero_cands = [s for s in scored if s[1].clip_id == hero_cid]
+            if hero_cands:
+                scored = hero_cands
 
         scored.sort(key=lambda s: s[0], reverse=True)
         if explore and len(scored) > 1:
@@ -1077,6 +1479,12 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
 
     if transitions == "accents":
         _assign_accent_transitions(grid, curves, entries, explore, rng)
+
+    # Slow-mo runs AFTER transitions are assigned (it reads each entry's transition_dur
+    # to skip xfade-target shots) and BEFORE the invariant check (it touches only
+    # playback_speed, never duration). Shares the drop anchor with the hero reservation.
+    if breakdown_slowmo > 0.0 and rhythm == "density":
+        _apply_breakdown_slowmo(entries, hero_drop, breakdown_slowmo)
 
     timeline = sum(e.duration for e in entries)
     # Invariant: durations tile the timeline (audio stays in sync after concat).
@@ -1126,11 +1534,41 @@ def _zoom_filter(zoom: tuple | None, dur: float, fps: int,
     return ""
 
 
+def _rgb_split_filter(amt: float, width: int) -> str:
+    """Static RGB channel split (chromatic aberration) as a drop accent — red and
+    blue fringe opposite ways. ``amt`` is the shift as a fraction of frame width.
+    CPU-only: rgbashift forces an RGB-plane conversion, so it leaves the GPU path."""
+    if amt <= 0:
+        return ""
+    s = max(1, round(amt * width))
+    return f"rgbashift=rh={s}:bh={-s}:edge=smear"
+
+
+def _shake_filter(amt: float, width: int, height: int) -> str:
+    """A short, decaying camera-shake rattle for a drop hit: over-scale to create
+    crop margin, then jitter the crop window with a decaying sinusoid so the kick
+    rattles the camera and settles within ~0.2s. ``amt`` is the over-scale fraction.
+    The commas inside max() are safe — they sit in single-quoted x/y values, so the
+    filtergraph parser doesn't read them as filter separators (same trick the zoom
+    clause relies on). CPU-only (no crop_cuda)."""
+    if amt <= 0:
+        return ""
+    osc = 1.0 + 2.0 * amt
+    f1, f2, decay = 16.0, 11.0, 0.18
+    return (f"scale=ceil(iw*{osc:.4f}/2)*2:ceil(ih*{osc:.4f}/2)*2,"
+            f"crop={width}:{height}:"
+            f"x='(iw-ow)/2+(iw-ow)*0.45*sin(2*PI*t*{f1})*max(0,1-t/{decay})':"
+            f"y='(ih-oh)/2+(ih-oh)*0.45*sin(2*PI*t*{f2})*max(0,1-t/{decay})'")
+
+
 def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
                     fps: int, video_encode_args: list[str], gpu: bool,
                     lead: float = 0.0, tail: float = 0.0,
                     fill: str = "fit",
-                    zoom: tuple[str, float] | None = None) -> None:
+                    zoom: tuple[str, float] | None = None,
+                    grade: str = "", flash: float = 0.0,
+                    rgb_split: float = 0.0, shake: float = 0.0,
+                    playback_speed: float = 1.0) -> None:
     """Trim + normalize one segment to a uniform W/H/fps/SAR clip (no audio).
 
     Re-encoding is mandatory: beat-aligned cut points aren't keyframes, and the
@@ -1167,8 +1605,27 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
         else:
             vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                   f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps},setsar=1")
+        if playback_speed < 1.0:
+            # Real slow-mo: stretch presentation timestamps, then the fps filter in the
+            # base chain resamples the stretched stream to constant output fps (so it's
+            # smooth, not duplicate-frame stutter). MUST precede that fps= token, so
+            # prepend it to the whole chain. `-t {dur}` below caps the OUTPUT at dur, so
+            # ffmpeg reads only dur*speed of source (always available — slow-mo pulls
+            # LESS source than a normal cut) and emits exactly dur seconds. The timeline
+            # slot length is therefore unchanged; only the footage inside it slows.
+            vf = f"setpts=PTS/{playback_speed:.4f}," + vf
         if zf:
             vf += "," + zf
+        sk = _shake_filter(shake, width, height)
+        if sk:
+            vf += "," + sk
+        rs = _rgb_split_filter(rgb_split, width)
+        if rs:
+            vf += "," + rs
+        if grade:
+            vf += "," + grade
+        if flash > 0:
+            vf += f",fade=t=in:st=0:d={flash:.4f}:color=white"
         return ["ffmpeg", "-y", "-v", "error",
                 "-ss", f"{ss:.4f}", "-i", entry.src_path, "-t", f"{dur:.4f}",
                 "-vf", vf, "-an", *video_encode_args, "-movflags", "+faststart", str(out)]
@@ -1180,9 +1637,11 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
                 "-ss", f"{ss:.4f}", "-i", entry.src_path, "-t", f"{dur:.4f}",
                 "-vf", vf, "-an", *video_encode_args, "-movflags", "+faststart", str(out)]
 
-    # zoompan is CPU-only, and cover-framing needs a CPU centre-crop — either one
-    # rules out the GPU path. Only a plain fit hard-cut shot can stay on the GPU.
-    if gpu and not zf and fill != "cover":
+    # zoompan is CPU-only, cover-framing needs a CPU centre-crop, and a grade/flash
+    # is a CPU-only filter too — any of them rules out the GPU path. Only a plain fit
+    # hard-cut shot with no extra filters can stay on the GPU.
+    if (gpu and not zf and fill != "cover" and not grade and flash <= 0
+            and shake <= 0 and rgb_split <= 0 and playback_speed >= 1.0):
         try:
             _run(_gpu_cmd(), f"render segment @ {entry.place_at:.2f}s (gpu)")
             return
@@ -1419,15 +1878,28 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     fill = cfg.get("fill", "fit")
     push_in = float(cfg.get("push_in", 0.0))
     punch = float(cfg.get("punch", 0.0))
+    machine_gun = bool(cfg.get("machine_gun", False))
+    scene_aware = bool(cfg.get("scene_aware", False))
+    grade = GRADES.get(cfg.get("grade") or "", "")
+    flash = float(cfg.get("flash", 0.0))
+    rgb_split = float(cfg.get("rgb_split", 0.0))
+    shake = float(cfg.get("shake", 0.0))
+    # madmom (RNN+DBN) is the default beat engine for EVERY preset — a steady grid +
+    # real downbeats; it falls back to librosa automatically when madmom isn't
+    # installed (e.g. the local Python 3.10 venv). BEAT_ENGINE can override ("librosa").
+    beat_engine = (options.get("beat_engine") or os.environ.get("BEAT_ENGINE") or "neural")
     # "Let clips speak" is preset-independent: a checkbox + how many moments.
     let_speak = bool(options.get("let_clips_speak"))
     speak_moments = options.get("speak_moments", "auto")
 
     # 1. audio --------------------------------------------------------------- #
     progress("analyzing_audio", _overall("analyzing_audio", 0.0), 0.0, "Analyzing audio…")
-    grid = analyze_audio(song_path, enhanced=enhanced)
+    grid = analyze_audio(song_path, enhanced=enhanced, beat_engine=beat_engine)
+    eng = grid.engine + (f"/{grid.device}" if grid.engine != "librosa" else "")
+    if grid.engine_note:
+        eng += f" ({grid.engine_note})"   # e.g. "librosa (madmom error: …)" — never a silent drop
     progress("analyzing_audio", _overall("analyzing_audio", 1.0), 1.0,
-             f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM")
+             f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM · {eng}")
 
     # 2. motion (the slow stage — surface per-clip progress) ----------------- #
     curves: list[MotionCurve] = []
@@ -1472,10 +1944,13 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     progress("planning", _overall("planning", 0.0), 0.0, "Planning cuts…")
     edl = plan_cuts(grid, curves, tightness=tightness, target_duration=target,
                     seed=seed, transitions=transitions, rhythm=rhythm,
-                    motion_weight=motion_weight,
+                    motion_weight=motion_weight, machine_gun=machine_gun,
+                    scene_aware=scene_aware,
                     overuse_w=float(cfg.get("overuse_w", W_OVERUSE)),
                     overuse_p=float(cfg.get("overuse_p", 1.0)),
-                    forced_speech=forced_speech)
+                    forced_speech=forced_speech,
+                    hero_shot=bool(cfg.get("hero_shot", False)),
+                    breakdown_slowmo=float(cfg.get("breakdown_slowmo", 0.0)))
     (work_dir / "edl.json").write_text(edl.to_json(), encoding="utf-8")
     n_trans = sum(1 for e in edl.entries if e.transition_dur > 0)
     n_speak = sum(1 for e in edl.entries if e.speak)
@@ -1492,10 +1967,16 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     # either side of the join, so the overlaps net out to the planned timeline.
     # Drop beats (energy hits) get a centred zoom punch; resolve them once so the
     # render loop can match each shot's place_at against them.
+    want_drop_fx = punch > 0 or rgb_split > 0 or shake > 0
     drop_times = ([t for t, is_drop in _accent_times(grid, edl.timeline_duration) if is_drop]
-                  if punch > 0 else [])
+                  if want_drop_fx else [])
     beat_period = 60.0 / grid.tempo if grid.tempo and grid.tempo > 0 else 0.5
     drop_tol = max(0.5 * beat_period, 0.15)
+    # White flash on loud downbeat cuts (Music Video). Sparse by construction — only
+    # every 4th beat, and only where that beat is loud — so it reads as an on-beat
+    # strobe through the drops, not a seizure-inducing every-cut flicker.
+    flash_times = ([b.time for b in grid.beats if b.is_downbeat and b.energy >= FLASH_ENERGY]
+                   if flash > 0 else [])
     n = len(edl.entries)
     segments: list[Path] = []
     durations: list[float] = []
@@ -1512,15 +1993,25 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         # held shot gets a slow push-in so it breathes; everything else stays
         # locked off. The punch wins when a held shot also happens to be a drop.
         zoom = None
-        on_drop = punch > 0 and any(abs(entry.place_at - dt) <= drop_tol for dt in drop_times)
-        if on_drop and entry.duration >= 0.4:
+        on_drop = bool(drop_times) and any(abs(entry.place_at - dt) <= drop_tol for dt in drop_times)
+        big_drop = on_drop and entry.duration >= 0.4
+        if big_drop and punch > 0:
             zoom = ("punch", punch)
         elif push_in > 0 and entry.duration >= HELD_MIN_S:
             zoom = ("push_in", push_in)
+        seg_flash = (flash if flash > 0 and entry.duration >= 0.2
+                     and any(abs(entry.place_at - ft) <= drop_tol for ft in flash_times)
+                     else 0.0)
+        # Stacked drop accents — punch + chroma split + shake detonate together on
+        # the hit (the signature combo); held/quiet shots stay clean.
+        seg_rgb = rgb_split if big_drop else 0.0
+        seg_shake = shake if big_drop else 0.0
         seg = work_dir / f"seg_{i:04d}.mp4"
         _render_segment(entry, seg, width=width, height=height, fps=fps,
                         video_encode_args=video_encode_args, gpu=hwaccel_decode,
-                        lead=lead, tail=tail, fill=fill, zoom=zoom)
+                        lead=lead, tail=tail, fill=fill, zoom=zoom,
+                        grade=grade, flash=seg_flash, rgb_split=seg_rgb, shake=seg_shake,
+                        playback_speed=entry.playback_speed)
         segments.append(seg)
         # Use the segment's *actual* rendered length, not the nominal target:
         # frame-rounding makes each clip a few ms short, and across a run that
@@ -1576,6 +2067,8 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         "duration": round(actual if actual > 0 else edl.timeline_duration, 3),
         "size_bytes": size, "cuts": len(edl.entries), "seed": seed,
         "preset": preset, "transitions": n_trans, "spoken": len(duck_windows),
+        "beat_engine": grid.engine, "beat_device": grid.device,
+        "beat_engine_note": grid.engine_note,
     }
 
 

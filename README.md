@@ -176,6 +176,7 @@ building on the server needed.
 | `XAI_VIDEO_MODEL` | `grok-imagine-video` | Grok Imagine video-generation model. Overrides the value saved in **Config**. |
 | `IMAGINE_VIDEO_CONCURRENCY` | `5` | Max Grok Imagine **videos** rendering at once across all workspaces (each workspace is still one-at-a-time). |
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
+| `BEAT_ENGINE` | `neural` | Beat detector for Beat Montage. Default uses **madmom** (steady beats + **real downbeats**, built into the image, CPU-only). Set `librosa` to use the simpler librosa tracker. See *Song Beat Montage → Beat & downbeat detection*. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
 Log out from **Config → Account**. Your Grok cURL cookies expire periodically — when a
@@ -371,13 +372,19 @@ montages render exactly as before.
 
 - **Classic** — punchy **hard cuts** on the beat, with cut density driven by the song's
   energy. The original style; the entire render stays on the GPU.
-- **Cinematic** — richer music analysis (onset-tightened beats, PLP for tempo-varying
-  tracks, and real structural sections), plus tasteful **beat-timed transitions** (a
-  dissolve at section changes, a fade-to-black on drops) and a subtle **on-beat zoom
-  punch** on each cut. Hard cuts stay the default; transitions only punctuate.
+- **Cinematic** — energetic, punchy cutting whose **density tracks the song's energy**
+  (more cuts as it gets louder, accelerating into the choruses), on **madmom's steady
+  beat grid** with real downbeats. Plus beat-timed **transitions** (dissolve at section
+  changes, fade-to-black on drops) and an on-beat **zoom punch**. Cover-framed (no bars).
 - **Moody** — long **held shots** with a slow **push-in** (Ken Burns), punctuated by quick
   **beat-bursts** where the song gets loud, plus a calmer footage bias so shots breathe.
   Looks best **vertical (9:16)**.
+- **Music Video** — maximum-energy edit. On top of Cinematic's analysis and edge-to-edge
+  (no-bars) framing it adds **machine-gun sub-beat cutting** that flurries on the drops,
+  hard **zoom-punches**, **RGB-split + camera-shake** hits, a **white flash** on the loud
+  beats, and a saturated **neon grade**. It's also **scene-aware** — it avoids cutting
+  across a hidden shot change inside a source clip. Highest impact, busiest look; pairs
+  best with fast, drop-driven tracks. Looks best **vertical (9:16)**.
 
 ### How it picks and cuts
 
@@ -413,11 +420,22 @@ Needs `ffmpeg` on the server (already required) plus **`librosa`** for audio ana
 (included in `requirements-server.txt` and the Docker image). With an NVIDIA GPU and
 [NVENC](#gpu-video-encoding-nvidia-nvenc) available, the **Classic** render — decode,
 scale, pad, and encode — stays entirely on the GPU, so a multi-minute montage renders in
-seconds; without a GPU it falls back to CPU encoding. The **Cinematic** and **Moody**
-per-shot zoom (push-in / on-beat punch) uses a CPU-only filter, so those shots render on
-the CPU while the final encode still uses NVENC when available. Like exports, the job runs server-side before the
+seconds; without a GPU it falls back to CPU encoding. The **Cinematic**, **Moody**, and
+**Music Video** per-shot effects (zoom push-in / on-beat punch — plus, for Music Video,
+the flash, RGB-split, shake, and grade) use CPU-only filters, so those shots render on the
+CPU while the final encode still uses NVENC when available. Like exports, the job runs server-side before the
 result is ready, so the [reverse-proxy timeout guidance above](#reverse-proxy-timeouts-for-large-exports)
 applies. One montage renders at a time.
+
+### Beat & downbeat detection
+
+Generate Movie's beat grid comes from **madmom**'s RNN+DBN downbeat tracker — a steady,
+correct-tempo grid plus **real downbeats** (true bar-ones). The downbeats are what let the
+**Cinematic** style follow a song's section structure (slow intro → accelerating build →
+fast chorus → calmer outro) instead of an every-4th-beat guess. It's small, **CPU-only,
+and built into the image** — no GPU, no config, no first-run download. If madmom isn't
+available (e.g. a from-source run on Python 3.10) it falls back to librosa automatically;
+force the simpler tracker with `BEAT_ENGINE=librosa`.
 
 ## Prompt Studio
 

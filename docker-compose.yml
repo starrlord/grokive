@@ -27,6 +27,9 @@ services:
       # - TRUST_PROXY=true
       # Optional: whisper-asr-webservice endpoint to enable subtitle generation:
       # - WHISPER_SERVER_URL=http://192.168.1.10:9000/asr
+      # Generate Movie's beat detector (madmom — steady beats + real downbeats) is built
+      # into the image, CPU-only, no config. Force the simpler tracker with:
+      # - BEAT_ENGINE=librosa
       # Optional: Prompt Studio AI engine — point at an Ollama / OpenAI-compatible
       # server's /v1 base, OpenAI, or OpenRouter. Unset = the offline composer works.
       # - EMBED_SERVER_URL=http://192.168.1.10:11434/v1   # embeddings (more-like-this + themes)

@@ -29,7 +29,8 @@
   const PRESETS = [
     { id: 'classic', label: 'Classic', help: 'Punchy hard cuts on the beat — the original style.' },
     { id: 'cinematic', label: 'Cinematic', help: 'Smarter analysis, full-frame framing (no black bars), beat-timed transitions at section changes/drops, a gentle push-in that lets shots breathe, and a zoom punch on the drops.' },
-    { id: 'moody', label: 'Moody', help: 'Long held shots with a slow push-in, punctuated by quick beat bursts on the loud parts. Calmer footage.' }
+    { id: 'moody', label: 'Moody', help: 'Long held shots with a slow push-in, punctuated by quick beat bursts on the loud parts. Calmer footage.' },
+    { id: 'musicvideo', label: 'Music Video', help: 'Maximum-energy beat edit: machine-gun sub-beat cutting that flurries on the drops, hard zoom-punches, RGB-split + camera-shake hits, white-flash strobes on the loud beats, and a saturated neon grade. Scene-aware cuts, edge-to-edge.' }
   ];
 
   let song = $state(null);
@@ -44,6 +45,11 @@
   let targetDuration = $state('');
   let name = $state('movie');
   let dragging = $state(false);
+  // Style/tightness info popovers — hover on desktop, tap on mobile. Kept as an
+  // absolutely-positioned overlay so the (long) description adds no height; the
+  // inline version used to push the panel into scrolling once Music Video landed.
+  let showStyleInfo = $state(false);
+  let showTightInfo = $state(false);
 
   let starting = $state(false);
   let startError = $state(''); // error from the kickoff POST (shown in-panel)
@@ -211,7 +217,7 @@
         aria-label="Close" onclick={close}>✕</button>
     </header>
 
-    <div class="min-h-0 flex-1 overflow-y-auto p-5">
+    <div class="min-h-0 flex-1 overflow-y-auto p-4">
       {#if done}
         <!-- Result -->
         <div class="space-y-4">
@@ -220,7 +226,7 @@
           <video class="mx-auto block max-h-[55dvh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
           <p class="text-sm text-muted">
             {job.result.cuts} cuts · {job.result.width}×{job.result.height} · {job.result.fps} fps · {job.result.duration}s
-            · {(job.result.size_bytes / 1048576).toFixed(1)} MB
+            · {(job.result.size_bytes / 1048576).toFixed(1)} MB{#if job.result.beat_engine} · {job.result.beat_engine === 'madmom' ? `madmom beats (${job.result.beat_device})` : `librosa beats${job.result.beat_engine_note ? ` — ${job.result.beat_engine_note}` : ''}`}{/if}
           </p>
           <div class="flex flex-wrap gap-2">
             <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-[var(--on-accent)]" href={movieResultUrl(true, job.job_id)} download={job.result.filename}>⇩ Download MP4</a>
@@ -253,7 +259,7 @@
         </div>
       {:else}
         <!-- Setup -->
-        <div class="space-y-5">
+        <div class="space-y-3">
           {#if startError}
             <p class="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink-soft)]">{startError}</p>
           {:else if errored}
@@ -263,7 +269,7 @@
           <!-- Song -->
           <div>
             <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Song</div>
-            <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-5 text-sm transition {dragging ? 'border-[var(--accent)] bg-[var(--accent)]/5' : 'border-line'}"
+            <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-3.5 text-sm transition {dragging ? 'border-[var(--accent)] bg-[var(--accent)]/5' : 'border-line'}"
               ondragover={(e) => { e.preventDefault(); dragging = true; }}
               ondragleave={() => (dragging = false)}
               ondrop={onDrop}>
@@ -283,15 +289,24 @@
 
           <!-- Style preset -->
           <div>
-            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Style</div>
-            <div class="grid grid-cols-3 gap-1.5">
+            <div class="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-muted">
+              <span>Style</span>
+              <!-- Info as a hover (desktop) / tap (mobile) overlay so the preset
+                   description doesn't add height and scroll the panel. -->
+              <span class="group relative inline-flex">
+                <button type="button" aria-label="About this style" aria-expanded={showStyleInfo}
+                  onclick={() => (showStyleInfo = !showStyleInfo)}
+                  class="grid h-4 w-4 place-items-center rounded-full border border-current text-[10px] font-bold opacity-70 transition hover:opacity-100 pointer-coarse:h-5 pointer-coarse:w-5">i</button>
+                <span class="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-64 max-w-[80vw] rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 text-[11px] font-normal normal-case leading-relaxed text-muted shadow-lg transition {showStyleInfo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}">{PRESETS.find((p) => p.id === preset)?.help}</span>
+              </span>
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
               {#each PRESETS as p (p.id)}
                 <button type="button" title={p.help}
-                  class="rounded-lg border px-3 py-2 text-sm font-semibold transition {preset === p.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                  class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {preset === p.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                   onclick={() => (preset = p.id)}>{p.label}</button>
               {/each}
             </div>
-            <p class="mt-2 text-xs leading-relaxed text-muted">{PRESETS.find((p) => p.id === preset)?.help}</p>
           </div>
 
           <!-- Tightness -->
@@ -299,13 +314,18 @@
             <div class="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
               <span class="inline-flex items-center gap-1">
                 Cut tightness
-                <span class="grid h-4 w-4 cursor-help place-items-center rounded-full border border-current text-[10px] font-bold opacity-70" title={TIGHTNESS_TIP}>?</span>
+                <!-- Hover (desktop) / tap (mobile) overlay — keeps the description out of the layout. -->
+                <span class="group relative inline-flex">
+                  <button type="button" aria-label="About cut tightness" aria-expanded={showTightInfo}
+                    onclick={() => (showTightInfo = !showTightInfo)}
+                    class="grid h-4 w-4 place-items-center rounded-full border border-current text-[10px] font-bold opacity-70 transition hover:opacity-100 pointer-coarse:h-5 pointer-coarse:w-5">?</button>
+                  <span class="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-64 max-w-[80vw] rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 text-[11px] font-normal normal-case leading-relaxed text-muted shadow-lg transition {showTightInfo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}">{tightnessHelp}</span>
+                </span>
               </span>
-              <span class="normal-case text-[var(--accent)]" title={tightnessHelp}>{tightnessLabel}</span>
+              <span class="normal-case text-[var(--accent)]">{tightnessLabel}</span>
             </div>
             <input type="range" min="0" max="1" step="0.05" bind:value={tightness} class="w-full accent-[var(--accent)]" title={TIGHTNESS_TIP} />
-            <div class="mb-1 flex justify-between text-[11px] text-muted"><span>Relaxed</span><span>Tight</span></div>
-            <p class="text-xs leading-relaxed text-muted">{tightnessHelp}</p>
+            <div class="flex justify-between text-[11px] text-muted"><span>Relaxed</span><span>Tight</span></div>
           </div>
 
           <!-- Let clips speak (audio ducking) -->
@@ -315,10 +335,8 @@
                 class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
               <span>
                 <span class="block text-sm font-semibold">Let clips speak</span>
-                <span class="mt-1 block text-xs leading-relaxed text-muted">
-                  In the song's quiet stretches, hold on a clip that has dialogue and dip the
-                  music so a full line comes through, then pick the beat back up. Only uses clips
-                  that already have subtitles (.srt/.vtt); clips without speech are skipped.
+                <span class="mt-0.5 block text-[11px] leading-snug text-muted">
+                  In quiet stretches, hold on a clip with dialogue and dip the music so the line comes through. Only clips with subtitles (.srt/.vtt).
                 </span>
               </span>
             </label>
@@ -340,14 +358,14 @@
               <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Aspect / resolution</div>
               <div class="grid grid-cols-2 gap-1.5">
                 {#each RES as r (r.id)}
-                  <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {resId === r.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                  <button type="button" class="rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition {resId === r.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                     onclick={() => (resId = r.id)}>{r.label}</button>
                 {/each}
               </div>
-              <p class="mt-2 text-xs leading-relaxed text-muted">
+              <p class="mt-1.5 text-[11px] leading-snug text-muted">
                 {resId === 'auto'
-                  ? 'Matches the largest selected clip so nothing gets cropped to a mismatched frame.'
-                  : 'Fixed frame — clips of a different shape are cropped (Cinematic) or letterboxed (Classic/Moody).'}
+                  ? 'Matches the largest clip — no cropping.'
+                  : 'Fixed frame — off-shape clips are cropped or letterboxed.'}
               </p>
             </div>
             <div class="space-y-4">
@@ -355,7 +373,7 @@
                 <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Frame rate</div>
                 <div class="grid grid-cols-3 gap-1.5">
                   {#each [24, 30, 60] as f (f)}
-                    <button type="button" class="rounded-lg border px-2.5 py-2 text-xs font-semibold transition {fps === f ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                    <button type="button" class="rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition {fps === f ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                       onclick={() => (fps = f)}>{f}</button>
                   {/each}
                 </div>

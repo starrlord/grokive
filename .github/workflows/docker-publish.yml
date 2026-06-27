@@ -54,6 +54,10 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # Lean, multi-arch image. The GPU neural beat engine (CUDA torch, ~5GB) is
+          # NOT baked in — it's provisioned at runtime into the data volume on first
+          # boot when NEURAL=1 (see provision-neural.sh). So CI just builds the lean
+          # image; moviegen falls back to librosa when neural isn't provisioned.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

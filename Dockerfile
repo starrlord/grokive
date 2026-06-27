@@ -17,15 +17,23 @@ FROM python:3.12-slim
 
 # ffmpeg = video thumbnails / merge / burn; gosu = drop to PUID/PGID for Unraid-friendly file ownership;
 # fonts-dejavu-core = TrueType families (Sans/Serif/Mono) libass resolves for burned-in subtitle styling
-# (slim base ships no fonts, and --no-install-recommends skips ffmpeg's suggested font packages).
+# (slim base ships no fonts, and --no-install-recommends skips ffmpeg's suggested font packages);
+# git + build-essential = build madmom-modern's Cython extension at neural-provision time (the DBN
+# that steadies beat_this's grid for Generate Movie; only exercised when NEURAL=1 provisions).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg gosu fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends ffmpeg gosu fonts-dejavu-core git build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt requirements-server.txt ./
+COPY requirements.txt requirements-server.txt requirements-neural.txt ./
 RUN pip install --no-cache-dir -r requirements-server.txt
+
+# Steady beats + real downbeats for Generate Movie via madmom (the madmom-modern fork).
+# It's small (~tens of MB, CPU-only — no torch), so it's BAKED into the image at build
+# time (builds a Cython extension using the git + build-essential installed above)
+# instead of provisioned at runtime. moviegen falls back to librosa if it's ever removed.
+RUN pip install --no-cache-dir -r requirements-neural.txt
 
 COPY *.py ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

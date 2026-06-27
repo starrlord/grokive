@@ -54,6 +54,21 @@ def _ramp_grid(n_beats: int, spacing: float) -> m.BeatGrid:
                       sections=[m.Section(0, 0.0, dur, 0.5)])
 
 
+def _drop_grid(n_beats: int = 32, spacing: float = 0.5) -> m.BeatGrid:
+    """A quiet first half then a loud second half — a single clear _accent_times drop
+    at the midpoint, with long held shots in the calm pre-drop section (so the cinematic
+    breakdown slow-mo has somewhere to land)."""
+    dur = n_beats * spacing
+    half = n_beats // 2
+    beats = [m.Beat(time=i * spacing, is_downbeat=(i % 4 == 0),
+                    energy=(0.08 if i < half else 0.9),
+                    section_id=(0 if i < half else 1))
+             for i in range(n_beats)]
+    secs = [m.Section(0, 0.0, half * spacing, 0.12),
+            m.Section(1, half * spacing, dur, 0.9)]
+    return m.BeatGrid(duration=dur, tempo=120.0, beats=beats, sections=secs)
+
+
 def test_tiling_invariant():
     grid = _grid(16, 0.5)
     curves = [_curve("a", 5.0, 1.0), _curve("b", 5.0, 2.0), _curve("c", 5.0, 3.0)]
@@ -355,6 +370,80 @@ def test_no_forced_speech_leaves_edl_unchanged():
     print("  no-speech: empty forced_speech is a no-op OK")
 
 
+def test_default_path_has_no_slowmo():
+    # The cinematic breakdown features are opt-in: without the kwargs (every other
+    # preset + all the golden tests above), no entry is ever slowed.
+    grid = _grid(16, 0.5)
+    curves = [_curve("a", 5.0, 1.0), _curve("b", 5.0, 2.0), _curve("c", 5.0, 3.0)]
+    edl = m.plan_cuts(grid, curves, tightness=0.7, target_duration=None)
+    assert all(e.playback_speed == 1.0 for e in edl.entries), \
+        [e.playback_speed for e in edl.entries]
+    print("  default-off: every entry plays at 1.0x (other presets unchanged) OK")
+
+
+def test_cinematic_breakdown_slowmo_preserves_invariant():
+    grid = _drop_grid()
+    # Three calm clips + one clearly-most-cinematic clip ("3", sustained high motion).
+    curves = [_curve_samples(str(i), 16.0, [0.1] * 128) for i in range(3)]
+    curves.append(_curve_samples("3", 16.0, [0.9] * 128))
+    edl = m.plan_cuts(grid, curves, tightness=0.15, target_duration=None,
+                      transitions="accents", breakdown_slowmo=0.5, hero_shot=True)
+    # Tiling is untouched by slow-mo (playback_speed enters no sum).
+    total = sum(e.duration for e in edl.entries)
+    assert abs(total - grid.duration) < 0.05, (total, grid.duration)
+    for prev, nxt in zip(edl.entries, edl.entries[1:]):
+        assert abs((prev.place_at + prev.duration) - nxt.place_at) < 1e-3
+    # Slow-mo fired, stayed surgical, and every slowed shot is valid.
+    slow = [e for e in edl.entries if e.playback_speed < 1.0]
+    assert 1 <= len(slow) <= m.SLOWMO_MAX_ENTRIES, [e.playback_speed for e in edl.entries]
+    assert all(m.SLOWMO_MIN_SPEED <= e.playback_speed < 1.0 for e in slow)
+    assert all(e.transition_dur == 0.0 and not e.speak for e in slow)
+    # The slowed shots lead INTO the drop; the drop entry itself slams at full speed.
+    drop = grid.duration / 2.0  # _drop_grid's quiet->loud breakdown is at the midpoint
+    h = min(range(len(edl.entries)), key=lambda k: abs(edl.entries[k].place_at - drop))
+    assert edl.entries[h].playback_speed == 1.0
+    assert all(e.place_at < edl.entries[h].place_at for e in slow)
+    # Decel ramp: shots nearer the drop are slowed at least as hard as earlier ones.
+    sl = sorted(slow, key=lambda e: e.place_at)
+    for earlier, later in zip(sl, sl[1:]):
+        assert later.playback_speed <= earlier.playback_speed + 1e-9, [s.playback_speed for s in sl]
+    print(f"  cinematic slow-mo: {len(slow)} shot(s) ramped into the drop "
+          f"(speeds {[s.playback_speed for s in sl]}), tiles {total:.2f}s OK")
+
+
+def test_cinematic_hero_and_slowmo_deterministic():
+    grid = _drop_grid()
+    curves = [_curve_samples(str(i), 16.0, [0.1] * 128) for i in range(3)]
+    curves.append(_curve_samples("3", 16.0, [0.9] * 128))
+    kw = dict(tightness=0.15, target_duration=None, transitions="accents",
+              breakdown_slowmo=0.5, hero_shot=True)
+    a = m.plan_cuts(grid, curves, **kw)
+    b = m.plan_cuts(grid, curves, **kw)
+    seq = lambda edl: [(e.clip_id, e.in_point, e.place_at, e.playback_speed,
+                        e.transition_dur) for e in edl.entries]
+    assert seq(a) == seq(b), "seed=None must be fully deterministic incl. playback_speed"
+    # The reserved hero clip ("3") lands on the strongest drop interval.
+    median_len = (grid.duration) / max(1, len(a.entries))
+    hero = m._hero_clip(curves, median_len)
+    assert hero == "3", hero
+    drop = grid.duration / 2.0
+    h = min(range(len(a.entries)), key=lambda k: abs(a.entries[k].place_at - drop))
+    assert a.entries[h].clip_id == "3", (a.entries[h].clip_id, drop)
+    print("  cinematic hero+slow-mo: deterministic, hero clip reserved for the drop OK")
+
+
+def test_breakdown_presets_configured():
+    # Slow-mo + hero live on cinematic AND music video; classic/moody stay pure.
+    for p in ("cinematic", "musicvideo"):
+        cfg = m.PRESETS[p]
+        assert cfg.get("hero_shot") is True, p
+        assert m.SLOWMO_MIN_SPEED <= cfg.get("breakdown_slowmo", 0.0) < 1.0, p
+    for p in ("classic", "moody"):
+        assert "breakdown_slowmo" not in m.PRESETS[p], p
+        assert "hero_shot" not in m.PRESETS[p], p
+    print("  presets: slow-mo on cinematic+musicvideo, off classic/moody OK")
+
+
 if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
@@ -376,4 +465,8 @@ if __name__ == "__main__":
     test_speech_moment_in_quiet_pocket()
     test_forced_speech_owns_interval_and_tiles()
     test_no_forced_speech_leaves_edl_unchanged()
+    test_default_path_has_no_slowmo()
+    test_cinematic_breakdown_slowmo_preserves_invariant()
+    test_cinematic_hero_and_slowmo_deterministic()
+    test_breakdown_presets_configured()
     print("all passed")
