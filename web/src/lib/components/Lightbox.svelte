@@ -1,5 +1,7 @@
 <script module>
   import { loadVolume, saveVolume } from '$lib/state.js';
+  // Beat-montage preset id -> human label, shown in the info panel for montages.
+  const STYLE_LABELS = { classic: 'Classic', cinematic: 'Cinematic', moody: 'Moody', musicvideo: 'Music Video' };
   // One AudioContext shared across all lightbox opens — browsers cap how many you
   // can create. Routing the <video> through a context that's resumed inside a user
   // gesture makes the *context* the authorized audio output, so every subsequent
@@ -470,6 +472,7 @@
             item.media_w && item.media_h ? `${item.media_w}×${item.media_h}` : null,
             fmtSize(item.size_bytes),
             item.model,
+            item.preset ? (STYLE_LABELS[item.preset] || item.preset) : null,
             (item.created_at || '').slice(0, 10),
             (item.href || '').split('/').pop()
           ].filter(Boolean).join('  ·  ')}

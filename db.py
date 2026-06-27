@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS media (
   media_h           INTEGER,
   has_subtitles     INTEGER DEFAULT 0,
   size_bytes        INTEGER,
-  api_generated     INTEGER DEFAULT 0
+  api_generated     INTEGER DEFAULT 0,
+  preset            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at);
 CREATE INDEX IF NOT EXISTS idx_media_type    ON media(media_type);
@@ -74,7 +75,7 @@ MEDIA_COLUMNS = [
     "id", "media_type", "prompt", "normalized_prompt", "model", "created_at",
     "parent_id", "source_url", "local_path", "href", "thumb", "subtitles",
     "canvas_id", "canvas_name", "thumb_w", "thumb_h", "media_w", "media_h",
-    "has_subtitles", "size_bytes", "api_generated",
+    "has_subtitles", "size_bytes", "api_generated", "preset",
 ]
 
 
@@ -177,6 +178,12 @@ def build_index(
             conn.execute("ALTER TABLE media ADD COLUMN api_generated INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # already present
+        # Beat-montage style (preset id, e.g. "musicvideo") — provenance surfaced in the
+        # lightbox info panel. NULL for everything that isn't a montage.
+        try:
+            conn.execute("ALTER TABLE media ADD COLUMN preset TEXT")
+        except sqlite3.OperationalError:
+            pass  # already present
         # Carry probed dimensions forward from the previous build so we only ffprobe
         # each video once (not on every startup/sync rebuild).
         try:
@@ -242,6 +249,7 @@ def build_index(
                 item.get("canvas_id"), item.get("canvas_name"), tw, th, mw, mh,
                 1 if subtitles else 0, size_bytes,
                 1 if item.get("api_generated") else 0,
+                item.get("preset"),
             ))
             for tag in tags:
                 tag_rows.append((mid, tag))
