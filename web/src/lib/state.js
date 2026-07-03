@@ -391,6 +391,38 @@ export function clearBasket() {
   basket.set([]);
 }
 
+// Montage mode — 'video' (default) or 'picture-video'. Governs whether STILL IMAGES may
+// enter the basket and be rendered as beats. picture-video maps to the `picvideo` preset
+// (Music-Video style with letterboxed Ken-Burns stills); every other mode/preset stays
+// strictly video-only. localStorage-backed like `basket` so it survives navigation while
+// you gather sources. Default 'video' keeps every existing montage flow unchanged.
+export const montageMode = writable(LS('montageMode', 'video'));
+montageMode.subscribe((m) => persist('montageMode', m));
+export const isPictureVideo = () => get(montageMode) === 'picture-video';
+// Queue (or unqueue) a still image for montage. ADDING an image also flips montage mode to
+// picture-video — images are only rendered as beats in that mode, and adding one is the
+// natural, discoverable way to enter it (the basket chip's toggle is a manual override).
+export function queueImageForMontage(id) {
+  const s = String(id);
+  const adding = !get(basket).includes(s);
+  toggleBasket(s);
+  if (adding) montageMode.set('picture-video');
+}
+// Shared media-type gate for montage sources at LAUNCH/DISPLAY time, given the current
+// mode: videos always; images only in picture-video mode. Always excludes prior montages
+// so a beat-montage can't be fed back into one.
+export function isMontageSource(item, mode) {
+  if (!item || item.model === 'Beat Montage') return false;
+  if (item.media_type === 'video') return true;
+  return mode === 'picture-video' && item.media_type === 'image';
+}
+// Whether an item can be QUEUED as a montage source, independent of the current mode:
+// videos and still images (never other montages). Queuing an image ENTERS picture-video
+// mode (see queueImageForMontage / enqueueForMontage) — that's the discoverable way in,
+// so the queue buttons must never disable just because the mode is still 'video'.
+export const isMontageQueueable = (item) =>
+  !!item && item.model !== 'Beat Montage' && (item.media_type === 'video' || item.media_type === 'image');
+
 // --- Playlists --------------------------------------------------------------
 export const playlists = writable([]);
 const rid = () => 'pl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);

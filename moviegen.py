@@ -126,6 +126,22 @@ PRESETS: dict[str, dict] = {
                    # the machine-gunned loud sections have no slowable held shots, so on a
                    # wall-to-wall banger it stays out of the way.
                    "hero_shot": True, "breakdown_slowmo": 0.35},
+    # "picvideo" (UI: "Picture & Video") — the Music Video style, but STILL IMAGES may
+    # ride along as beats (looped into their slot with a Ken-Burns push at render time).
+    # Mirrors "musicvideo" EXCEPT two keys: `allow_stills` opens the gate for images (the
+    # server resolver and the ingest branch both key off it — no other preset sets it, so
+    # every other mode stays strictly video-only and the golden planner tests are
+    # unaffected), and `motion_weight` drops to 0 so a motionless still competes evenly
+    # with real footage for every slot instead of being starved of the high-energy ones.
+    # Stills are letterboxed (the render forces fill="fit" for an image regardless of the
+    # "cover" here) so a portrait photo keeps its whole frame.
+    "picvideo":  {"enhanced_analysis": True, "rhythm": "density", "motion_weight": 0.0,
+                  "transitions": "accents", "fill": "cover", "push_in": 0.06, "punch": 0.22,
+                  "overuse_w": 1.0, "overuse_p": 2.0, "scene_aware": True,
+                  "machine_gun": True, "grade": "neon", "flash": 0.05,
+                  "rgb_split": 0.006, "shake": 0.04,
+                  "hero_shot": True, "breakdown_slowmo": 0.35,
+                  "allow_stills": True},
 }
 DEFAULT_PRESET = "classic"
 
@@ -167,6 +183,24 @@ SCENE_LOCAL_WIN = 6        # samples each side that form the local baseline
 W_SCENE_SPAN = 0.6
 W_LOWCONTRAST = 0.5
 LOWCONTRAST_FLOOR = 0.045  # mean normalized motion below this reads as dead footage
+
+# Picture & Video preset — still images allowed as beats. A still has no container
+# duration and no decodable motion, so it never survives the normal video pipeline
+# (motion analysis drops it, and the planner's length gate rejects a zero-duration
+# clip). Two surgical accommodations, both gated so no other preset ever sees an image:
+# at ingest a still gets a synthetic flat MotionCurve (see _still_curve), and at render
+# it's looped into its slot with a Ken-Burns push (see _render_segment's image branch).
+# A path is a path — no media-type field flows through the JSON spec — so IMAGE_EXTS is
+# the discriminator at both the ingest and render branches.
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+STILL_HOLD_MAX = 12.0   # synthetic duration a still reports — long enough to clear the
+                        # planner's `c.duration < d` length gate for any realistic beat
+                        # slot, bounded so it doesn't distort max_clip-driven interval
+                        # subdivision when a selection is all stills.
+STILL_MOTION = 0.35     # synthetic motion for a still: in [LOWCONTRAST_FLOOR,
+                        # SCENE_SPIKE_ABS) so it never reads as dead footage or a scene
+                        # cut. picvideo runs motion_weight=0, so this only lightly
+                        # colours the energy-match term — a still competes evenly.
 
 # Accent-transition tunables (cinematic preset only).
 TRANSITION_MIN = 0.30     # seconds; shorter is too quick to register as a transition
@@ -696,6 +730,30 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve
     if peak > 0:
         samples = [s / peak for s in samples]
     return MotionCurve(clip_id=clip_id, src_path=str(src), duration=duration,
+                       fps_analyzed=float(ANALYSIS_FPS), samples=samples)
+
+
+def _is_image(path) -> bool:
+    """True if a source path is a still image (Picture & Video mode). The ingest and
+    render branches key off this — no media-type field flows through the JSON spec, so
+    the file extension is the discriminator."""
+    return Path(path).suffix.lower() in IMAGE_EXTS
+
+
+def _still_curve(clip_id: str, src: Path) -> MotionCurve:
+    """A synthetic MotionCurve standing in for a still image (Picture & Video mode).
+
+    An image has no container duration and no decodable motion, so rather than analysing
+    it we hand the planner a flat curve: STILL_HOLD_MAX seconds long (so it clears
+    plan_cuts' ``c.duration < d`` length gate for any realistic beat slot) with a
+    constant, FULL-SPAN sample list at STILL_MOTION. Full-span (not a token 2s) keeps
+    every MotionCurve window method in range and genuinely constant; STILL_MOTION sits in
+    [LOWCONTRAST_FLOOR, SCENE_SPIKE_ABS) so the still never trips the scene-aware
+    dead-footage penalty or registers an internal scene cut. The unmodified planner then
+    places the still exactly like a video; the render loop loops it into its slot (and
+    ignores its in_point, which is meaningless for a still) — see _render_segment."""
+    samples = [STILL_MOTION] * max(2, int(STILL_HOLD_MAX * ANALYSIS_FPS))
+    return MotionCurve(clip_id=clip_id, src_path=str(src), duration=STILL_HOLD_MAX,
                        fps_analyzed=float(ANALYSIS_FPS), samples=samples)
 
 
@@ -1594,6 +1652,49 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
     so does any ``cover`` segment, since stock ffmpeg has no GPU centre-crop
     (``scale_cuda`` can over-scale but there is no ``crop_cuda``).
     """
+    # Still image (Picture & Video mode): there is no timeline to seek into, so IGNORE
+    # in_point entirely and LOOP the frame to fill exactly this slot plus its transition
+    # handles — `dur = entry.duration + lead + tail`, the same length a trimmed video
+    # segment renders to, so it tiles the concat identically (the pure hard-cut path
+    # trusts this nominal length, and the transition path re-probes it). Letterboxed
+    # (fill="fit") so a portrait keeps its whole frame; the push/punch zoom + accents
+    # still apply. Always CPU (NVDEC can't decode a JPEG) and playback_speed is
+    # meaningless on a held frame, so slow-mo is skipped.
+    if _is_image(entry.src_path):
+        dur = entry.duration + lead + tail
+        vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+              f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps},setsar=1")
+        zf = _zoom_filter(zoom, dur, fps, width, height)
+        if zf:
+            # Smooth Ken Burns on a STILL: zoompan snaps its crop window to whole INPUT
+            # pixels every frame, so on a static image the ~1px steps read as a juddery
+            # shimmer (on video the moving content hides it). Pre-upscaling the frame makes
+            # each step a fraction of an OUTPUT pixel, so the push/punch reads as smooth —
+            # measured ~3x more even per-frame motion. 4x for <=1080p, 2x above (keeps the
+            # intermediate within ~8K). Only stills that actually zoom pay this cost.
+            up = 4 if (4 * width <= 8192 and 4 * height <= 8192) else 2
+            vf += f",scale={up * width}:{up * height}:flags=bicubic,{zf}"
+        sk = _shake_filter(shake, width, height)
+        if sk:
+            vf += "," + sk
+        rs = _rgb_split_filter(rgb_split, width)
+        if rs:
+            vf += "," + rs
+        if grade:
+            vf += "," + grade
+        if flash > 0:
+            vf += f",fade=t=in:st=0:d={flash:.4f}:color=white"
+        # Normalise to EXACTLY what the video segments are so the stream-copy concat
+        # accepts the still: a JPEG decodes as full-range yuvj420p, and the shake/zoom
+        # filters can perturb SAR — force limited-range yuv420p + SAR 1:1 (see the render
+        # smoke test; without this the pix_fmt/SAR differ and -c copy mixes color ranges).
+        vf += ",scale=out_range=tv,setsar=1,format=yuv420p"
+        cmd = ["ffmpeg", "-y", "-v", "error",
+               "-loop", "1", "-framerate", str(fps), "-t", f"{dur:.4f}",
+               "-i", entry.src_path, "-vf", vf, "-an", *video_encode_args,
+               "-movflags", "+faststart", str(out)]
+        _run(cmd, f"render still @ {entry.place_at:.2f}s")
+        return
     ss = max(0.0, entry.in_point - lead)
     dur = entry.duration + (entry.in_point - ss) + tail
     zf = _zoom_filter(zoom, dur, fps, width, height)
@@ -1884,6 +1985,10 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     flash = float(cfg.get("flash", 0.0))
     rgb_split = float(cfg.get("rgb_split", 0.0))
     shake = float(cfg.get("shake", 0.0))
+    # Picture & Video: only this preset lets still images through as beats. Every other
+    # preset leaves this falsey, so a stray image path (there shouldn't be one) would
+    # fall to analyze_motion and be dropped — the pipeline stays video-only.
+    allow_stills = bool(cfg.get("allow_stills"))
     # madmom (RNN+DBN) is the default beat engine for EVERY preset — a steady grid +
     # real downbeats; it falls back to librosa automatically when madmom isn't
     # installed (e.g. the local Python 3.10 venv). BEAT_ENGINE can override ("librosa").
@@ -1909,7 +2014,12 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         progress("analyzing_motion", _overall("analyzing_motion", sp), sp,
                  f"Analyzing motion: clip {idx + 1} of {total}")
         try:
-            curve = analyze_motion(str(idx), Path(src), hwaccel_decode)
+            # A still image (Picture & Video mode only) can't be decoded for motion —
+            # substitute a synthetic flat curve so the planner can place it like a clip.
+            if allow_stills and _is_image(src):
+                curve = _still_curve(str(idx), Path(src))
+            else:
+                curve = analyze_motion(str(idx), Path(src), hwaccel_decode)
             if curve.duration > 0 and curve.samples:
                 curves.append(curve)
         except Exception:

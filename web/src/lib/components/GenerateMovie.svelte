@@ -6,7 +6,7 @@
   import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
   import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
-  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie } from '$lib/state.js';
+  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   // videoIds: ordered ids of the currently-selected videos (selection order).
@@ -32,9 +32,22 @@
     { id: 'moody', label: 'Moody', help: 'Long held shots with a slow push-in, punctuated by quick beat bursts on the loud parts. Calmer footage.' },
     { id: 'musicvideo', label: 'Music Video', help: 'Maximum-energy beat edit: machine-gun sub-beat cutting that flurries on the drops, hard zoom-punches, RGB-split + camera-shake hits, white-flash strobes on the loud beats, and a saturated neon grade. Scene-aware cuts, edge-to-edge.' }
   ];
+  // Picture & Video mode is delivered by its own preset (the Music-Video edit, but still
+  // images are allowed as beats — held on the beat with a Ken-Burns push, letterboxed).
+  // It's shown as the ONLY style in picture-video mode; the four above are video-only.
+  const PICVIDEO_PRESET = { id: 'picvideo', label: 'Picture & Video', help: 'Music-Video energy, but your still images ride along as beats too — each photo is held on the beat with a slow Ken-Burns push and letterboxed so its whole frame is kept. Videos and photos are cut together to the song.' };
+  const ALL_PRESETS = [...PRESETS, PICVIDEO_PRESET]; // for label/help lookup by id
+  // 'video' shows the four styles; 'picture-video' shows only the picvideo style.
+  const picVideo = $derived($montageMode === 'picture-video');
+  const shownPresets = $derived(picVideo ? [PICVIDEO_PRESET] : PRESETS);
 
   let song = $state(null);
+  // `preset` is the chosen VIDEO style (classic/cinematic/moody/musicvideo). Picture &
+  // Video mode is delivered by the picvideo preset, so the EFFECTIVE preset we send is
+  // picvideo whenever the mode is picture-video — a pure derivation, never an $effect
+  // writing state (so switching modes can't get out of sync with the selected style).
   let preset = $state('classic');
+  const effectivePreset = $derived(picVideo ? 'picvideo' : preset);
   let tightness = $state(0.5);
   // "Let clips speak" — preset-independent. When on, hold on clips that have
   // dialogue (from their subtitles) in the song's quiet spots and dip the music.
@@ -86,7 +99,7 @@
   // is owned — the live selection is only meaningful on the fresh setup form and is
   // empty when the panel is reopened from the status chip.
   const sourceCount = $derived(job?.sources ?? activeIds.length);
-  const styleLabel = $derived(PRESETS.find((p) => p.id === (job?.preset ?? job?.result?.preset))?.label || '');
+  const styleLabel = $derived(ALL_PRESETS.find((p) => p.id === (job?.preset ?? job?.result?.preset))?.label || '');
 
   onMount(async () => {
     // Reconnect to whatever the status chip considers pending — a live render OR a
@@ -135,7 +148,7 @@
         song,
         options: {
           name: name.trim() || 'movie',
-          preset,
+          preset: effectivePreset,
           tightness,
           // Auto (res.w/h null) lets the server match the largest clip; otherwise pin the picked size.
           ...(res.w && res.h ? { width: res.w, height: res.h } : { resolution: 'auto' }),
@@ -211,7 +224,7 @@
     <header class="flex items-center justify-between border-b border-line px-5 py-4">
       <div>
         <h2 class="text-lg font-extrabold tracking-tight">Create Montage</h2>
-        <p class="text-sm text-muted">Beat-synced montage from {sourceCount} selected video{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.</p>
+        <p class="text-sm text-muted">Beat-synced montage from {sourceCount} selected {picVideo ? 'item' : 'video'}{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.</p>
       </div>
       <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line"
         aria-label="Close" onclick={close}>✕</button>
@@ -297,14 +310,14 @@
                 <button type="button" aria-label="About this style" aria-expanded={showStyleInfo}
                   onclick={() => (showStyleInfo = !showStyleInfo)}
                   class="grid h-4 w-4 place-items-center rounded-full border border-current text-[10px] font-bold opacity-70 transition hover:opacity-100 pointer-coarse:h-5 pointer-coarse:w-5">i</button>
-                <span class="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-64 max-w-[80vw] rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 text-[11px] font-normal normal-case leading-relaxed text-muted shadow-lg transition {showStyleInfo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}">{PRESETS.find((p) => p.id === preset)?.help}</span>
+                <span class="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-64 max-w-[80vw] rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 text-[11px] font-normal normal-case leading-relaxed text-muted shadow-lg transition {showStyleInfo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}">{ALL_PRESETS.find((p) => p.id === effectivePreset)?.help}</span>
               </span>
             </div>
             <div class="grid grid-cols-2 gap-1.5">
-              {#each PRESETS as p (p.id)}
+              {#each shownPresets as p (p.id)}
                 <button type="button" title={p.help}
-                  class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {preset === p.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-                  onclick={() => (preset = p.id)}>{p.label}</button>
+                  class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {effectivePreset === p.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                  onclick={() => { if (!picVideo) preset = p.id; }}>{p.label}</button>
               {/each}
             </div>
           </div>
@@ -398,7 +411,7 @@
     {#if !done && !running}
       <footer class="flex items-center justify-between gap-3 border-t border-line px-5 py-4">
         <p class="text-xs text-muted">
-          {#if activeIds.length < 2}Select at least 2 videos.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
+          {#if activeIds.length < 2}Select at least 2 {picVideo ? 'photos or videos' : 'videos'}.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
         </p>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>

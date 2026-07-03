@@ -44,14 +44,18 @@
   );
   const shown = $derived.by(() => {
     const list = [...filtered];
-    if (sortBy === 'name') return list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    if (sortBy === 'size') return list.sort((a, b) => (b.item_count ?? b.ids?.length ?? 0) - (a.item_count ?? a.ids?.length ?? 0));
+    if (sortBy === 'name') list.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    else if (sortBy === 'size') list.sort((a, b) => (b.item_count ?? b.ids?.length ?? 0) - (a.item_count ?? a.ids?.length ?? 0));
     // 'updated' = last-modified first (updated_at bumps when items are added/removed or
     // the collection is renamed) — so a collection you just added clips to floats up,
     // unlike 'recent' which only reflects creation order. Falls back to created_at.
-    if (sortBy === 'updated') return list.sort((a, b) => ((b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')));
+    else if (sortBy === 'updated') list.sort((a, b) => ((b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')));
     // 'recent' = stored order, with Beat Montage pinned on top (sort is stable, so the rest stay put).
-    return list.sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0));
+    else list.sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0));
+    // Finally pin every locked collection to the top. The sort is stable, so the order
+    // chosen above is preserved within the locked group and within the rest — so when
+    // "Show locked" reveals them they surface together at the front, not scattered.
+    return list.sort((a, b) => (b.locked ? 1 : 0) - (a.locked ? 1 : 0));
   });
 
   // Count line for the cover, dropping any zero segments (e.g. "26 items · 26 videos").
@@ -91,6 +95,12 @@
           title={showLocked ? 'Hide locked collections' : 'Show locked collections'}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           {showLocked ? 'Hide' : 'Show'} locked ({lockedHiddenCount})
+        </button>
+        <button type="button" onclick={() => (lockModal = { collection: null, mode: 'unlock-all' })}
+          class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)]"
+          title="Unlock every collection that shares one password">
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+          Unlock all
         </button>
       {/if}
       {#if anyUnlocked}
@@ -181,9 +191,9 @@
                card (group-focus-within), always shown for touch. Hidden while sealed (so a
                lock can't be bypassed by deleting the collection or queueing its videos). -->
           <div class="absolute right-2 top-2 z-10 flex gap-1.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
-            {#if !sealed && (c.video_count ?? 0) >= 1}
+            {#if !sealed && ((c.video_count ?? 0) >= 1 || (c.image_count ?? 0) >= 1)}
               <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--media-control-border-hover)] hover:bg-[var(--media-control-bg-hover)]"
-                title="Add this collection's videos to the montage queue" aria-label="Add this collection's videos to the montage queue" onclick={() => onqueue(c)}>
+                title="Add this collection's videos and photos to the montage queue" aria-label="Add this collection's videos and photos to the montage queue" onclick={() => onqueue(c)}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
               </button>
             {/if}

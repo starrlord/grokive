@@ -10,7 +10,7 @@
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
     collections, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
-    galleryReload, basket, enqueueBasket
+    galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -101,10 +101,12 @@
   // Images-only ZIP export: the Export button bundles these when no video is selected
   // (a mixed selection keeps exporting the videos as an MP4 — see SelectBar).
   const imageSelection = $derived($selection.filter((id) => byId.get(id)?.media_type === 'image'));
-  // Inputs for the Montage panel: videos only, and never other montages (a montage
-  // can't be a source clip). videoSelection itself keeps montages — they're still
-  // valid to play / export / add to a playlist.
-  const montageVideoIds = $derived(videoSelection.filter((id) => byId.get(id)?.model !== 'Beat Montage'));
+  // Inputs for the Montage queue/panel: videos AND still images (never other montages).
+  // Independent of the current mode — queuing or montaging an image ENTERS picture-video
+  // mode (see the actions below), so an all-image selection must still enable +Queue /
+  // Montage. videoSelection itself keeps montages — still valid to play/export/playlist.
+  const montageSelectionIds = $derived($selection.filter((id) => isMontageQueueable(byId.get(id))));
+  const selectionHasImage = $derived(montageSelectionIds.some((id) => byId.get(id)?.media_type === 'image'));
 
   async function load(reset) {
     // A reset (view/filter change) must SUPERSEDE an in-flight load, not be dropped —
@@ -406,31 +408,38 @@
     lb = { list, index: 0, autoAdvance: false, autoSlideshow: true, title: c.name };
   }
   async function enqueueCollectionToBasket(c) {
-    // The collection card's music icon pours every montage-eligible video in the
+    // The collection card's music icon pours every montage-eligible source in the
     // collection into the cross-library queue (basket) — so several collections can
     // be stacked into one montage. Launch happens from the basket chip. Even a single
-    // video is worth adding (you may add more from elsewhere); the launch enforces >=2.
-    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
-    if (!list.length) { toast('This collection has no montage-eligible videos.', { type: 'error' }); return; }
+    // source is worth adding (you may add more from elsewhere); the launch enforces >=2.
+    // Videos always; still images too — queuing any image enters picture-video mode.
+    const list = (await mediaByIds(c.ids)).filter((v) => isMontageQueueable(v));
+    if (!list.length) { toast('This collection has no montage-eligible media.', { type: 'error' }); return; }
     enqueueBasket(list.map((v) => v.id));
-    toast(`Added ${list.length} video${list.length === 1 ? '' : 's'} to the montage queue`, { type: 'success' });
+    if (list.some((v) => v.media_type === 'image')) montageMode.set('picture-video');
+    const noun = list.some((v) => v.media_type === 'image') ? 'item' : 'video';
+    toast(`Added ${list.length} ${noun}${list.length === 1 ? '' : 's'} to the montage queue`, { type: 'success' });
   }
   // Fire a montage from the cross-library queue (basket). Resolves ids server-side
   // (NOT the grid-scoped `byId` map) so clips queued from collections we've since
   // navigated away from are still found. Hands off to the montage panel the same way
   // a collection does; the basket itself is left intact so an aborted launch keeps the picks.
   async function launchBasketMontage() {
-    const list = (await mediaByIds($basket)).filter((v) => v.media_type === 'video' && v.model !== 'Beat Montage');
-    if (list.length < 2) { toast('A montage needs at least 2 non-montage videos in the queue.', { type: 'error' }); return; }
+    const list = (await mediaByIds($basket)).filter((v) => isMontageSource(v, $montageMode));
+    if (list.length < 2) {
+      const noun = $montageMode === 'picture-video' ? 'photos or videos' : 'non-montage videos';
+      toast(`A montage needs at least 2 ${noun} in the queue.`, { type: 'error' }); return;
+    }
     movieVideoIds = list.map((v) => v.id);
     showMovie = true;
   }
   // Pour the current (montage-eligible) multi-select into the cross-library queue,
   // without leaving select mode — so you can keep selecting elsewhere and add more.
   function enqueueSelectionToBasket() {
-    const ids = montageVideoIds;
-    if (!ids.length) { toast('Select some videos to queue for montage.', { type: 'error' }); return; }
+    const ids = montageSelectionIds;
+    if (!ids.length) { toast('Select some photos or videos to queue for montage.', { type: 'error' }); return; }
     enqueueBasket(ids);
+    if (selectionHasImage) montageMode.set('picture-video'); // queuing a photo enters picture-video
     toast(`Added ${ids.length} to montage queue`, { type: 'success' });
   }
   function saveCollectionName() {
@@ -782,10 +791,10 @@
 </div>
 
 {#if $selectMode}
-  <SelectBar videoIds={videoSelection} imageIds={imageSelection} {selectableIds} collection={activeCollection}
+  <SelectBar videoIds={videoSelection} imageIds={imageSelection} montageIds={montageSelectionIds} {selectableIds} collection={activeCollection}
     onplay={playSelection}
     oncollections={() => (showCollectionPicker = true)}
-    onmovie={() => { movieVideoIds = montageVideoIds; showMovie = true; }}
+    onmovie={() => { movieVideoIds = montageSelectionIds; if (selectionHasImage) montageMode.set('picture-video'); showMovie = true; }}
     onbasket={enqueueSelectionToBasket}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
@@ -825,7 +834,7 @@
 
 <!-- Always-on background-task indicator for the montage render: persists across
      views/select-mode until the result is committed or dismissed; click reopens. -->
-<MontageStatusChip onopen={() => { movieVideoIds = montageVideoIds; showMovie = true; }} />
+<MontageStatusChip onopen={() => { movieVideoIds = montageSelectionIds; showMovie = true; }} />
 
 <!-- Cross-library Montage queue: floating chip (bottom-left) that surfaces clips
      gathered across collections/views and launches the montage from them. -->

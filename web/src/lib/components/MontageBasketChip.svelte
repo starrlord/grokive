@@ -6,13 +6,19 @@
   // fire the montage. Anchored bottom-LEFT so it never collides with the bottom-RIGHT
   // MontageStatusChip on desktop; both relocate to the top on phones (see media query).
   import { fly } from 'svelte/transition';
-  import { basket, clearBasket, toggleBasket } from '$lib/state.js';
+  import { basket, clearBasket, toggleBasket, montageMode, isMontageSource } from '$lib/state.js';
   import { mediaByIds } from '$lib/api.js';
 
   let { onmontage = () => {} } = $props();
 
   const ids = $derived($basket);
   const count = $derived(ids.length);
+  const picVideo = $derived($montageMode === 'picture-video');
+  // Once the panel is open, items carry media_type — so we can show how many queued
+  // sources are actually eligible under the current mode (video-only drops any images
+  // queued earlier). Before items load, fall back to the raw count.
+  const eligible = $derived(items.length ? items.filter((it) => isMontageSource(it, $montageMode)) : ids);
+  const eligibleCount = $derived(eligible.length);
   let open = $state(false);
   let items = $state([]);
   let loading = $state(false);
@@ -53,6 +59,12 @@
           <span class="basket-title">Montage queue · {count}</span>
           <button type="button" class="basket-clear" onclick={() => clearBasket()}>Clear</button>
         </div>
+        <!-- Montage mode: video-only (styles) vs Picture & Video (still images ride along
+             as beats). Adding a photo auto-selects picture-video; this is the manual toggle. -->
+        <div class="basket-mode" role="group" aria-label="Montage mode">
+          <button type="button" class="basket-mode-btn" class:active={!picVideo} aria-pressed={!picVideo} onclick={() => montageMode.set('video')}>Video only</button>
+          <button type="button" class="basket-mode-btn" class:active={picVideo} aria-pressed={picVideo} onclick={() => montageMode.set('picture-video')}>Picture &amp; Video</button>
+        </div>
         <div class="basket-list">
           {#if loading && !items.length}
             <p class="basket-status">Loading…</p>
@@ -60,7 +72,7 @@
             <p class="basket-status">Nothing queued.</p>
           {:else}
             {#each items as it (it.id)}
-              <div class="basket-row">
+              <div class="basket-row" class:ineligible={!isMontageSource(it, $montageMode)} title={!isMontageSource(it, $montageMode) ? 'Not used in Video-only mode — switch to Picture & Video to include this photo' : undefined}>
                 {#if it.thumb}
                   <img class="basket-thumb" src={it.thumb} alt="" loading="lazy" decoding="async" />
                 {:else}
@@ -72,16 +84,16 @@
             {/each}
           {/if}
         </div>
-        <button type="button" class="basket-go" disabled={count < 2} onclick={() => { open = false; onmontage(); }}>
+        <button type="button" class="basket-go" disabled={eligibleCount < 2} onclick={() => { open = false; onmontage(); }}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-          Make Montage{count >= 2 ? ` (${count})` : ''}
+          Make Montage{eligibleCount >= 2 ? ` (${eligibleCount})` : ''}
         </button>
-        {#if count < 2}<p class="basket-hint">Add at least 2 videos to montage.</p>{/if}
+        {#if eligibleCount < 2}<p class="basket-hint">Add at least 2 {picVideo ? 'photos or videos' : 'videos'} to montage.</p>{/if}
       </div>
     {/if}
 
     <button type="button" class="basket-chip" onclick={() => (open = !open)} aria-expanded={open}
-      title="Montage queue — {count} video{count === 1 ? '' : 's'}">
+      title="Montage queue — {count} {picVideo ? 'item' : 'video'}{count === 1 ? '' : 's'}">
       <span class="basket-chip-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
       </span>
@@ -153,6 +165,26 @@
     padding: 0.6rem;
     width: min(20rem, calc(100vw - 2rem));
   }
+
+  .basket-mode {
+    background: var(--surface-2);
+    border-radius: var(--r-lg);
+    display: grid;
+    gap: 0.2rem;
+    grid-template-columns: 1fr 1fr;
+    padding: 0.2rem;
+  }
+  .basket-mode-btn {
+    border-radius: calc(var(--r-lg) - 0.2rem);
+    color: color-mix(in srgb, var(--ink) 62%, transparent);
+    font-size: 0.75rem;
+    font-weight: 800;
+    padding: 0.35rem 0.4rem;
+  }
+  .basket-mode-btn.active { background: var(--accent); color: var(--on-accent); }
+
+  .basket-row.ineligible { opacity: 0.45; }
+  .basket-row.ineligible .basket-thumb { filter: grayscale(0.6); }
 
   .basket-head { align-items: center; display: flex; gap: 0.5rem; justify-content: space-between; }
   .basket-title { color: var(--ink); font-size: 0.8125rem; font-weight: 850; }

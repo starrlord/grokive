@@ -1,13 +1,15 @@
 <script>
-  // Password prompt for collection locks. One component, four modes:
-  //   set     – choose a password and lock an open collection
-  //   unlock  – enter the password to unlock for 24h (links to `force` recovery)
-  //   force   – enter the MAIN admin password to recover a forgotten lock
-  //   manage  – an already-unlocked collection: lock now, or remove the password
+  // Password prompt for collection locks. One component, five modes:
+  //   set         – choose a password and lock an open collection
+  //   unlock      – enter the password to unlock for 24h (links to `force` recovery)
+  //   force       – enter the MAIN admin password to recover a forgotten lock
+  //   manage      – an already-unlocked collection: lock now, or remove the password
+  //   unlock-all  – enter one password to unlock EVERY collection that uses it (no
+  //                 collection prop; the server matches the password against all locks)
   import { fly, fade } from 'svelte/transition';
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
-  import { lockCollection, unlockCollection, forceUnlockCollection, relockCollection, removeCollectionLock } from '$lib/api.js';
+  import { lockCollection, unlockCollection, forceUnlockCollection, relockCollection, removeCollectionLock, unlockAllCollections } from '$lib/api.js';
 
   let { collection, mode = 'unlock', onclose = () => {}, ondone = () => {} } = $props();
 
@@ -18,7 +20,7 @@
   let err = $state('');
   let confirmRemove = $state(false);
 
-  const TITLES = { set: 'Lock collection', unlock: 'Unlock collection', force: 'Admin recovery', manage: 'Manage lock' };
+  const TITLES = { set: 'Lock collection', unlock: 'Unlock collection', force: 'Admin recovery', manage: 'Manage lock', 'unlock-all': 'Unlock all' };
 
   async function run(fn) {
     if (busy) return;
@@ -36,6 +38,10 @@
   const doForce = () => run(() => forceUnlockCollection(collection.id, pw));
   const doRelock = () => run(() => relockCollection(collection.id));
   const doRemove = () => run(() => removeCollectionLock(collection.id, ''));
+  const doUnlockAll = () => {
+    if (pw.length < 1) { err = 'Enter a password.'; return; }
+    run(() => unlockAllCollections(pw));
+  };
 
   function onkey(e) { if (e.key === 'Escape' && !busy) onclose(); }
   function submit(e) {
@@ -43,6 +49,7 @@
     if (m === 'set') doSet();
     else if (m === 'unlock') doUnlock();
     else if (m === 'force') doForce();
+    else if (m === 'unlock-all') doUnlockAll();
   }
 </script>
 
@@ -58,7 +65,7 @@
       </span>
       <div class="min-w-0">
         <h2 class="text-base font-extrabold tracking-tight">{TITLES[m]}</h2>
-        <p class="truncate text-sm text-muted">{collection?.name}</p>
+        <p class="truncate text-sm text-muted">{m === 'unlock-all' ? 'Every collection with this password' : collection?.name}</p>
       </div>
     </header>
 
@@ -84,6 +91,8 @@
         <form onsubmit={submit} class="space-y-3">
           {#if m === 'force'}
             <p class="text-sm text-muted">Forgot this collection’s password? Enter your main admin password to unlock it for 24h.</p>
+          {:else if m === 'unlock-all'}
+            <p class="text-sm text-muted">Enter a password to unlock every collection that uses it, for 24h. Collections with a different password stay locked.</p>
           {/if}
           <input type="password" bind:value={pw} placeholder={m === 'force' ? 'Admin password' : 'Password'} autocomplete={m === 'set' ? 'new-password' : 'current-password'}
             class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2.5 text-sm outline-none focus:border-[var(--accent)]" />
@@ -101,7 +110,7 @@
             <div class="flex gap-2">
               <button type="button" class="rounded-lg border border-line px-4 py-2 text-sm font-semibold" onclick={onclose}>Cancel</button>
               <button type="submit" class="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50" disabled={busy}>
-                {busy ? 'Working…' : (m === 'set' ? 'Lock' : 'Unlock')}
+                {busy ? 'Working…' : (m === 'set' ? 'Lock' : m === 'unlock-all' ? 'Unlock all' : 'Unlock')}
               </button>
             </div>
           </div>

@@ -160,6 +160,7 @@ export const lockCollection = (id, password) => postLock(`/api/collections/${enc
 export const unlockCollection = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/unlock`, { password });
 export const relockCollection = (id) => postLock(`/api/collections/${encodeURIComponent(id)}/relock`, {});
 export const relockAllCollections = () => postLock('/api/collections/relock-all', {});
+export const unlockAllCollections = (password) => postLock('/api/collections/unlock-all', { password });
 export const removeCollectionLock = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/remove-lock`, { password });
 export const forceUnlockCollection = (id, adminPassword) => postLock(`/api/collections/${encodeURIComponent(id)}/force-unlock`, { admin_password: adminPassword });
 

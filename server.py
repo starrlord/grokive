@@ -1560,6 +1560,31 @@ def api_collections_relock_all() -> Response:
     return jsonify(ok=True)
 
 
+@app.post("/api/collections/unlock-all")
+def api_collections_unlock_all() -> Response:
+    """Bulk unlock: try one password against EVERY locked collection and grant a 24 h
+    session unlock to each that matches. Collections locked with a different password
+    stay sealed. Shares the single-unlock brute-force limiter so it can't be used to
+    bypass it; a run that matches nothing counts as one failed attempt."""
+    ip = request.remote_addr or "?"
+    wait = _login_retry_after(ip)
+    if wait:
+        return jsonify(ok=False, error=f"Too many attempts. Try again in {wait} s."), 429
+    pw = str((request.get_json(silent=True) or {}).get("password") or "")
+    if not pw:
+        return jsonify(ok=False, error="A password is required."), 400
+    matched = 0
+    for coll in _load_collections():
+        if coll.get("locked") and coll.get("pass_hash") and check_password_hash(coll["pass_hash"], pw):
+            _grant_unlock(str(coll.get("id")))
+            matched += 1
+    if not matched:
+        _record_login_fail(ip)
+        return jsonify(ok=False, error="No collections match that password."), 403
+    _clear_login_fails(ip)
+    return jsonify(ok=True, unlocked=matched)
+
+
 @app.post("/api/collections/<cid>/remove-lock")
 def api_collection_remove_lock(cid: str) -> Response:
     """Remove password protection entirely. Requires the collection's current password
@@ -1824,6 +1849,33 @@ def _video_paths_for_ids(ids: list, *, exclude_montages: bool = False) -> list[P
         if not item or item.get("media_type") != "video":
             continue
         if exclude_montages and item.get("model") == "Beat Montage":
+            continue
+        rel = str(item.get("local_path", "")).replace("\\", "/")
+        if not rel:
+            continue
+        candidate = (GALLERY_DIR / rel).resolve()
+        if candidate != gallery_root and gallery_root not in candidate.parents:
+            continue
+        if candidate.exists():
+            paths.append(candidate)
+    return paths
+
+
+def _montage_source_paths_for_ids(ids: list) -> list[Path]:
+    """Ordered, existing source files — videos AND still images — for the Picture &
+    Video montage mode (order preserved). Same guards as ``_video_paths_for_ids`` (skips
+    missing files, beat-montage outputs so a montage can't feed itself, and anything that
+    would escape the gallery root) but also admits ``media_type == 'image'``. Kept a
+    SEPARATE resolver so ``_video_paths_for_ids`` stays strictly video-only for
+    playlist / MP4 export — images flow only through the montage preset that opts in."""
+    index = _metadata_index()
+    gallery_root = GALLERY_DIR.resolve()
+    paths: list[Path] = []
+    for raw_id in ids or []:
+        item = index.get(str(raw_id))
+        if not item or item.get("media_type") not in ("video", "image"):
+            continue
+        if item.get("model") == "Beat Montage":
             continue
         rel = str(item.get("local_path", "")).replace("\\", "/")
         if not rel:
@@ -2514,11 +2566,21 @@ def api_movie_generate() -> Response:
         ids = []
     if not isinstance(ids, list):
         ids = []
+    # Resolve the preset first: a preset flagged allow_stills (Picture & Video) admits
+    # still images as sources; every other preset stays strictly video-only.
+    preset = (request.form.get("preset") or moviegen.DEFAULT_PRESET).strip()
+    if preset not in moviegen.PRESETS:
+        preset = moviegen.DEFAULT_PRESET
+    allow_stills = bool(moviegen.PRESETS.get(preset, {}).get("allow_stills"))
     # A montage is built from source clips, never from other montages — exclude
     # them so a beat-montage can't be fed back into a new one.
-    paths = _video_paths_for_ids(ids, exclude_montages=True)
+    paths = (_montage_source_paths_for_ids(ids) if allow_stills
+             else _video_paths_for_ids(ids, exclude_montages=True))
     if len(paths) < 2:
-        return jsonify(ok=False, error="Select at least 2 non-montage videos that exist on the server."), 400
+        err = ("Select at least 2 videos or images that exist on the server."
+               if allow_stills else
+               "Select at least 2 non-montage videos that exist on the server.")
+        return jsonify(ok=False, error=err), 400
 
     song = request.files.get("song")
     if not song or not song.filename:
@@ -2535,9 +2597,7 @@ def api_movie_generate() -> Response:
 
     target = request.form.get("target_duration", "").strip()
     seed_raw = request.form.get("seed", "").strip()
-    preset = (request.form.get("preset") or moviegen.DEFAULT_PRESET).strip()
-    if preset not in moviegen.PRESETS:
-        preset = moviegen.DEFAULT_PRESET
+    # (preset already resolved above, to pick the video-only vs image-inclusive resolver)
     # "Let clips speak": preset-independent. The count is "auto" or a small int.
     let_speak = (request.form.get("let_clips_speak") or "").strip().lower() in ("1", "true", "on", "yes")
     speak_raw = (request.form.get("speak_moments") or "auto").strip().lower()

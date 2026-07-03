@@ -1,6 +1,6 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -240,6 +240,14 @@
                   class="card-action-btn"
                   onclick={(e) => { e.stopPropagation(); sendToImagine(it); }}>
                   <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+                </button>
+                <!-- Add this IMAGE to the Montage queue as a Picture & Video beat; adding it
+                     switches the montage into picture-video mode (see queueImageForMontage). -->
+                {@const queued = basketMembers.has(it.id)}
+                <button type="button" aria-label={queued ? 'Remove from montage queue' : 'Add photo to montage queue'} title={queued ? 'In montage queue — click to remove' : 'Add photo to montage queue (Picture & Video)'} aria-pressed={queued}
+                  class="card-action-btn {queued ? 'card-action-active' : ''}"
+                  onclick={(e) => { e.stopPropagation(); queueImageForMontage(it.id); }}>
+                  <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                 </button>
               {:else if !isMontage}
                 <!-- Add this video to the cross-library Montage queue. Music-note glyph
