@@ -126,12 +126,20 @@
     </div>
 
     <div class="select-cluster">
-      <button class="select-btn" onclick={favAll}>{view === 'favorites' ? 'Unfavorite' : 'Favorite'}</button>
-      <button class="select-btn" onclick={() => oncollections()} title="Add to Collection">+ Collection</button>
+      <button class="select-btn" onclick={favAll}
+              title={view === 'favorites' ? 'Unfavorite' : 'Favorite'} aria-label={view === 'favorites' ? 'Unfavorite' : 'Favorite'}>
+        <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill={view === 'favorites' ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>
+      </button>
+      <button class="select-btn" onclick={() => oncollections()} title="Add to Collection" aria-label="Add to Collection">
+        <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg>
+      </button>
       {#if collection}
         <button class="select-btn" onclick={() => onremovefromcollection()} title="Remove from Collection">Remove</button>
       {/if}
-      <button class="select-btn" onclick={stashAll}>{view === 'archive' ? 'Restore' : 'Archive'}</button>
+      <button class="select-btn" onclick={stashAll}
+              title={view === 'archive' ? 'Restore from Archive' : 'Archive'} aria-label={view === 'archive' ? 'Restore from Archive' : 'Archive'}>
+        <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>
+      </button>
     </div>
 
     <div class="select-cluster">
@@ -147,24 +155,23 @@
       </details>
       <button class="select-btn export-btn" class:export-active={busy}
               disabled={busy || (!videoIds.length && !imageIds.length)} onclick={doExport} aria-busy={busy}
-              title={imagesOnly ? 'Download the selected images as a .zip' : 'Merge & download the selected videos as one MP4'}>
+              title={imagesOnly ? 'Download the selected images as a .zip' : 'Merge & download the selected videos as one MP4'}
+              aria-label={imagesOnly ? 'Export selected images as ZIP' : 'Export selected videos as MP4'}>
         {#if busy}
           <span class="export-orbit" aria-hidden="true"></span>
           <span>{imagesOnly ? 'Zipping…' : 'Preparing MP4'}</span>
         {:else}
-          <span class="text-xs">⇩</span>
-          <span>{imagesOnly ? 'Export ZIP' : 'Export'}</span>
+          <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
         {/if}
       </button>
       <button class="select-btn" disabled={!videoIds.length} onclick={() => onplayqueue()}
-              title="Add the selected videos to the cross-library Play Queue">
-        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
-        + Play Queue
+              title="Add the selected videos to the cross-library Play Queue" aria-label="Add selected videos to Play Queue">
+        <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
       </button>
       <button class="select-btn" disabled={!montageIds.length} onclick={() => onbasket()}
               title="Add the selected videos and photos to the cross-library Montage queue">
         <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        + Montage Queue
+        + Queue
       </button>
       <button class="select-btn montage-btn" class:montage-running={movieRunning}
               disabled={montageIds.length < 2 && !movieRunning} onclick={() => onmovie()}
@@ -180,7 +187,9 @@
     </div>
 
     <div class="select-cluster">
-      <button class="select-btn select-danger" disabled={!n} onclick={() => (confirmingDelete = true)}>Delete</button>
+      <button class="select-btn select-danger" disabled={!n} onclick={() => (confirmingDelete = true)} title="Delete" aria-label="Delete">
+        <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+      </button>
       <button class="select-btn" onclick={() => clearSelection()}>Clear</button>
       <button class="select-btn" onclick={() => setSelectMode(false)}>Done</button>
     </div>
@@ -407,7 +416,6 @@
   }
 
   .export-btn {
-    min-width: 7rem;
     overflow: hidden;
     position: relative;
   }

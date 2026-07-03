@@ -231,7 +231,7 @@
           <!-- top-right hover actions: archive + favorite -->
           {#if !selectMode}
             {@const isStashed = $stashed.has(it.id)}
-            <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1.5">
+            <div class="card-actions absolute right-2 top-2 z-[5] flex gap-1">
               <button type="button" aria-label="Favorite" title="Favorite"
                 class="card-action-btn {fav ? 'text-[var(--favorite)]' : ''}"
                 onclick={(e) => { e.stopPropagation(); toggleFavorite(it.id); }}>{fav ? '♥' : '♡'}</button>
@@ -404,11 +404,15 @@
     border-radius: 999px;
     color: var(--media-control-ink);
     display: grid;
-    height: 2rem;
+    height: 1.75rem;
     place-items: center;
     transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
-    width: 2rem;
+    width: 1.75rem;
   }
+
+  /* Shrink the glyphs to match the smaller button so five actions (video cards:
+     favourite, montage-queue, play-queue, archive, delete) stay compact. */
+  .card-action-btn :global(svg) { height: 0.875rem; width: 0.875rem; }
 
   .card-action-btn:hover,
   .card-action-btn:focus-visible {
@@ -421,11 +425,11 @@
     border-color: color-mix(in srgb, white 28%, transparent);
   }
 
-  @container (min-width: 190px) {
-    .card-actions {
-      flex-direction: row;
-    }
-  }
+  /* Actions stay a VERTICAL column pinned to the top-right — a compact "side" panel at
+     EVERY card width. They used to flip to a horizontal row at container width ≥190px,
+     which with five actions (favourite, montage-queue, play-queue, archive, delete)
+     spanned across the top of the card and read as an overlay/overlap bug. A vertical
+     stack is only ever one button wide, so it can never overflow horizontally. */
 
   @container (max-width: 174px) {
     .card-meta {
