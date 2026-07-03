@@ -13,7 +13,7 @@
 
   // montageIds: selected sources eligible for a montage — videos AND still images (queuing
   // an image enters picture-video mode). videoIds stays video-only for Play/Playlist/Export.
-  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {} } = $props();
+  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {}, onplayqueue = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
@@ -156,10 +156,15 @@
           <span>{imagesOnly ? 'Export ZIP' : 'Export'}</span>
         {/if}
       </button>
+      <button class="select-btn" disabled={!videoIds.length} onclick={() => onplayqueue()}
+              title="Add the selected videos to the cross-library Play Queue">
+        <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
+        + Play Queue
+      </button>
       <button class="select-btn" disabled={!montageIds.length} onclick={() => onbasket()}
               title="Add the selected videos and photos to the cross-library Montage queue">
         <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        + Queue
+        + Montage Queue
       </button>
       <button class="select-btn montage-btn" class:montage-running={movieRunning}
               disabled={montageIds.length < 2 && !movieRunning} onclick={() => onmovie()}

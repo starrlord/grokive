@@ -5,7 +5,7 @@
   import SearchField from './SearchField.svelte';
   import CollectionLockModal from './CollectionLockModal.svelte';
 
-  let { onopen = () => {}, onplay = () => {}, onqueue = () => {}, onimport = () => {} } = $props();
+  let { onopen = () => {}, onplay = () => {}, onqueue = () => {}, onplayqueue = () => {}, onimport = () => {} } = $props();
   let confirming = $state(null);
   let fileInput = $state(null);
   let lockModal = $state(null); // { collection, mode } -> CollectionLockModal
@@ -216,12 +216,20 @@
             {/if}
           </div>
 
-          <!-- Primary action: Play videos, bottom-right, only when accessible and has any. -->
+          <!-- Primary actions: bottom-right, only when accessible and has videos. "Add to
+               Play Queue" (compact, secondary) sits to the LEFT of the accent "Play" — queue
+               these videos onto the cross-library Play Queue vs. play this collection now. -->
           {#if !sealed && c.video_count}
-            <button type="button" class="absolute bottom-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
-              title="Play videos" aria-label="Play collection videos" onclick={() => onplay(c)}>
-              <span aria-hidden="true">▶</span> Play
-            </button>
+            <div class="absolute bottom-2 right-2 z-10 flex items-center gap-1.5">
+              <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] opacity-0 shadow-lg backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
+                title="Add this collection's videos to the Play Queue" aria-label="Add collection videos to play queue" onclick={() => onplayqueue(c)}>
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
+              </button>
+              <button type="button" class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
+                title="Play videos" aria-label="Play collection videos" onclick={() => onplay(c)}>
+                <span aria-hidden="true">▶</span> Play
+              </button>
+            </div>
           {:else if sealed}
             <button type="button" class="absolute bottom-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
               title="Unlock collection" aria-label="Unlock collection" onclick={() => (lockModal = { collection: c, mode: 'unlock' })}>

@@ -8,6 +8,7 @@
 
   let {
     onopencollection = () => {}, onplaycollection = () => {}, onqueuecollection = () => {},
+    onplayqueuecollection = () => {},
     onimportcollection = () => {}, onplayplaylist = () => {}, oneditplaylist = () => {}
   } = $props();
 
@@ -30,7 +31,7 @@
 </div>
 
 {#if tab === 'collections'}
-  <CollectionsGrid onopen={onopencollection} onplay={onplaycollection} onqueue={onqueuecollection} onimport={onimportcollection} />
+  <CollectionsGrid onopen={onopencollection} onplay={onplaycollection} onqueue={onqueuecollection} onplayqueue={onplayqueuecollection} onimport={onimportcollection} />
 {:else}
   <PlaylistsGrid onplay={onplayplaylist} onedit={oneditplaylist} />
 {/if}

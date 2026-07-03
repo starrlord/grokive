@@ -10,7 +10,8 @@
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
     collections, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
-    galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable
+    galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
+    playQueue, enqueuePlayQueue
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -28,6 +29,7 @@
   import FiltersModal from '$lib/components/FiltersModal.svelte';
   import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
   import MontageBasketChip from '$lib/components/MontageBasketChip.svelte';
+  import PlayQueueChip from '$lib/components/PlayQueueChip.svelte';
   import ImportModal from '$lib/components/ImportModal.svelte';
   import ScrollToTop from '$lib/components/ScrollToTop.svelte';
   import PromptStudio from '$lib/components/PromptStudio.svelte';
@@ -420,6 +422,33 @@
     const noun = list.some((v) => v.media_type === 'image') ? 'item' : 'video';
     toast(`Added ${list.length} ${noun}${list.length === 1 ? '' : 's'} to the montage queue`, { type: 'success' });
   }
+  // The collection card's "Add to Play Queue" button pours every VIDEO in the collection
+  // onto the cross-library Play Queue — so several collections can be stacked into one
+  // playback run. Videos only (stills don't play); the montage queue owns the picture path.
+  async function enqueueCollectionToPlayQueue(c) {
+    const list = (await mediaByIds(c.ids)).filter((v) => v.media_type === 'video');
+    if (!list.length) { toast('This collection has no videos to queue.', { type: 'error' }); return; }
+    enqueuePlayQueue(list.map((v) => v.id));
+    toast(`Added ${list.length} video${list.length === 1 ? '' : 's'} to the Play Queue`, { type: 'success' });
+  }
+  // Play the cross-library Play Queue in order. Resolves ids server-side (NOT the grid-scoped
+  // `byId` map) so videos queued from collections we've since left are still found; hands the
+  // resolved list to the same autoAdvance Lightbox a collection/playlist uses. `startId` (a row's
+  // "play from here") sets the first item; otherwise it starts at the top. The queue is left intact.
+  async function playPlayQueueNow(startId = null) {
+    const list = (await mediaByIds($playQueue)).filter((v) => v.media_type === 'video');
+    if (!list.length) { toast('No playable videos in the Play Queue.', { type: 'error' }); return; }
+    const start = startId != null ? list.findIndex((v) => String(v.id) === String(startId)) : 0;
+    lb = { list, index: start < 0 ? 0 : start, autoAdvance: true, title: `Play Queue (${list.length})` };
+  }
+  // Pour the current video multi-select onto the Play Queue, without leaving select mode —
+  // so you can keep selecting elsewhere and add more (mirrors enqueueSelectionToBasket).
+  function enqueueSelectionToPlayQueue() {
+    const ids = videoSelection;
+    if (!ids.length) { toast('Select some videos to queue for playback.', { type: 'error' }); return; }
+    enqueuePlayQueue(ids);
+    toast(`Added ${ids.length} to the Play Queue`, { type: 'success' });
+  }
   // Fire a montage from the cross-library queue (basket). Resolves ids server-side
   // (NOT the grid-scoped `byId` map) so clips queued from collections we've since
   // navigated away from are still found. Hands off to the montage panel the same way
@@ -618,6 +647,7 @@
     {#if $filters.view === 'collections' && !activeCollection}
       <LibraryView
         onopencollection={openCollection} onplaycollection={playCollection} onqueuecollection={enqueueCollectionToBasket}
+        onplayqueuecollection={enqueueCollectionToPlayQueue}
         onimportcollection={(files) => (importFiles = files)}
         onplayplaylist={playPlaylist} oneditplaylist={(pl) => (editing = pl)} />
     {:else if $filters.view === 'collections' && activeCollection}
@@ -796,6 +826,7 @@
     oncollections={() => (showCollectionPicker = true)}
     onmovie={() => { movieVideoIds = montageSelectionIds; if (selectionHasImage) montageMode.set('picture-video'); showMovie = true; }}
     onbasket={enqueueSelectionToBasket}
+    onplayqueue={enqueueSelectionToPlayQueue}
     onremovefromcollection={removeSelectionFromCollection} />
 {/if}
 
@@ -839,6 +870,11 @@
 <!-- Cross-library Montage queue: floating chip (bottom-left) that surfaces clips
      gathered across collections/views and launches the montage from them. -->
 <MontageBasketChip onmontage={launchBasketMontage} />
+
+<!-- Cross-library Play Queue: playback sibling of the Montage basket. Floating chip
+     (bottom-left, stacked above the montage chip when both are present) that surfaces
+     videos gathered across collections/views and plays them in the Lightbox. -->
+<PlayQueueChip onplay={playPlayQueueNow} />
 
 <!-- Back-to-top: appears after scrolling down a long grid. Lifted above the bottom
      SelectBar (select mode) and the montage chip so it never sits under either. -->

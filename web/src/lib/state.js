@@ -291,6 +291,7 @@ export async function removeMedia(ids) {
     })));
     selection.update((sel) => sel.filter((id) => !idSet.has(String(id))));
     basket.update((b) => b.filter((id) => !idSet.has(String(id))));
+    playQueue.update((q) => q.filter((id) => !idSet.has(String(id))));
     toast(list.length === 1 ? 'Deleted' : `Deleted ${list.length} items`, { type: 'success' });
   } catch (e) {
     deleted.update((s) => new Set([...s].filter((id) => !idSet.has(id)))); // revert hide
@@ -389,6 +390,60 @@ export function enqueueBasket(ids) {
 }
 export function clearBasket() {
   basket.set([]);
+}
+
+// --- Play Queue (cross-library playback queue) ------------------------------
+// A THIRD ordered-id store, sibling to `basket` but with a different terminal action:
+// sequential Lightbox playback (autoAdvance) instead of a montage render. VIDEOS ONLY —
+// stills don't "play", and the montage basket already owns the picture path. Like the
+// basket it's deliberately separate from `selection` so videos gathered across collections/
+// views survive navigation, and localStorage-backed (same LS/persist tier) so a reload
+// mid-gather doesn't lose the queue. Add-order is the play order; Randomize reshuffles it.
+export const playQueue = writable(LS('playQueue', []));
+playQueue.subscribe((ids) => persist('playQueue', ids));
+
+// Per-card membership mirror — same per-key reactive trick as basketMembers, so toggling
+// one card only re-renders that card, not every visible cell.
+export const playQueueMembers = new SvelteSet();
+playQueue.subscribe((ids) => {
+  const next = new Set(ids.map(String));
+  for (const id of playQueueMembers) if (!next.has(id)) playQueueMembers.delete(id);
+  for (const id of next) playQueueMembers.add(id);
+});
+
+export function togglePlayQueue(id) {
+  const s = String(id);
+  playQueue.update((q) => (q.includes(s) ? q.filter((x) => x !== s) : [...q, s]));
+}
+// Add many ids at once (a collection's videos, or a multi-select), preserving order and
+// skipping dupes — same shape as enqueueBasket.
+export function enqueuePlayQueue(ids) {
+  playQueue.update((q) => {
+    const next = [...q];
+    const seen = new Set(next);
+    for (const raw of ids || []) {
+      const id = String(raw);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      next.push(id);
+    }
+    return next;
+  });
+}
+export function clearPlayQueue() {
+  playQueue.set([]);
+}
+// One-shot Fisher–Yates shuffle of the stored order (persisted). Re-clickable — each press
+// is a fresh randomization. Plain Math.random() is fine here (browser, not a workflow script).
+export function shufflePlayQueue() {
+  playQueue.update((q) => {
+    const a = [...q];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  });
 }
 
 // Montage mode — 'video' (default) or 'picture-video'. Governs whether STILL IMAGES may

@@ -1,6 +1,6 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, togglePlayQueue, playQueueMembers } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   let {
@@ -257,6 +257,14 @@
                   class="card-action-btn {queued ? 'card-action-active' : ''}"
                   onclick={(e) => { e.stopPropagation(); toggleBasket(it.id); }}>
                   <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                </button>
+                <!-- Add this video to the cross-library Play Queue (sequential playback).
+                     List-play glyph pairs it with the Play Queue chip; accent-filled when queued. -->
+                {@const inQueue = playQueueMembers.has(it.id)}
+                <button type="button" aria-label={inQueue ? 'Remove from play queue' : 'Add to play queue'} title={inQueue ? 'In play queue — click to remove' : 'Add to play queue'} aria-pressed={inQueue}
+                  class="card-action-btn {inQueue ? 'card-action-active' : ''}"
+                  onclick={(e) => { e.stopPropagation(); togglePlayQueue(it.id); }}>
+                  <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
                 </button>
               {/if}
               <button type="button" aria-label={isStashed ? 'Restore' : 'Archive'} title={isStashed ? 'Restore' : 'Archive'}
