@@ -52,10 +52,13 @@
     else if (sortBy === 'updated') list.sort((a, b) => ((b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')));
     // 'recent' = stored order, with Beat Montage pinned on top (sort is stable, so the rest stay put).
     else list.sort((a, b) => (isMontage(b) ? 1 : 0) - (isMontage(a) ? 1 : 0));
-    // Finally pin every locked collection to the top. The sort is stable, so the order
-    // chosen above is preserved within the locked group and within the rest — so when
-    // "Show locked" reveals them they surface together at the front, not scattered.
-    return list.sort((a, b) => (b.locked ? 1 : 0) - (a.locked ? 1 : 0));
+    // Finally pin only SEALED (still-locked) collections to the top — and, since sealed
+    // ones are hidden until "Show locked", this only takes effect once you reveal them,
+    // grouping them at the front as a batch you can unlock. The sort is stable, so their
+    // relative order (and the rest) is preserved. Once a collection is UNLOCKED this
+    // session it is no longer sealed, so it drops back into the chosen order like any
+    // other collection — meaning Recently Updated / Name / Largest actually affect it.
+    return list.sort((a, b) => (isSealed(b) ? 1 : 0) - (isSealed(a) ? 1 : 0));
   });
 
   // Count line for the cover, dropping any zero segments (e.g. "26 items · 26 videos").
