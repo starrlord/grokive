@@ -107,7 +107,7 @@
         <summary class="select-btn select-trigger cursor-pointer list-none [&::-webkit-details-marker]:hidden"
                  title="Select visible or batch items">
           <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="m9 12 2 2 4-4"/></svg>
-          <span>Select</span>
+          <span class="btn-word">Select</span>
           <svg viewBox="0 0 24 24" class="select-caret h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
         </summary>
         <!-- Fixed (not absolute) so it escapes the dock's overflow-x clipping;
@@ -121,7 +121,7 @@
       </details>
       <button class="select-btn select-primary"
               disabled={!videoIds.length} onclick={() => onplay()} title="Play selected videos in order">
-        <span class="text-xs">▶</span> Play{videoIds.length > 1 ? ` (${videoIds.length})` : ''}
+        <span class="play-glyph">▶</span><span class="btn-word"> Play{videoIds.length > 1 ? ` (${videoIds.length})` : ''}</span>
       </button>
     </div>
 
@@ -134,7 +134,10 @@
         <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/></svg>
       </button>
       {#if collection}
-        <button class="select-btn" onclick={() => onremovefromcollection()} title="Remove from Collection">Remove</button>
+        <button class="select-btn" onclick={() => onremovefromcollection()} title="Remove from Collection" aria-label="Remove from Collection">
+          <svg viewBox="0 0 24 24" class="mobile-only-icon h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M9 13h6"/></svg>
+          <span class="btn-word">Remove</span>
+        </button>
       {/if}
       <button class="select-btn" onclick={stashAll}
               title={view === 'archive' ? 'Restore from Archive' : 'Archive'} aria-label={view === 'archive' ? 'Restore from Archive' : 'Archive'}>
@@ -145,8 +148,9 @@
     <div class="select-cluster">
       <details class="playlist-menu relative"
                ontoggle={(e) => { playlistPos = e.currentTarget.open ? anchorAbove(e.currentTarget, 280) : null; }}>
-        <summary class="select-btn cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-          Playlist
+        <summary class="select-btn cursor-pointer list-none [&::-webkit-details-marker]:hidden" aria-label="Save as playlist">
+          <svg viewBox="0 0 24 24" class="mobile-only-icon h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h13"/><path d="M3 12h9"/><path d="M3 18h9"/><path d="M17 15v6"/><path d="M14 18h6"/></svg>
+          <span class="btn-word">Playlist</span>
         </summary>
         <div class="playlist-popover" style={playlistPos ? `left:${playlistPos.left}px;bottom:${playlistPos.bottom}px` : ''}>
           <input class="playlist-input" placeholder="Playlist name" bind:value={name} maxlength="80" />
@@ -159,7 +163,7 @@
               aria-label={imagesOnly ? 'Export selected images as ZIP' : 'Export selected videos as MP4'}>
         {#if busy}
           <span class="export-orbit" aria-hidden="true"></span>
-          <span>{imagesOnly ? 'Zipping…' : 'Preparing MP4'}</span>
+          <span class="btn-word">{imagesOnly ? 'Zipping…' : 'Preparing MP4'}</span>
         {:else}
           <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
         {/if}
@@ -169,9 +173,9 @@
         <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
       </button>
       <button class="select-btn" disabled={!montageIds.length} onclick={() => onbasket()}
-              title="Add the selected videos and photos to the cross-library Montage queue">
+              title="Add the selected videos and photos to the cross-library Montage queue" aria-label="Add to Montage queue">
         <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        + Queue
+        <span class="q-plus mobile-only-icon">+</span><span class="btn-word"> + Queue</span>
       </button>
       <button class="select-btn montage-btn" class:montage-running={movieRunning}
               disabled={montageIds.length < 2 && !movieRunning} onclick={() => onmovie()}
@@ -181,7 +185,7 @@
         {/if}
         <span class="montage-label">
           <svg viewBox="0 0 24 24" class="h-3.5 w-3.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-          {movieRunning ? `Rendering ${moviePct}%` : 'Montage'}
+          <span class="btn-word">{movieRunning ? `Rendering ${moviePct}%` : 'Montage'}</span>
         </span>
       </button>
     </div>
@@ -190,8 +194,14 @@
       <button class="select-btn select-danger" disabled={!n} onclick={() => (confirmingDelete = true)} title="Delete" aria-label="Delete">
         <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
       </button>
-      <button class="select-btn" onclick={() => clearSelection()}>Clear</button>
-      <button class="select-btn" onclick={() => setSelectMode(false)}>Done</button>
+      <button class="select-btn" onclick={() => clearSelection()} aria-label="Clear selection">
+        <svg viewBox="0 0 24 24" class="mobile-only-icon h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        <span class="btn-word">Clear</span>
+      </button>
+      <button class="select-btn" onclick={() => setSelectMode(false)} aria-label="Done">
+        <svg viewBox="0 0 24 24" class="mobile-only-icon h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+        <span class="btn-word">Done</span>
+      </button>
     </div>
   </div>
 </div>
@@ -321,6 +331,20 @@
     background: var(--accent);
     border-color: transparent;
     color: var(--on-accent);
+  }
+
+  /* Compact glyphs that only replace the text labels on the mobile icon grid; the
+     full-word .btn-word spans stay visible on desktop so the bar is unchanged there. */
+  .mobile-only-icon {
+    display: none;
+  }
+
+  .play-glyph {
+    font-size: 0.75rem;
+  }
+
+  .q-plus {
+    font-weight: 800;
   }
 
   /* The Select dropdown trigger. The flat .select-btn made it vanish into the
@@ -502,13 +526,15 @@
     }
   }
 
-  /* Touch / narrow viewports (phones + iPad portrait): a single horizontally
-     scrolling row hides options off-screen with no visible affordance on iOS, so
-     the bar reads as broken. Wrap instead — every action stays reachable without
-     scrolling. `display: contents` on the clusters lets their buttons flow as
-     direct flex children of the dock so wrapping happens button-by-button (a
-     cluster on its own would overflow its own row); the cluster dividers simply
-     don't render, which is fine here. */
+  /* Touch / narrow viewports (phones + iPad portrait): a single scrolling row hides
+     options off-screen with no affordance on iOS, and free-flowing wrap produced a
+     ragged, jumbled block. Instead lay the actions out on a deliberate grid of equal
+     columns so they line up. `repeat(auto-fit, minmax(2.6rem, 1fr))` resolves to
+     ~7-8 columns at iPhone widths — a balanced two rows for the ~14 actions — and
+     collapses to a single row on wider tablets. Every action is icon-only here:
+     .btn-word labels are hidden and a few buttons swap in a compact .mobile-only-icon
+     glyph, so the cells stay uniform. `display: contents` on the clusters lets their
+     buttons participate directly as grid items (the cluster dividers don't render). */
   @media (max-width: 900px) {
     .select-shell {
       padding-left: 0.5rem;
@@ -517,13 +543,12 @@
 
     .select-dock {
       border-radius: var(--r-xl);
-      flex-wrap: wrap;
-      justify-content: center;
-      max-height: min(60vh, 20rem);
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(2.6rem, 1fr));
+      gap: 0.35rem;
+      justify-items: stretch;
       max-width: 100%;
-      overflow-x: visible;
-      overflow-y: auto;
-      row-gap: 0.4rem;
+      overflow: visible;
       width: 100%;
     }
 
@@ -531,9 +556,60 @@
       display: contents;
     }
 
+    .select-btn,
+    .select-count {
+      min-height: 2.75rem;
+      min-width: 0;
+      width: 100%;
+    }
+
+    .select-btn {
+      flex: initial;
+      padding: 0.5rem;
+    }
+
+    .select-menu,
+    .playlist-menu {
+      display: block;
+      min-width: 0;
+    }
+
+    .select-menu > summary,
+    .playlist-menu > summary {
+      width: 100%;
+    }
+
+    .select-trigger {
+      padding-left: 0.5rem;
+      padding-right: 0.5rem;
+    }
+
+    /* Icon-only cell: the caret would crowd the select-icon in a ~46px cell, and the
+       distinctive icon already reads as a control. */
+    .select-caret {
+      display: none;
+    }
+
+    .select-count {
+      justify-content: center;
+      padding: 0.25rem;
+    }
+
+    .play-glyph {
+      font-size: 1rem;
+    }
+
+    .btn-word,
+    .select-count-label {
+      display: none;
+    }
+
+    .mobile-only-icon {
+      display: inline-flex;
+    }
+
     .playlist-input {
       width: 10rem;
     }
-
   }
 </style>

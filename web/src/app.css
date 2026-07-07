@@ -537,9 +537,12 @@ html, body { overflow-x: clip; }
    can't undo it — the viewport ends up magnified and freely scrollable
    ("unbound"), which is what searching on iPhone triggers (the search box and
    selects are 14px / text-sm). Floor interactive controls at 16px on touch to
-   suppress it. Unlayered, so it beats Tailwind's layered text-sm utility. */
+   suppress it. Unlayered, so it beats Tailwind's layered text-sm utility.
+   `.name-sizer` is the hidden auto-width mirror behind the collection-title input
+   (see +page.svelte); it must be floored identically or the title input and its
+   sizer diverge on touch tablets and the count pill drifts off the name. */
 @media (pointer: coarse) {
-  input, select, textarea { font-size: 16px; }
+  input, select, textarea, .name-sizer { font-size: 16px; }
 }
 body {
   background: var(--bg);

@@ -656,27 +656,41 @@
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
-        <div class="min-w-[12rem] flex-1 sm:max-w-md">
-          <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-base font-extrabold outline-none"
-            aria-label="Collection name" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+        <!-- Title-styled name (transparent until hovered/focused) with a count pill snug
+             beside it — reads as a heading on one line, not an empty form box. The input
+             auto-hugs its text via a hidden grid "sizer" span (cross-browser, unlike
+             field-sizing which iOS Safari lacks): both stack in one grid cell whose width
+             is the text's, so the pill sits right after the name and follows live renames.
+             min-w-0 + overflow-hidden let it shrink and scroll for very long names. -->
+        <div class="flex min-w-0 flex-1 items-center gap-2">
+          <label class="relative grid min-w-0 max-w-full items-center overflow-hidden">
+            <span aria-hidden="true" class="name-sizer invisible whitespace-pre rounded-lg border border-transparent px-1.5 py-1 text-base font-extrabold sm:text-lg">{collectionName || ' '}</span>
+            <input class="absolute inset-0 h-full w-full rounded-lg border border-transparent bg-transparent px-1.5 py-1 text-base font-extrabold text-ink outline-none transition hover:border-line focus:border-[var(--accent)] focus:bg-[var(--surface-2)] sm:text-lg"
+              aria-label="Collection name" title="Rename collection" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+          </label>
+          <span class="shrink-0 rounded-full border border-line bg-[var(--surface-2)] px-2.5 py-0.5 text-sm font-semibold text-muted tabular-nums" title={`${collectionTotal.toLocaleString()} items`}>{collectionTotal.toLocaleString()}</span>
         </div>
-        <span class="whitespace-nowrap text-sm text-muted">{collectionTotal.toLocaleString()} items</span>
-        <MediaTypeTabs class="ml-auto" />
-        <SortSelect />
-        <!-- Cluster the collection's clips by the base image each was generated from,
-             so related videos (and their source still) gather into one family you can
-             merge-export or montage in a click. -->
-        <button type="button" aria-pressed={groupByBase}
-          class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition {groupByBase ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-          title="Group related videos by their base image" onclick={() => (groupByBase = !groupByBase)}>
-          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-          Group
-        </button>
-        <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
-          disabled={!currentGridItems.some((it) => it.media_type === 'image')}
-          title="Play a photo slideshow of this collection's images" onclick={() => slideshowCollection(activeCollection)}>Slideshow</button>
-        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
-          disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
+        <!-- One control cluster: right-aligned on desktop, a tidy full-width wrapping strip
+             on mobile — instead of ml-auto on the tabs alone (which stranded them hard-right
+             with a dead gap once the row wrapped). -->
+        <div class="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto">
+          <MediaTypeTabs />
+          <SortSelect />
+          <!-- Cluster the collection's clips by the base image each was generated from,
+               so related videos (and their source still) gather into one family you can
+               merge-export or montage in a click. -->
+          <button type="button" aria-pressed={groupByBase}
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition {groupByBase ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+            title="Group related videos by their base image" onclick={() => (groupByBase = !groupByBase)}>
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            Group
+          </button>
+          <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
+            disabled={!currentGridItems.some((it) => it.media_type === 'image')}
+            title="Play a photo slideshow of this collection's images" onclick={() => slideshowCollection(activeCollection)}>Slideshow</button>
+          <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
+            disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
+        </div>
       </div>
 
       {#if currentGridItems.length === 0}
