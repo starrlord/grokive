@@ -141,10 +141,11 @@
   50% { opacity: 0.85; }
 }
 
-/* Imagine quota — a compact ⚡ badge inline with the actions; the full per-tier
-   breakdown opens as a popover above the bar on hover / tap / focus. The whole
-   block hides when the toolbar is collapsed (only the G handle shows) and until
-   the first successful fetch (set inline in JS). */
+/* Weekly usage — a compact ⚡ badge inline with the actions showing the weekly %
+   used; the full breakdown (per-product bars + reset + extra credits) opens as a
+   popover above the bar on hover / tap / focus. The whole block hides when the
+   toolbar is collapsed (only the G handle shows) and until the first successful
+   fetch (set inline in JS). */
 .gks-quota {
   position: relative;          /* anchor for the absolutely-positioned popover */
   flex: 0 0 auto;
@@ -159,8 +160,8 @@
   display: none !important;
 }
 
-/* The always-visible badge: lightning glyph + worst-case count. Sized to match
-   the action buttons so the row stays even. */
+/* The always-visible badge: lightning glyph + weekly % used. Sized to match the
+   action buttons so the row stays even. */
 .gks-quota-badge {
   flex: 0 0 auto;
   display: inline-flex;
@@ -194,14 +195,14 @@
   font-weight: 700;
 }
 
-/* Badge colour follows the worst tier: plenty/unlimited → green, low → amber,
-   exhausted → red. */
+/* Badge colour follows how much of the weekly allowance is used: mostly free →
+   green, nearly spent → amber, at the cap → red. */
 .gks-quota-badge.gks-q-ok  { color: #34d399; border-color: #1f5c46; }
 .gks-quota-badge.gks-q-low { color: #fbbf24; border-color: #6b551b; }
 .gks-quota-badge.gks-q-out { color: #f87171; border-color: #6b2b2b; }
 
-/* Popover with the full per-tier breakdown, anchored above the badge. Opens on
-   hover / focus / a JS-toggled .gks-pop-open class (for tap). */
+/* Popover with the full breakdown, anchored above the badge. Opens on hover /
+   focus / a JS-toggled .gks-pop-open class (for tap). */
 .gks-quota-pop {
   position: absolute;
   right: 0;
@@ -209,9 +210,9 @@
   z-index: 1;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  min-width: 150px;
-  padding: 8px 10px;
+  gap: 8px;
+  width: 224px;
+  padding: 10px 12px;
   background: #14181d;
   border: 1px solid #262b33;
   border-radius: 10px;
@@ -230,56 +231,124 @@
   pointer-events: auto;
 }
 
-/* Each tier is a row: label on the left, value (+ optional reset) on the right. */
-.gks-q-stat {
+/* Header: period label on the left, reset countdown on the right. */
+.gks-q-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  font-size: 12px;
-  line-height: 1;
-  color: #c4cad3;
+  gap: 10px;
   white-space: nowrap;
 }
 
-.gks-q-label {
-  color: #8a93a0;
-  font-weight: 600;
-  font-size: 11px;
-}
-
-.gks-q-right {
-  display: inline-flex;
-  align-items: center;
-}
-
-.gks-q-val {
-  font-variant-numeric: tabular-nums;
+.gks-q-title {
+  font-size: 12px;
   font-weight: 700;
-  color: #c4cad3;
-}
-
-/* Plenty left / unlimited → green, low → amber, exhausted → red. */
-.gks-q-stat.gks-q-ok .gks-q-val { color: #34d399; }
-.gks-q-stat.gks-q-low .gks-q-val { color: #fbbf24; }
-.gks-q-stat.gks-q-out .gks-q-val { color: #f87171; }
-
-/* Horizontal rule between the image tiers (Img/Pro/Edit) and the video tiers. */
-.gks-q-divider {
-  height: 1px;
-  width: 100%;
-  margin: 4px 0;
-  background: #262b33;
+  color: #e6e9ee;
 }
 
 .gks-q-reset {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  margin-left: 8px;
+  font-size: 11px;
   color: #8a93a0;
   font-variant-numeric: tabular-nums;
+}
+
+/* Total usage bar + its "N% used" label. */
+.gks-q-total {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.gks-q-total-val {
   font-size: 11px;
+  font-weight: 600;
+  color: #c4cad3;
+  font-variant-numeric: tabular-nums;
+}
+
+.gks-q-bar {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #0b0d10;
+  overflow: hidden;
+}
+
+.gks-q-bar-fill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 999px;
+  background: #34d399;
+  transition: width 0.2s ease;
+}
+
+.gks-q-bar-fill.gks-q-ok  { background: #34d399; }
+.gks-q-bar-fill.gks-q-low { background: #fbbf24; }
+.gks-q-bar-fill.gks-q-out { background: #f87171; }
+
+/* Per-product breakdown: a stack of [label | mini-bar | %] rows. */
+.gks-q-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gks-q-row {
+  display: grid;
+  grid-template-columns: 54px 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.gks-q-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #8a93a0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gks-q-row[data-product="imagine"] .gks-q-label {
+  color: #a99bff;   /* emphasise Imagine — this extension's context */
+}
+
+.gks-q-rowbar {
+  position: relative;
+  display: block;
+  height: 5px;
+  border-radius: 999px;
+  background: #0b0d10;
+  overflow: hidden;
+}
+
+.gks-q-rowbar-fill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 999px;
+  background: #7c6cff;
+  transition: width 0.2s ease;
+}
+
+.gks-q-rowval {
+  font-size: 11px;
+  font-weight: 700;
+  color: #c4cad3;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Extra usage credits / on-demand spend footer. */
+.gks-q-extra {
+  padding-top: 8px;
+  border-top: 1px solid #262b33;
+  font-size: 11px;
+  color: #8a93a0;
+  font-variant-numeric: tabular-nums;
 }
 
 .gks-close {

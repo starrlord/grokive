@@ -35,10 +35,11 @@ parties, no cloud, no telemetry.
   paste into Grok Imagine as a reference image. Thumbnails and full images are fetched through the
   background (so auth + CORS never get in the way), and the full image is pre-warmed on hover so the
   copy is instant.
-- **Imagine quota readout** — on Grok Imagine pages, the toolbar shows a compact ⚡ badge with
-  your most-urgent remaining count; hover (or tap) it to expand the full per-bucket breakdown —
-  image (Img / Pro / Edit) and video (480p / 720p) generations — each with a live countdown to
-  reset, read straight from Grok's own quota endpoint using your existing grok.com session.
+- **Weekly usage readout** — on Grok Imagine pages, the toolbar shows a compact ⚡ badge with
+  the percentage of your weekly allowance used; hover (or tap) it to expand the full breakdown —
+  a total usage bar, a per-product split (Imagine / Chat / Voice / …), the time until the weekly
+  reset, and any extra usage credits — read straight from Grok's own usage/billing endpoint using
+  your existing grok.com session.
 - **Options page** with a "Test connection" button so you can confirm setup before relying on it.
 
 ## How it talks to Grokive
@@ -189,16 +190,18 @@ clipboard** — then paste it (Ctrl/Cmd+V) into Grok Imagine as a reference imag
 as PNG. The panel opens anchored to the toolbar (above it by default), closes on **Esc** or an
 outside click, and lazy-loads thumbnails as you scroll.
 
-**Imagine quota readout.** On Grok Imagine pages (`grok.com/imagine`), the pill shows a compact
-**⚡ badge** carrying your most-urgent remaining count, colour-coded (green = plenty, amber = low,
-red = none left). **Hover** the badge — or **tap** it on touch — to expand the full per-bucket
-breakdown — **Img · Pro · Edit** and **480p · 720p** — each with its exact count and, when you
-near or hit a cap, a live **⏱ countdown to reset**. It reads from Grok's own quota endpoint using
-your existing grok.com session (no API key), refreshes every 60 s, and stays hidden on
-non-Imagine pages.
+**Weekly usage readout.** On Grok Imagine pages (`grok.com/imagine`), the pill shows a compact
+**⚡ badge** carrying the **% of your weekly allowance used**, colour-coded (green = comfortable,
+under ~90% used; amber = nearly spent, 90%+; red = at the cap, 100%). **Hover** the badge — or
+**tap** it on touch — to expand
+the full breakdown: a **total usage bar**, a **per-product split** (Imagine · Chat · Voice · …,
+each with its own share), the time until the **weekly reset**, and any **extra usage credits**
+(prepaid balance / on-demand spend). It reads from Grok's own usage endpoint using your existing
+grok.com session (no API key), refreshes every 5 min, and stays hidden on non-Imagine pages.
 
-> Grok only reports an exact number as you approach a limit — when you have plenty, a tier shows
-> **∞**. That's a Grok API behaviour, not the extension.
+> Grok moved from per-generation counts to a single **weekly (or monthly) allowance shared across
+> products**, with a per-product breakdown — this readout mirrors what you see in Grok's own
+> **Usage** panel. There are no longer separate image-vs-480p-vs-720p counts.
 
 **Move it:** drag the violet **G** handle to reposition the pill anywhere on the page — it
 stays on-screen and remembers where you put it across page loads. A quick **click** (no drag)
@@ -211,9 +214,9 @@ You can turn this toolbar off in Options.
 
 The extension sends your prompts, library, collection images, and AI requests **only** to the
 Grokive server you configure — nothing goes to any third party, and there is no analytics or telemetry. The one
-other request it makes is the **Imagine quota read**: a same-origin call to `grok.com`'s own
-quota endpoint, made only while you're on a Grok Imagine page, using the session you're already
-logged in with. It reads your generation limits and sends nothing new anywhere.
+other request it makes is the **weekly usage read**: a same-origin call to `grok.com`'s own
+usage/billing endpoint, made only while you're on a Grok Imagine page, using the session you're
+already logged in with. It reads your usage percentages and sends nothing new anywhere.
 
 ## How it works (architecture)
 
@@ -222,10 +225,12 @@ logged in with. It reads your generation limits and sends nothing new anywhere.
   headers, but a background-page `fetch` made with host permission isn't subject to CORS. The
   popup, options page, and content script never fetch the Grokive server directly — they send
   messages to the background, which returns a consistent `{ ok, data?, error? }` shape.
-- **One exception:** the grok.com content script reads the Imagine quota with a *same-origin*
+- **One exception:** the grok.com content script reads the weekly usage with a *same-origin*
   `fetch` to grok.com directly (`credentials:'include'`) — it's already running on that origin
-  with the page's session, so there's no background round-trip or CORS issue. It polls only on
-  `/imagine*` pages and stays out of the Grokive message path entirely.
+  with the page's session, so there's no background round-trip or CORS issue. The endpoint is a
+  gRPC-Web unary RPC, so the content script frames the request and decodes the small proto
+  response by hand (no proto codegen / dependency). It polls only on `/imagine*` pages and stays
+  out of the Grokive message path entirely.
 - **Auth is handled in the background:** before a protected call (or on a `401`), it checks
   `/api/auth/status` and, if needed and credentials are configured, logs in and retries once.
 - Settings live in `ext.storage.local` under a single `settings` key, with defaults filled in so

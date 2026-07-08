@@ -1,5 +1,5 @@
 <script>
-  import { collections, removeCollection, loadCollections } from '$lib/state.js';
+  import { collections, removeCollection, loadCollections, requestGalleryReload } from '$lib/state.js';
   import { relockCollection, relockAllCollections } from '$lib/api.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import SearchField from './SearchField.svelte';
@@ -15,8 +15,9 @@
     e.currentTarget.value = ''; // allow re-picking the same folder later
   }
   const anyUnlocked = $derived(($collections || []).some((c) => c.locked && c.unlocked));
-  async function relockNow(c) { try { await relockCollection(c.id); } finally { loadCollections(); } }
-  async function lockAll() { try { await relockAllCollections(); } finally { loadCollections(); } }
+  // Lock-state changes shift what's visible in All Media / facets, so refresh the gallery too.
+  async function relockNow(c) { try { await relockCollection(c.id); } finally { loadCollections(); requestGalleryReload(); } }
+  async function lockAll() { try { await relockAllCollections(); } finally { loadCollections(); requestGalleryReload(); } }
   const unlockHoursLeft = (c) => {
     const secs = (c.unlock_expires || 0) - Date.now() / 1000;
     return secs > 0 ? Math.max(1, Math.ceil(secs / 3600)) : 0;
@@ -256,5 +257,5 @@
 
 {#if lockModal}
   <CollectionLockModal collection={lockModal.collection} mode={lockModal.mode}
-    onclose={() => (lockModal = null)} ondone={() => loadCollections()} />
+    onclose={() => (lockModal = null)} ondone={() => { loadCollections(); requestGalleryReload(); }} />
 {/if}

@@ -3,9 +3,9 @@
 // Injects a small collapsible floating toolbar (bottom-right) onto grok.com with
 // three actions: Random (pull a random saved prompt), Enhance (rewrite the field
 // text via the server's AI), and Save (store the field text into the saveFolder).
-// It also shows a live Grok Imagine quota readout (image + 480p/720p video
-// generations left + time until reset), read straight from grok.com's own quota
-// endpoint, scoped to /imagine pages.
+// It also shows a live Grok weekly-usage readout (% of the weekly allowance used,
+// a per-product breakdown, and time until reset), read straight from grok.com's own
+// billing RPC, scoped to /imagine pages.
 //
 // Hard rules from the shared build contract:
 //  - Vanilla JS only, MV2, WebExtension promise API via the `ext` shim.
@@ -296,181 +296,299 @@
     toast(added ? ('Saved & starred ★ to ' + folder) : ('Starred ★ in ' + folder), 'ok');
   }
 
-  // ---- Imagine quota (image + video) ------------------------------------------
-  // Grok Imagine exposes per-bucket quota at POST /rest/media/imagine/quota_info
-  // (empty JSON body) — the same endpoint the official UI's credit-quota store
-  // polls. The toolbar lives ON grok.com, so this is a SAME-ORIGIN fetch and the
-  // page's session cookie rides along with credentials:'include' — no API key.
-  // The response carries five buckets: image, imagePro, imageEdit, video (480p),
-  // video720p (720p). Quirk: when you're not near the cap the server OMITS
-  // remainingQueries/nextAvailableAt and just returns { available:true } (treat as
-  // unlimited); the live count + reset time only appear as you approach/hit the cap.
-  const QUOTA_URL = 'https://grok.com/rest/media/imagine/quota_info';
-  const QUOTA_POLL_MS = 60000;            // network refresh cadence
-  const RESET_PAD_MS = 30 * 60 * 1000;    // grok.com pads nextAvailableAt by 30 min
+  // ---- Weekly usage (Grok credits) --------------------------------------------
+  // Grok replaced the old per-bucket Imagine quota (Img/Pro/Edit/480p/720p counts)
+  // with a single WEEKLY (or monthly) usage allowance shared across products, plus
+  // a per-product breakdown — the same data behind grok.com's own "Usage" panel.
+  // It's served by a gRPC-Web unary RPC, grok_api_v2.GrokBuildBilling/
+  // GetGrokCreditsConfig, at the root path below. The toolbar lives ON grok.com, so
+  // this is a SAME-ORIGIN fetch and the page's session cookie rides along with
+  // credentials:'include' — no API key. The service accepts only proto encoding, so
+  // we frame the request and decode the response by hand (a small, flat message).
+  const CREDITS_URL = 'https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig';
+  const QUOTA_POLL_MS = 5 * 60 * 1000;   // weekly numbers move slowly; poll every 5 min
 
-  // The five quota buckets in display order. `key` is the response field AND the
-  // data-tier attribute; `group` drives a small divider between image and video.
-  const QUOTA_TIERS = [
-    { key: 'image', label: 'Img', group: 'img' },
-    { key: 'imagePro', label: 'Pro', group: 'img' },
-    { key: 'imageEdit', label: 'Edit', group: 'img' },
-    { key: 'video', label: '480p', group: 'vid' },
-    { key: 'video720p', label: '720p', group: 'vid' }
-  ];
+  // billing_product.Product enum -> display. Also the fallback sort order (Imagine
+  // first, since that's this extension's context).
+  const CREDIT_PRODUCTS = {
+    5: { key: 'imagine', label: 'Imagine' },
+    4: { key: 'chat', label: 'Chat' },
+    6: { key: 'voice', label: 'Voice' },
+    2: { key: 'build', label: 'Build' },
+    3: { key: 'plugins', label: 'Plugins' },
+    1: { key: 'api', label: 'API' }
+  };
+  const CREDIT_PERIODS = { 1: 'monthly', 2: 'weekly' };
 
   let quotaEl = null;
-  let quotaPollTimer = null;   // 60s network poll (only while on an Imagine page)
-  let quotaTickTimer = null;   // 1s ticker: watches SPA nav + re-renders countdowns
+  let quotaPollTimer = null;   // network poll (only while on an Imagine page)
+  let quotaTickTimer = null;   // 1s ticker: watches SPA nav + refreshes the reset label
   let quotaRefreshing = false; // guard against overlapping fetches
   let quotaPath = '';          // last seen pathname, to detect client-side nav
-  // Map of bucket key -> tier view model { unlimited, remaining, resetAt } (or null).
-  let quotaState = {};
+  let creditState = null;      // decoded view model, or null when unknown/hidden
 
-  // Turn one quota bucket into a tier view model. `available:true` with no
-  // remainingQueries means "plenty left" (the server only sends a number as you
-  // near the cap); available:false means exhausted (0).
-  function mapBucket(bucket) {
-    if (!bucket || typeof bucket !== 'object') return null;
-    const hasCount = typeof bucket.remainingQueries === 'number';
-    let resetAt = null;
-    if (bucket.nextAvailableAt != null) {
-      const t = new Date(bucket.nextAvailableAt).getTime();   // ISO-8601 or epoch-ms
-      if (Number.isFinite(t)) resetAt = t + RESET_PAD_MS;
+  // ---- minimal protobuf wire decoder ------------------------------------------
+  // Just enough to walk GetGrokCreditsConfigResponse: varint, 32-bit (float),
+  // 64-bit (double) and length-delimited (sub-message / string). Never throws.
+  function pbVarint(st) {
+    let shift = 0, result = 0;
+    for (;;) {
+      const byte = st.b[st.i++];
+      result += (byte & 0x7f) * Math.pow(2, shift);   // Number is exact for our ints
+      if ((byte & 0x80) === 0) break;
+      shift += 7;
     }
-    return {
-      unlimited: !hasCount && bucket.available !== false,
-      remaining: hasCount ? bucket.remainingQueries : (bucket.available === false ? 0 : null),
-      resetAt: resetAt
-    };
+    return result;
+  }
+  // Call fn(field, wireType, value) for each field. Length-delimited -> Uint8Array,
+  // varint -> number, 32-bit -> float, 64-bit -> double. Bails on an unknown wire
+  // type instead of throwing (a non-quota response just decodes to nothing).
+  function pbFields(bytes, fn) {
+    const st = { b: bytes, i: 0 };
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    while (st.i < bytes.length) {
+      const tag = pbVarint(st);
+      const field = tag >>> 3, wt = tag & 7;
+      if (wt === 0) fn(field, wt, pbVarint(st));
+      else if (wt === 1) { if (st.i + 8 > bytes.length) break; const o = st.i; st.i += 8; fn(field, wt, dv.getFloat64(o, true)); }
+      else if (wt === 2) { const len = pbVarint(st); const s = bytes.subarray(st.i, st.i + len); st.i += len; fn(field, wt, s); }
+      else if (wt === 5) { if (st.i + 4 > bytes.length) break; const o = st.i; st.i += 4; fn(field, wt, dv.getFloat32(o, true)); }
+      else break;
+    }
+  }
+  function pbTimestampMs(msg) {   // google.protobuf.Timestamp { 1: seconds }
+    let sec = 0;
+    pbFields(msg, (f, wt, v) => { if (f === 1 && wt === 0) sec = v; });
+    return sec * 1000;
+  }
+  function pbCentVal(msg) {       // prod_charger.Cent { 1: val (int64 cents) }
+    let val = 0;
+    pbFields(msg, (f, wt, v) => { if (f === 1 && wt === 0) val = v; });
+    return val;
   }
 
-  async function fetchImagineQuota() {
+  // Decode GrokCreditsConfig into the view model the UI consumes. Field numbers are
+  // from the service's proto descriptor (verified against a live response):
+  //   1 credit_usage_percent(float)  2 on_demand_cap  3 on_demand_used
+  //   7 product_usage(repeated)      8 current_period 12 prepaid_balance
+  function decodeCreditsConfig(cfg) {
+    const out = {
+      usedPercent: null, periodType: 'unspecified', resetAt: null,
+      products: [], prepaidCents: 0, onDemandCapCents: 0, onDemandUsedCents: 0
+    };
+    pbFields(cfg, (f, wt, v) => {
+      if (f === 1 && wt === 5) out.usedPercent = v;
+      else if (f === 2 && wt === 2) out.onDemandCapCents = pbCentVal(v);
+      else if (f === 3 && wt === 2) out.onDemandUsedCents = pbCentVal(v);
+      else if (f === 7 && wt === 2) {                      // ProductUsage { 1: product, 2: usage_percent }
+        let product = 0, pct = 0;
+        pbFields(v, (pf, pwt, pv) => {
+          if (pf === 1 && pwt === 0) product = pv;
+          else if (pf === 2 && pwt === 5) pct = pv;
+        });
+        const meta = CREDIT_PRODUCTS[product];
+        if (meta) out.products.push({ key: meta.key, label: meta.label, percent: pct });
+      } else if (f === 8 && wt === 2) {                    // UsagePeriod { 1: type, 3: end }
+        pbFields(v, (uf, uwt, uv) => {
+          if (uf === 1 && uwt === 0) out.periodType = CREDIT_PERIODS[uv] || 'unspecified';
+          else if (uf === 3 && uwt === 2) out.resetAt = pbTimestampMs(uv);
+        });
+      } else if (f === 12 && wt === 2) out.prepaidCents = pbCentVal(v);
+    });
+    return out;
+  }
+
+  // Parse a gRPC-Web response body (concatenated 5-byte-prefixed frames): the data
+  // frame holds the proto message; the trailer frame (flag bit 0x80) carries
+  // grpc-status. Returns the decoded config, or null on error / no data.
+  function decodeGrpcWeb(buf) {
+    const bytes = new Uint8Array(buf);
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let i = 0, message = null, statusOk = true, sawStatus = false;
+    while (i + 5 <= bytes.length) {
+      const flag = bytes[i];
+      const len = dv.getUint32(i + 1, false);
+      i += 5;
+      const payload = bytes.subarray(i, i + len);
+      i += len;
+      if (flag & 0x80) {
+        const m = /grpc-status:\s*(\d+)/i.exec(new TextDecoder().decode(payload));
+        if (m) { sawStatus = true; statusOk = m[1] === '0'; }
+      } else if (!(flag & 0x01)) {
+        message = payload;   // uncompressed data frame
+      }
+    }
+    if (sawStatus && !statusOk) return null;
+    if (!message) return null;
+    let cfg = null;
+    pbFields(message, (f, wt, v) => { if (f === 1 && wt === 2) cfg = v; });   // response { 1: config }
+    return cfg ? decodeCreditsConfig(cfg) : null;
+  }
+
+  // Fetch + decode the weekly usage. Same-origin gRPC-Web unary; the request
+  // message (GetGrokCreditsConfigRequest) sets no fields, so the body is a single
+  // empty (zero-length) frame: [flag=0, length=0].
+  async function fetchCreditsConfig() {
     try {
-      const res = await fetch(QUOTA_URL, {
+      const res = await fetch(CREDITS_URL, {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}'
+        headers: {
+          'Content-Type': 'application/grpc-web+proto',
+          'Accept': 'application/grpc-web+proto',
+          'X-Grpc-Web': '1',
+          'x-user-agent': 'grpc-web-javascript/0.1'
+        },
+        body: new Uint8Array([0, 0, 0, 0, 0])
       });
       if (!res || !res.ok) return null;
-      const data = await res.json();
-      return (data && typeof data === 'object') ? data : null;
+      const buf = await res.arrayBuffer();
+      return decodeGrpcWeb(buf);
     } catch (e) {
       return null;   // never throw — the readout just stays hidden
     }
   }
 
-  function fmtCountdown(ms) {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
-    const p = (n) => String(n).padStart(2, '0');
-    return h > 0 ? (h + ':' + p(m) + ':' + p(sec)) : (m + ':' + p(sec));
+  function fmtPct(v) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
+    const r = Math.round(v * 10) / 10;   // one decimal, but drop a trailing .0
+    return (Number.isInteger(r) ? String(r) : r.toFixed(1)) + '%';
   }
 
-  function renderTier(statEl, tier) {
-    if (!statEl) return;
-    const valEl = statEl.querySelector('.gks-q-val');
-    const resetEl = statEl.querySelector('.gks-q-reset');
-    const resetValEl = statEl.querySelector('.gks-q-reset-val');
-    statEl.classList.remove('gks-q-ok', 'gks-q-low', 'gks-q-out');
-    if (!tier) { valEl.textContent = '—'; resetEl.style.display = 'none'; return; }
-    if (tier.unlimited) {
-      valEl.textContent = '∞';
-      statEl.classList.add('gks-q-ok');
-    } else if (typeof tier.remaining === 'number') {
-      valEl.textContent = String(tier.remaining);
-      statEl.classList.add(tier.remaining <= 0 ? 'gks-q-out' : (tier.remaining <= 3 ? 'gks-q-low' : 'gks-q-ok'));
-    } else {
-      valEl.textContent = '—';
+  function fmtMoney(cents) {
+    return '$' + (Math.max(0, cents) / 100).toFixed(2);
+  }
+
+  // Coarse "in 6d 3h" / "in 4h 12m" / "in 9m" until the weekly reset.
+  function fmtResetIn(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return 'in ' + d + 'd ' + h + 'h';
+    if (h > 0) return 'in ' + h + 'h ' + m + 'm';
+    if (m > 0) return 'in ' + m + 'm';
+    return 'soon';
+  }
+
+  // Urgency bucket for the weekly % USED — green while little is used, red near the
+  // cap. Badge shows "% used" (matching grok.com's own wording), coloured this way.
+  function creditUrgency(used) {
+    if (typeof used !== 'number') return 'ok';
+    if (used >= 100) return 'out';
+    if (used >= 90) return 'low';
+    return 'ok';
+  }
+
+  function periodLabel(type) {
+    return type === 'monthly' ? 'Monthly' : 'Weekly';
+  }
+
+  // One-line tooltip, e.g. "Weekly usage — 2% used · Imagine 2% · resets in 6d 3h".
+  function buildQuotaTitle() {
+    if (!creditState || typeof creditState.usedPercent !== 'number') return 'Grok weekly usage';
+    const parts = [periodLabel(creditState.periodType) + ' usage — ' + fmtPct(creditState.usedPercent) + ' used'];
+    for (const p of creditState.products) {
+      if (p.percent > 0) parts.push(p.label + ' ' + fmtPct(p.percent));
     }
-    if (tier.resetAt) {
-      resetValEl.textContent = fmtCountdown(tier.resetAt - Date.now());
-      resetEl.style.display = '';
-    } else {
-      resetEl.style.display = 'none';
-    }
+    if (creditState.resetAt) parts.push('resets ' + fmtResetIn(creditState.resetAt - Date.now()));
+    return parts.join(' · ');
+  }
+
+  function clearChildren(el) {
+    while (el && el.firstChild) el.removeChild(el.firstChild);
   }
 
   function renderQuota() {
     if (!quotaEl) return;
-    let known = false;
-    let worst = 'ok';          // ok < low < out — follows the most-urgent tier
-    let minRemaining = null;   // smallest concrete count across metered tiers
-    let allUnlimited = true;
-    for (const t of QUOTA_TIERS) {
-      const tier = quotaState[t.key] || null;
-      if (tier) known = true;
-      renderTier(quotaEl.querySelector('[data-tier="' + t.key + '"]'), tier);
-      if (!tier || tier.unlimited) continue;
-      if (typeof tier.remaining === 'number') {
-        allUnlimited = false;
-        if (minRemaining == null || tier.remaining < minRemaining) minRemaining = tier.remaining;
-        if (tier.remaining <= 0) worst = 'out';
-        else if (tier.remaining <= 3 && worst !== 'out') worst = 'low';
-      }
+    const st = creditState;
+    // Reveal only once we have a usable number; a failed/blocked fetch (e.g. signed
+    // out) leaves the block hidden rather than showing a broken readout.
+    if (!st || typeof st.usedPercent !== 'number') {
+      quotaEl.style.display = 'none';
+      return;
     }
-    // Badge: colour follows the worst tier; the value is ∞ while everything is
-    // unlimited, otherwise the most-urgent remaining count (so the number you
-    // actually care about is visible without opening the popover).
+    quotaEl.style.display = '';
+    // Round once and drive BOTH the number and the colour off it, so the badge's
+    // displayed % and its urgency colour can never disagree at a threshold seam
+    // (e.g. 99.96 shouldn't render "100%" while the colour stays amber).
+    const shownPct = Math.round(st.usedPercent * 10) / 10;
+    const urg = creditUrgency(shownPct);
+
     const badge = quotaEl.querySelector('.gks-quota-badge');
     if (badge) {
       badge.classList.remove('gks-q-ok', 'gks-q-low', 'gks-q-out');
-      badge.classList.add(worst === 'out' ? 'gks-q-out' : (worst === 'low' ? 'gks-q-low' : 'gks-q-ok'));
-      const bVal = badge.querySelector('.gks-qb-val');
-      if (bVal) bVal.textContent = allUnlimited ? '∞' : String(minRemaining);
+      badge.classList.add('gks-q-' + urg);
       badge.title = buildQuotaTitle();
     }
-    // Reveal only once we actually have data; a failed/blocked fetch (e.g. signed
-    // out) leaves every tier null and the block stays hidden rather than showing —.
-    quotaEl.style.display = known ? '' : 'none';
-  }
+    const bVal = quotaEl.querySelector('.gks-qb-val');
+    if (bVal) bVal.textContent = fmtPct(shownPct);
 
-  // One-line "Img ∞ · Pro ∞ · Edit ∞ · 480p 12 · 720p ∞" summary for the badge
-  // tooltip, so the full picture is available on hover even without the popover.
-  function buildQuotaTitle() {
-    const parts = [];
-    for (const t of QUOTA_TIERS) {
-      const tier = quotaState[t.key];
-      let v = '—';
-      if (tier) {
-        if (tier.unlimited) v = '∞';
-        else if (typeof tier.remaining === 'number') v = String(tier.remaining);
+    const title = quotaEl.querySelector('.gks-q-title');
+    if (title) title.textContent = periodLabel(st.periodType) + ' usage';
+    const reset = quotaEl.querySelector('.gks-q-reset');
+    if (reset) {
+      if (st.resetAt) { reset.textContent = 'resets ' + fmtResetIn(st.resetAt - Date.now()); reset.style.display = ''; }
+      else reset.style.display = 'none';
+    }
+
+    const totalVal = quotaEl.querySelector('.gks-q-total-val');
+    if (totalVal) totalVal.textContent = fmtPct(shownPct) + ' used';
+    const fill = quotaEl.querySelector('.gks-q-total .gks-q-bar-fill');
+    if (fill) {
+      fill.style.width = Math.max(0, Math.min(100, shownPct)) + '%';
+      fill.classList.remove('gks-q-ok', 'gks-q-low', 'gks-q-out');
+      fill.classList.add('gks-q-' + urg);
+    }
+
+    // Per-product breakdown: skip zero-usage products, most-used first.
+    const bd = quotaEl.querySelector('.gks-q-breakdown');
+    if (bd) {
+      clearChildren(bd);
+      const rows = st.products.filter((p) => p.percent > 0).sort((a, b) => b.percent - a.percent);
+      bd.style.display = rows.length ? '' : 'none';
+      for (const p of rows) {
+        const row = document.createElement('div');
+        row.className = 'gks-q-row';
+        row.setAttribute('data-product', p.key);
+        const lab = document.createElement('span');
+        lab.className = 'gks-q-label';
+        lab.textContent = p.label;
+        const bar = document.createElement('span');
+        bar.className = 'gks-q-rowbar';
+        const rf = document.createElement('i');
+        rf.className = 'gks-q-rowbar-fill';
+        rf.style.width = Math.max(0, Math.min(100, p.percent)) + '%';
+        bar.appendChild(rf);
+        const val = document.createElement('span');
+        val.className = 'gks-q-rowval';
+        val.textContent = fmtPct(p.percent);
+        row.appendChild(lab);
+        row.appendChild(bar);
+        row.appendChild(val);
+        bd.appendChild(row);
       }
-      parts.push(t.label + ' ' + v);
     }
-    return 'Grok Imagine quota — ' + parts.join(' · ');
-  }
 
-  // 1s tick: re-render only the countdown text from the stored resetAt; when a
-  // window rolls over, pull fresh numbers.
-  function updateCountdowns() {
-    if (!quotaEl) return;
-    let expired = false;
-    for (const t of QUOTA_TIERS) {
-      const tier = quotaState[t.key];
-      if (!tier || !tier.resetAt) continue;
-      const left = tier.resetAt - Date.now();
-      const stat = quotaEl.querySelector('[data-tier="' + t.key + '"]');
-      const rv = stat && stat.querySelector('.gks-q-reset-val');
-      if (rv) rv.textContent = fmtCountdown(left);
-      if (left <= 0) expired = true;
+    // Extra usage credits (prepaid balance) + on-demand spend, when present.
+    const extra = quotaEl.querySelector('.gks-q-extra');
+    if (extra) {
+      const bits = [];
+      if (st.prepaidCents > 0) bits.push('Extra credits ' + fmtMoney(st.prepaidCents));
+      if (st.onDemandCapCents > 0) bits.push('On-demand ' + fmtMoney(st.onDemandUsedCents) + ' / ' + fmtMoney(st.onDemandCapCents));
+      extra.textContent = bits.join(' · ');
+      extra.style.display = bits.length ? '' : 'none';
     }
-    if (expired) refreshQuota();
   }
 
   async function refreshQuota() {
     if (quotaRefreshing) return;
     quotaRefreshing = true;
-    const data = await fetchImagineQuota();
+    const data = await fetchCreditsConfig();
     quotaRefreshing = false;
-    if (data) {
-      const next = {};
-      for (const t of QUOTA_TIERS) next[t.key] = mapBucket(data[t.key]);
-      quotaState = next;
-    }
+    // Keep the last good numbers on a transient failure (don't blank the badge);
+    // leaving Imagine explicitly clears creditState via syncQuota.
+    if (data) creditState = data;
     renderQuota();
   }
 
@@ -479,13 +597,13 @@
     wrap.className = 'gks-quota';
     wrap.style.display = 'none';   // hidden until the first successful fetch
 
-    // The always-visible badge: ⚡ glyph + the most-urgent remaining count.
+    // The always-visible badge: ⚡ glyph + weekly % used.
     const badge = document.createElement('button');
     badge.type = 'button';
     badge.className = 'gks-quota-badge';
     badge.setAttribute('aria-haspopup', 'true');
     badge.setAttribute('aria-expanded', 'false');
-    badge.title = 'Grok Imagine quota — hover for image & video generations left';
+    badge.title = 'Grok weekly usage — hover for the per-product breakdown';
     const bIcon = document.createElement('span');
     bIcon.className = 'gks-qb-icon';
     bIcon.textContent = '⚡';
@@ -495,47 +613,50 @@
     badge.appendChild(bIcon);
     badge.appendChild(bVal);
 
-    // The popover: one row per tier (label left, value + reset right), with a
-    // horizontal rule between the image and video groups.
+    // Popover: header (period + reset), a total bar, the product breakdown, and an
+    // extra-credits line. Rows are filled in renderQuota.
     const pop = document.createElement('div');
     pop.className = 'gks-quota-pop';
     pop.setAttribute('role', 'tooltip');
-    let prevGroup = null;
-    for (const t of QUOTA_TIERS) {
-      if (prevGroup && t.group !== prevGroup) {
-        const sep = document.createElement('span');
-        sep.className = 'gks-q-divider';
-        pop.appendChild(sep);
-      }
-      prevGroup = t.group;
-      const stat = document.createElement('span');
-      stat.className = 'gks-q-stat';
-      stat.setAttribute('data-tier', t.key);
-      const lab = document.createElement('span');
-      lab.className = 'gks-q-label';
-      lab.textContent = t.label;
-      const right = document.createElement('span');
-      right.className = 'gks-q-right';
-      const val = document.createElement('span');
-      val.className = 'gks-q-val';
-      val.textContent = '…';
-      const reset = document.createElement('span');
-      reset.className = 'gks-q-reset';
-      reset.style.display = 'none';
-      const rv = document.createElement('span');
-      rv.className = 'gks-q-reset-val';
-      reset.appendChild(document.createTextNode('⏱'));
-      reset.appendChild(rv);
-      right.appendChild(val);
-      right.appendChild(reset);
-      stat.appendChild(lab);
-      stat.appendChild(right);
-      pop.appendChild(stat);
-    }
 
-    // Open/close. Hover is handled in CSS (:hover), but a tap on touch devices
-    // has no hover — toggle a class on click. Re-clamping isn't needed since the
-    // popover opens upward from a bottom-anchored bar.
+    const head = document.createElement('div');
+    head.className = 'gks-q-head';
+    const title = document.createElement('span');
+    title.className = 'gks-q-title';
+    title.textContent = 'Weekly usage';
+    const reset = document.createElement('span');
+    reset.className = 'gks-q-reset';
+    reset.style.display = 'none';
+    head.appendChild(title);
+    head.appendChild(reset);
+
+    const total = document.createElement('div');
+    total.className = 'gks-q-total';
+    const totalVal = document.createElement('span');
+    totalVal.className = 'gks-q-total-val';
+    totalVal.textContent = '…';
+    const bar = document.createElement('span');
+    bar.className = 'gks-q-bar';
+    const fill = document.createElement('i');
+    fill.className = 'gks-q-bar-fill';
+    bar.appendChild(fill);
+    total.appendChild(totalVal);
+    total.appendChild(bar);
+
+    const breakdown = document.createElement('div');
+    breakdown.className = 'gks-q-breakdown';
+
+    const extra = document.createElement('div');
+    extra.className = 'gks-q-extra';
+    extra.style.display = 'none';
+
+    pop.appendChild(head);
+    pop.appendChild(total);
+    pop.appendChild(breakdown);
+    pop.appendChild(extra);
+
+    // Open/close. Hover is CSS (:hover); a tap on touch has no hover, so toggle a
+    // class on click. The popover opens upward from the bottom-anchored bar.
     badge.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -543,8 +664,7 @@
       badge.setAttribute('aria-expanded', wrap.classList.contains('gks-pop-open') ? 'true' : 'false');
     });
     // Outside-tap close is handled by ONE top-level listener (registered in init,
-    // alongside the References outside-click handler) keyed off the live `quotaEl`,
-    // so it isn't re-added — and leaked — every time the toolbar is remounted.
+    // alongside the References outside-click handler) keyed off the live `quotaEl`.
 
     wrap.appendChild(badge);
     wrap.appendChild(pop);
@@ -552,18 +672,18 @@
     return wrap;
   }
 
-  // Only the Imagine app meters video generations, so scope the readout to
-  // /imagine* — on chat or other grok.com pages it stays hidden. grok.com is an
-  // SPA, so a one-time path check isn't enough; the persistent 1s ticker also
-  // watches for client-side navigation (Firefox Xray wrappers block reliably
-  // monkeypatching the page's history.pushState from a content script, so polling
-  // the path is the robust, framework-agnostic approach).
+  // The weekly allowance is account-wide, but keep the readout scoped to /imagine*
+  // to match where it's relevant to generating (and the existing UX contract). grok
+  // is an SPA, so a one-time path check isn't enough; the 1s ticker also watches for
+  // client-side navigation (Firefox Xray wrappers block monkeypatching the page's
+  // history.pushState from a content script, so polling the path is the robust,
+  // framework-agnostic approach).
   function isImaginePath() {
     try { return /^\/imagine(\/|$)/.test(location.pathname); }
     catch (e) { return false; }
   }
 
-  // Start/stop the 60s network poll based on whether we're on an Imagine page.
+  // Start/stop the network poll based on whether we're on an Imagine page.
   function syncQuota() {
     if (!quotaEl) return;
     if (isImaginePath()) {
@@ -574,8 +694,8 @@
     } else if (quotaPollTimer) {
       clearInterval(quotaPollTimer);
       quotaPollTimer = null;
-      quotaState = {};   // keys are the QUOTA_TIERS bucket names; empty hides every tier
-      renderQuota();     // hides the block once off Imagine
+      creditState = null;   // clear so the block hides once off Imagine
+      renderQuota();
     }
   }
 
@@ -584,7 +704,13 @@
       quotaPath = location.pathname;
       syncQuota();
     }
-    if (quotaPollTimer) updateCountdowns();  // live reset countdown while active
+    // Keep the "resets in …" label fresh while polling (cheap single-node write).
+    if (quotaPollTimer && quotaEl && creditState && creditState.resetAt) {
+      const reset = quotaEl.querySelector('.gks-q-reset');
+      if (reset && reset.style.display !== 'none') {
+        reset.textContent = 'resets ' + fmtResetIn(creditState.resetAt - Date.now());
+      }
+    }
   }
 
   function startQuota() {

@@ -1370,10 +1370,15 @@ def _drop_unlock(cid: str) -> None:
         session["unlocked"] = grants
 
 
-def _hidden_media_ids() -> set[str]:
-    """All media ids in a locked collection this session hasn't unlocked. Used by the
-    per-id / file paths (by-ids, related, /media, /thumbnails) where unlocking a collection
-    grants access to its files."""
+def _hidden_media_ids(reveal_ids=None) -> set[str]:
+    """Media ids the session must not see: every locked collection's media EXCEPT collections
+    unlocked this session. Used by the per-id / file paths (by-ids, related, /media, /thumbnails)
+    where unlocking grants file access, AND by global browse (All Media / facets / search) —
+    unlocking a collection surfaces its media in the library too, while a still-locked
+    collection's media stays hidden entirely (no rows, no placeholder). ``reveal_ids`` (the ids
+    of a collection the request is scoped to) are exempted so that collection's own grid still
+    shows items that also live in another, still-locked collection. Requires a request/session
+    context."""
     locked = _locked_collections_map()
     if not locked:
         return set()
@@ -1382,23 +1387,23 @@ def _hidden_media_ids() -> set[str]:
     for cid, ids in locked.items():
         if cid not in unlocked:
             out |= ids
+    if reveal_ids:
+        out -= {str(i) for i in reveal_ids}
     return out
 
 
-def _list_hidden_media_ids(reveal_ids=None) -> set[str]:
-    """Hidden set for GLOBAL list views (Recent / All Media / Archive / search / facets):
-    EVERY locked collection's media, whether or not it's unlocked — unlocking lets you OPEN
-    a collection, not surface its contents in the global browse. ``reveal_ids`` (the ids of
-    the collection the request is scoped to, when the session has unlocked it) are exempted
-    so that collection's own grid still shows its items."""
+def _list_hidden_media_ids() -> set[str]:
+    """Session-AGNOSTIC hidden set: EVERY locked collection's media, whether or not it's
+    unlocked this session. Used by surfaces that must not depend on a session (and may run
+    outside a request context): the Prompt Studio discovery views (themes / find-similar) and
+    the background library-prompt import. All Media / facets / search instead use the
+    session-aware _hidden_media_ids(), so unlocking a collection surfaces its media there."""
     locked = _locked_collections_map()
     if not locked:
         return set()
     out: set[str] = set()
     for ids in locked.values():
         out |= ids
-    if reveal_ids:
-        out -= {str(i) for i in reveal_ids}
     return out
 
 
@@ -3707,7 +3712,7 @@ def api_media() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_list_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
+        hidden=_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
         start=start,
         end=end,
     )
@@ -3740,7 +3745,7 @@ def api_facets() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_list_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
+        hidden=_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
         start=start,
         end=end,
     ))
