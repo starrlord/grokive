@@ -96,7 +96,14 @@ async function downloadBlob(response, name) {
   // Sanitize to a filesystem-safe stem; fall back to 'export' when the name is all
   // non-ASCII/symbols (e.g. a fully non-Latin prompt) so it can't collapse to '.mp4'.
   const stem = (name || 'export').replace(/[^\w.-]+/g, '_').replace(/^_+|_+$/g, '') || 'export';
-  a.download = stem + '.mp4';
+  // Timestamp keeps every export's filename unique. Without it, repeated exports of the
+  // same collection all land as "name.mp4" and the OS silently appends " (1)/(2)" — so
+  // it's easy to reopen an EARLIER, differently-ordered file and think the merge ignored
+  // your ordering. A unique name makes "the file I just downloaded" unambiguous.
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+  a.download = `${stem}-${stamp}.mp4`;
   document.body.appendChild(a);
   a.click();
   a.remove();

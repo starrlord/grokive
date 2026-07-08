@@ -6,8 +6,7 @@
   // as its header even when only its videos were collected: lineage that isn't in the
   // collection is resolved by fetching those rows (mediaByIds), which also lets the
   // grouping climb across an edit's uncollected intermediate to the true base image.
-  import { mediaByIds, exportSelection } from '$lib/api.js';
-  import { toast } from '$lib/toast.js';
+  import { mediaByIds } from '$lib/api.js';
   import JustifiedGrid from './JustifiedGrid.svelte';
   import EditorialList from './EditorialList.svelte';
 
@@ -21,6 +20,7 @@
     total = 0,    // the collection's true item count
     onopen = () => {},
     ontoggleselect = () => {},
+    onexport = () => {},
     onmontage = () => {},
     onplay = () => {}
   } = $props();
@@ -141,21 +141,12 @@
     return { families, ungrouped };
   });
 
-  // One export at a time (the server caps concurrent exports anyway); `exportingAnchor`
-  // both drives the active button's spinner and disables the rest, so no button looks
-  // clickable while it would no-op.
-  let exportingAnchor = $state('');
-  async function exportFamily(fam) {
-    if (!fam.exportIds.length || exportingAnchor) return;
-    exportingAnchor = fam.anchor;
-    try {
-      await exportSelection(fam.exportIds, fam.label || 'group');
-      toast(`Exported ${fam.exportIds.length} videos`, { type: 'success' });
-    } catch (e) {
-      toast(e?.message || 'Export failed.', { type: 'error' });
-    } finally {
-      exportingAnchor = '';
-    }
+  // Merging is order-sensitive; the parent opens a reorder step so the family's clips
+  // (which land here in the collection's sort order, newest-first) can be arranged before
+  // the concat instead of merging back-to-front.
+  function exportFamily(fam) {
+    if (!fam.exportIds.length) return;
+    onexport(fam.videos, fam.label || 'group');
   }
 
   function baseNoun(fam) {
@@ -203,12 +194,8 @@
           <button type="button" class="group-action" disabled={!complete || !fam.videos.length} onclick={() => onplay(fam.videos, fam.label)}>
             <span class="text-[0.7rem]">▶</span> Play
           </button>
-          <button type="button" class="group-action" disabled={!complete || !fam.exportIds.length || !!exportingAnchor} onclick={() => exportFamily(fam)}>
-            {#if exportingAnchor === fam.anchor}
-              <span class="group-orbit" aria-hidden="true"></span> Preparing
-            {:else}
-              <span class="text-[0.7rem]">⇩</span> Export merged
-            {/if}
+          <button type="button" class="group-action" disabled={!complete || !fam.exportIds.length} onclick={() => exportFamily(fam)}>
+            <span class="text-[0.7rem]">⇩</span> Export merged
           </button>
           <button type="button" class="group-action group-action-primary" disabled={!complete || fam.montageIds.length < 2} onclick={() => onmontage(fam.montageIds)}
             title={fam.montageIds.length < 2 ? 'Needs at least 2 montage-eligible videos' : 'Beat-synced montage from this family'}>
@@ -282,19 +269,5 @@
   .group-action-primary:hover:not(:disabled) {
     border-color: transparent;
     filter: brightness(1.06);
-  }
-
-  .group-orbit {
-    animation: group-spin 800ms linear infinite;
-    border: 2px solid var(--spinner-track);
-    border-radius: 999px;
-    border-top-color: var(--accent);
-    display: inline-block;
-    height: 0.8rem;
-    width: 0.8rem;
-  }
-
-  @keyframes group-spin {
-    to { transform: rotate(360deg); }
   }
 </style>

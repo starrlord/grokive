@@ -20,6 +20,7 @@
   import CollectionGroups from '$lib/components/CollectionGroups.svelte';
   import Lightbox from '$lib/components/Lightbox.svelte';
   import SelectBar from '$lib/components/SelectBar.svelte';
+  import ExportOrderModal from '$lib/components/ExportOrderModal.svelte';
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
   import LibraryView from '$lib/components/LibraryView.svelte';
   import MediaTypeTabs from '$lib/components/MediaTypeTabs.svelte';
@@ -59,6 +60,7 @@
   let groupByBase = $state(false); // collection view: cluster items by their base image
   let showMovie = $state(false);
   let movieVideoIds = $state([]); // video ids fed to the Montage panel (selection or a collection)
+  let exportOrder = $state(null); // { items, name } — drives the reorder-before-merge modal (null = closed)
   let importFiles = $state(null); // FileList from a folder Import picker (drives ImportModal)
   let showFilters = $state(false);
   let menuOpen = $state(false); // mobile sidebar drawer
@@ -500,6 +502,17 @@
     if (!list.length) return;
     lb = { list, index: 0, autoAdvance: true, title: `Selection (${list.length})` };
   }
+  // Merging is order-sensitive, but selections/families arrive in the grid's sort order
+  // (newest-first), not a chosen sequence — so open the reorder step and let the user
+  // arrange the clips before the concat. Single-video "merges" skip it (nothing to order).
+  function openExportOrder(videoItems, name) {
+    const list = (videoItems || []).filter((v) => v && v.media_type === 'video');
+    if (!list.length) return;
+    exportOrder = { items: list, name: name || 'selection' };
+  }
+  function reorderSelectionExport() {
+    openExportOrder(videoSelection.map((id) => byId.get(id)).filter(Boolean), activeCollection?.name || 'selection');
+  }
   async function playCanvas(c) {
     const canvasFilters = {
       ...$filters,
@@ -705,6 +718,7 @@
           selectMode={$selectMode} loaded={collectionItems.length} total={collectionTotal}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)}
           onplay={(videos, title) => playResolved(videos, title)}
+          onexport={(videos, label) => openExportOrder(videos, label)}
           onmontage={(ids) => { movieVideoIds = ids; showMovie = true; }} />
       {:else if $mode === 'editorial'}
         <EditorialList items={currentGridItems} onopen={openLightbox} />
@@ -837,6 +851,7 @@
 {#if $selectMode}
   <SelectBar videoIds={videoSelection} imageIds={imageSelection} montageIds={montageSelectionIds} {selectableIds} collection={activeCollection}
     onplay={playSelection}
+    onreorderexport={reorderSelectionExport}
     oncollections={() => (showCollectionPicker = true)}
     onmovie={() => { movieVideoIds = montageSelectionIds; if (selectionHasImage) montageMode.set('picture-video'); showMovie = true; }}
     onbasket={enqueueSelectionToBasket}
@@ -851,6 +866,10 @@
 
 {#if editing}
   <PlaylistEditor playlist={editing} onclose={() => (editing = null)} onplay={playResolved} />
+{/if}
+
+{#if exportOrder}
+  <ExportOrderModal items={exportOrder.items} name={exportOrder.name} onclose={() => (exportOrder = null)} />
 {/if}
 
 {#if showCollectionPicker}

@@ -13,7 +13,7 @@
 
   // montageIds: selected sources eligible for a montage — videos AND still images (queuing
   // an image enters picture-video mode). videoIds stays video-only for Play/Playlist/Export.
-  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {}, onplayqueue = () => {} } = $props();
+  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, onreorderexport = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {}, onplayqueue = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
@@ -73,6 +73,9 @@
   const imagesOnly = $derived(!videoIds.length && imageIds.length > 0);
   async function doExport() {
     if (!videoIds.length && !imageIds.length) return;
+    // 2+ videos: hand off to the reorder-before-merge step (order decides the output).
+    // A lone video or an images-only selection has no order to choose, so it exports here.
+    if (videoIds.length > 1) { onreorderexport(); return; }
     busy = true;
     try {
       if (videoIds.length) {
