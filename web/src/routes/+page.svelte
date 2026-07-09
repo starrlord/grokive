@@ -185,16 +185,46 @@
   });
 
   // Drilling into a collection/canvas swaps the page content in place (no route
-  // change), so the window keeps its scroll — after scrolling the landing to find
-  // the item, you land below the collection's (non-sticky) toolbar. Reset to top
-  // only when ENTERING a drilled view (the key becomes a new non-empty value),
-  // never when it clears — so hitting Back keeps your place on the landing.
+  // change). The drilled view starts nearly empty (items load async), so the swap
+  // shrinks the document and the browser clamps the window scroll toward 0 — the
+  // landing's offset is destroyed, and Back used to dump you at the top of the
+  // list. So: capture the landing's offset BEFORE the swap ($effect.pre — a
+  // post-flush read would see the already-clamped value), reset to top when
+  // ENTERING a drilled view, and restore the saved offset when the drill clears
+  // back to the SAME view. An exit that also switches tabs lands on unrelated
+  // content, so it doesn't restore. For COLLECTIONS the restore sticks: the
+  // landing re-renders its full height synchronously from the $collections store
+  // (aspect-ratio cards, no async pop-in). For CANVASES it's best-effort only —
+  // that landing rebuilds from facets.canvases, which the drilled-in refetch
+  // collapsed to one row, so the restore usually clamps to ~0 until the exit
+  // refetch lands (same top-of-list landing as before this fix, not a regression).
+  const drillKey = $derived($activeCollectionId
+    ? `c:${$activeCollectionId}`
+    : ($filters.canvas ? `v:${$filters.canvas}` : ''));
+  let landingScroll = 0;
+  let landingView = '';
+  let preDrill = '';
+  let preDrillView = '';
+  $effect.pre(() => {
+    const drill = drillKey;
+    const view = $filters.view;
+    if (drill && !preDrill && typeof window !== 'undefined') {
+      // Only a drill entered FROM its own landing has a position worth returning
+      // to. Entering from elsewhere (a Lightbox "In" chip on Recent switches view
+      // and drills in one flush) saves top — that offset belongs to another view.
+      landingScroll = preDrillView === view ? window.scrollY : 0;
+      landingView = view;
+    }
+    preDrill = drill;
+    preDrillView = view;
+  });
   let prevDrill = '';
   $effect(() => {
-    const drill = $activeCollectionId
-      ? `c:${$activeCollectionId}`
-      : ($filters.canvas ? `v:${$filters.canvas}` : '');
-    if (drill && drill !== prevDrill && typeof window !== 'undefined') window.scrollTo(0, 0);
+    const drill = drillKey;
+    if (drill !== prevDrill && typeof window !== 'undefined') {
+      if (drill) window.scrollTo(0, 0);
+      else if ($filters.view === landingView) window.scrollTo(0, landingScroll);
+    }
     prevDrill = drill;
   });
 
@@ -247,6 +277,10 @@
       collectionItems = [];
       collectionTotal = 0;
       collSig = '';
+      // Invalidate any in-flight collection fetch: it shares `page`/`loading` with
+      // load(), so letting it resolve after leaving the view would clobber the new
+      // view's pagination (e.g. a tag chip jumping to All Media mid-append).
+      collReq += 1;
       return;
     }
     // Clear an orphaned id (its collection was deleted here or on another device) so the
@@ -383,8 +417,10 @@
   // Entering a collection starts a clean filter slate: no refinement — query, tags,
   // models, resolutions, media type or period — from wherever you came from carries in
   // and silently filters the new collection. (Mirrors setView / openCanvas; sort is kept.)
+  // Sets view too: the Lightbox's "In" chips enter from ANY view (Recent, All Media…),
+  // and without it the orphan-clear effect would instantly null the id again.
   function enterCollection(id) {
-    filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all' }));
+    filters.update((f) => ({ ...f, view: 'collections', canvas: null, query: '', tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all' }));
     $activeCollectionId = id;
   }
   function openCollection(c) {
@@ -861,7 +897,7 @@
 
 {#if lb}
   <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} autoSlideshow={lb.autoSlideshow} title={lb.title}
-    onopenrelated={openRelatedLightbox} onclose={() => (lb = null)} />
+    onopenrelated={openRelatedLightbox} onopencollection={enterCollection} onclose={() => (lb = null)} />
 {/if}
 
 {#if editing}

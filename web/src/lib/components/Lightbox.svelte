@@ -25,7 +25,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fade, fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, collections, filters, activeCollectionId } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -42,7 +42,7 @@
     setTimeout(() => (b.textContent = prev), 1200);
   }
 
-  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {} } = $props();
+  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {}, onopencollection = () => {} } = $props();
   // Honour reduced-motion for the slide crossfade (and skip it entirely there).
   const reduceMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const FADE_MS = 360;
@@ -259,6 +259,27 @@
     if (!clean.length) return;
     showInfo = false;
     onopenrelated(clean, 0, nextTitle);
+  }
+
+  // Collections this item belongs to, for the info panel's "In" chips. Pure
+  // client-side lookup against the store. Sealed (locked, not unlocked) collections
+  // are served with ids: [] precisely so membership can't leak — no filtering needed.
+  const memberOf = $derived(item ? ($collections || []).filter((c) => (c.ids || []).includes(item.id)) : []);
+  // Tag chip: jump out of the viewer to All Media filtered to just that tag — one
+  // predictable "show me more like this" destination no matter where the lightbox
+  // was opened from (a play-queue over the collections landing, a canvas, etc.).
+  function browseTag(tag) {
+    // Clear the drilled collection BEFORE the filters change (same order as
+    // setView): the page's filter effect skips loading while a collection is
+    // active, and it won't refire when the id clears later — leaving stale,
+    // unfiltered results if the id were still set during the update.
+    activeCollectionId.set(null);
+    filters.update((f) => ({ ...f, view: 'all', canvas: null, query: '', tags: [tag], models: [], resolutions: [], mediaType: 'all', period: 'all' }));
+    close();
+  }
+  function gotoCollection(c) {
+    onopencollection(c.id);
+    close();
   }
 
   // Persistent <video>: update src in place so native/container fullscreen
@@ -490,6 +511,24 @@
                style="background: color-mix(in srgb, var(--accent-2) 18%, transparent); color: var(--accent-2);">
             <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>
             <span>Generated with Grok Imagine</span>
+          </div>
+        {/if}
+        {#if item.tags?.length}
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <span class="text-xs font-bold uppercase tracking-wide text-muted">Tags</span>
+            {#each item.tags as tag (tag)}
+              <button type="button" class="rounded-full border border-line px-3 py-1 text-xs font-semibold transition hover:border-[var(--accent)]"
+                title={`Show all media tagged “${tag}”`} onclick={() => browseTag(tag)}>{tag}</button>
+            {/each}
+          </div>
+        {/if}
+        {#if memberOf.length}
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <span class="text-xs font-bold uppercase tracking-wide text-muted">In</span>
+            {#each memberOf as c (c.id)}
+              <button type="button" class="rounded-full border border-line px-3 py-1 text-xs font-semibold transition hover:border-[var(--accent)]"
+                title={`Open collection “${c.name}”`} onclick={() => gotoCollection(c)}>{c.name}</button>
+            {/each}
           </div>
         {/if}
         {#if related.base || related.generated.length}
