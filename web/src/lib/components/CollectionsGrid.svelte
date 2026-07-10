@@ -1,3 +1,15 @@
+<script module>
+  // Toolbar state (filter, sort, locked-reveal) lives at MODULE scope, not instance
+  // scope: drilling into a collection swaps this grid out of the DOM (+page.svelte's
+  // {#if} on activeCollection), so instance state would reset on Back — the sort DDL
+  // snapped to "Recent", reordering the landing under the restored scroll offset and
+  // dumping you somewhere unrelated. Module scope survives the round-trip; it still
+  // resets to defaults on a full page load (client-only SPA — no SSR sharing).
+  let q = $state('');
+  let sortBy = $state('recent'); // recent (store/creation order) | updated (last-modified) | name | size
+  let showLocked = $state(false);
+</script>
+
 <script>
   import { collections, removeCollection, loadCollections, requestGalleryReload } from '$lib/state.js';
   import { relockCollection, relockAllCollections } from '$lib/api.js';
@@ -23,13 +35,11 @@
     return secs > 0 ? Math.max(1, Math.ceil(secs / 3600)) : 0;
   };
 
-  // Toolbar: filter the grid by name and choose its order.
-  let q = $state('');
-  let sortBy = $state('recent'); // recent (store/creation order) | updated (last-modified) | name | size
+  // Toolbar state (q, sortBy, showLocked) is declared in <script module> above so it
+  // survives the landing being unmounted while a collection is drilled into.
   // Locked (and not unlocked this session) collections are hidden from the grid so they
   // don't clutter it — revealed only when you toggle them on. In-memory: resets to hidden
-  // on every load, so they stay out of sight by default. Unlocked ones always show.
-  let showLocked = $state(false);
+  // on every page load, so they stay out of sight by default. Unlocked ones always show.
   const isSealed = (c) => c.locked && !c.unlocked;
   const lockedHiddenCount = $derived(($collections || []).filter(isSealed).length);
   const visibleTotal = $derived(($collections || []).filter((c) => showLocked || !isSealed(c)).length);
