@@ -85,11 +85,13 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 Instead of the CLI you can run the archiver as a web app. The container serves the
 modern SvelteKit UI at `/` (see *Web App* below) backed by a small Flask API, plus a
 **Sync** action that downloads favorites + Agent canvases and rebuilds the index, and a
-**Config** panel to paste your captured cURL — no shell access needed. When a Whisper
+**Config** panel to manage your Grok accounts (paste a captured cURL per account —
+multiple named accounts supported, each toggleable) — no shell access needed. When a Whisper
 server is configured (see *Subtitles*), a **Generate Subtitles** button also appears.
 Long jobs stream their progress into an on-page **Log** overlay.
 
-All state (`grok_auth.txt`, `metadata.json`, `index.db` (the derived SQLite
+All state (`grok_auth.txt` + `grok_accounts.json`/`grok_accounts/` (Grok account
+sessions), `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
 `playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
 scenes), `saved_responses.json` (starred prompts), `personas.json` (Prompt Studio persona
@@ -121,8 +123,10 @@ To build the image locally from a source checkout instead, use the dedicated bui
 docker compose -f docker-compose.build.yml up -d --build
 ```
 
-1. Open the web UI and click **Config**.
-2. Paste your `Copy as cURL (posix/bash)` request (see *Capture Your Grok Auth Request*) and Save.
+1. Open the web UI and click **Config → Grok accounts → Add account**.
+2. Name the account and paste your `Copy as cURL (posix/bash)` request (see *Capture
+   Your Grok Auth Request*). Repeat for as many Grok accounts as you have — each can be
+   toggled active/paused, and Sync fetches every active account one at a time.
 3. Click **Sync**. The status pill shows progress; the gallery refreshes when done.
 
 ### Unraid
@@ -180,8 +184,9 @@ building on the server needed.
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
 Log out from **Config → Account**. Your Grok cURL cookies expire periodically — when a
-sync fails with an auth error the status pill says *"Auth failed — update Config"*;
-re-capture the cURL and paste it into **Config** again.
+sync fails with an auth error the status pill says *"Auth failed — update Config"*; the
+job log shows which account failed. Re-capture that account's cURL and paste it in
+**Config → Grok accounts → (account)**.
 
 ### GPU video encoding (NVIDIA NVENC)
 

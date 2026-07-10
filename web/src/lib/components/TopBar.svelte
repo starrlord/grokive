@@ -1,8 +1,9 @@
 <script>
-  import { filters, setView, setQuery, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab, activeCollectionId } from '$lib/state.js';
+  import { filters, setView, setQuery, searchAllMedia, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab, activeCollectionId } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
   import SearchField from './SearchField.svelte';
   import Popover from './Popover.svelte';
+  import QuotaBolts from './QuotaBolts.svelte';
 
   let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {}, onplay = () => {} } = $props();
 
@@ -43,6 +44,24 @@
     lastSet = '';
     setQuery('');
   }
+  // Views where the search box has nothing to filter (the query is ignored): the
+  // Collections/Library landing and the Studio/Imagine authoring workspaces. Inside a
+  // collection or a drilled canvas, search DOES refine live, so those aren't inert.
+  const searchInert = $derived(
+    ($filters.view === 'collections' && !$activeCollectionId) ||
+    $filters.view === 'studio' ||
+    $filters.view === 'imagine'
+  );
+  // Enter flushes the debounce immediately. From a search-inert context it also jumps to
+  // All Media so the matches actually render as a grid instead of doing nothing.
+  function onSearchKey(e) {
+    if (e.key !== 'Enter') return;
+    clearTimeout(timer);
+    const query = q.trim();
+    lastSet = query;
+    if (query && searchInert) searchAllMedia(query);
+    else setQuery(query);
+  }
   // Keep the box in sync when the query is cleared elsewhere (Reset / logo).
   $effect(() => {
     if ($filters.query !== lastSet) { q = $filters.query; lastSet = $filters.query; }
@@ -74,12 +93,14 @@
     <button type="button" class="shrink-0 text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show recent media" onclick={resetAll}>Grokive</button>
 
     <div class="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1 sm:max-w-[520px]">
-      <SearchField bind:value={q} oninput={onInput} onclear={clearSearch}
+      <SearchField bind:value={q} oninput={onInput} onkeydown={onSearchKey} onclear={clearSearch}
         placeholder="Search prompts, tags, models…" wrapperClass="w-full"
         inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-4 pr-10 text-sm outline-none placeholder:text-muted" />
     </div>
 
     <div class="ml-auto flex shrink-0 items-center gap-1.5 sm:ml-0">
+      <!-- Grok weekly usage — one ⚡ bolt per active account, breakdown on click. -->
+      <QuotaBolts />
       <!-- Display: period · sort · density · theme, tucked into one popover. -->
       <Popover align="right" title="Display options"
         ariaLabel={displayActive ? 'Display options — filters active' : 'Display options'}

@@ -24,7 +24,15 @@
   // without first unlocking it. A collection unlocked this session stays addable.
   const isSealed = (c) => c.locked && !c.unlocked;
   const available = $derived(($collections || []).filter((c) => !isSealed(c)));
-  const shown = $derived(available.filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase())));
+  // Most-recently-touched first (updated_at bumps when items are added/removed or the
+  // collection is renamed) — the collection you're actively filling stays at the top,
+  // instead of wherever it sits in the stored order. Same comparator as the grid's
+  // "Recently updated"; filter() already copies, so sort() never mutates the store.
+  const shown = $derived(
+    available
+      .filter((c) => !q.trim() || c.name.toLowerCase().includes(q.trim().toLowerCase()))
+      .sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''))
+  );
 
   function finish(collectionName) {
     const selectedNow = [...selected];

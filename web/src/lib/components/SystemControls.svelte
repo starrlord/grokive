@@ -73,8 +73,15 @@
   // Friendly labels for the optional Autonomous Mode post-sync steps (server step names
   // are terse). Everything else shows its raw step name, as before.
   const STEP_LABELS = { embed: 'Updating prompt index', library: 'Importing prompts', subtitles: 'Generating subtitles', autotag: 'Tagging prompts' };
-  const stepLabel = (s) => STEP_LABELS[s] || s;
-  const stepTitle = (name) => STEP_LABELS[name] || title(name);
+  // Multi-account syncs suffix the per-account steps with the account name —
+  // "download [Personal]" — so split that back into (base step, account) for display.
+  const stepParts = (s) => {
+    const m = String(s || '').match(/^(.*?) \[(.+)\]$/);
+    return m ? [m[1], m[2]] : [s, ''];
+  };
+  const withAccount = (label, acct) => (acct ? `${label} · ${acct}` : label);
+  const stepLabel = (s) => { const [base, acct] = stepParts(s); return withAccount(STEP_LABELS[base] || base, acct); };
+  const stepTitle = (name) => { const [base, acct] = stepParts(name); return withAccount(STEP_LABELS[base] || title(base), acct); };
   const pillText = $derived(
     status.running ? `${status.job === 'subtitles' ? 'Subtitles' : 'Syncing'}: ${stepLabel(status.step)}`
       : status.step === 'error' ? (status.auth_hint ? 'Auth failed' : 'Failed')
@@ -119,10 +126,11 @@
   const title = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : 'Step');
 
   // One concise metric per known step; falls back to the last non-empty output line.
+  // Keyed on the base step name so "download [Personal]" gets the download metric.
   function stepMetric(step) {
     const t = step.lines.join('\n');
     const grab = (re) => { const m = t.match(re); return m && m[1]; };
-    switch (step.name) {
+    switch (stepParts(step.name)[0]) {
       case 'reindex': { const n = grab(/reindex: (\d[\d,]*) records/) || grab(/(\d[\d,]*) records/); return n ? `${n} records` : ''; }
       case 'download': {
         const n = grab(/metadata records: (\d[\d,]*)/);

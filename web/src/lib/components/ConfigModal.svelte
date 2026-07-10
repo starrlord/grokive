@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getConfig, postConfig, getSettings, postSettings, fetchProviderModels, authStatus, logout, exportBackup, restoreBackup } from '$lib/api.js';
+  import { getAccounts, createAccount, updateAccount, deleteAccount, getSettings, postSettings, fetchProviderModels, authStatus, logout, exportBackup, restoreBackup } from '$lib/api.js';
   import { loadSettings, theme, setTheme, THEMES, mode } from '$lib/state.js';
   import { portal } from '$lib/portal.js';
   import { toast } from '$lib/toast.js';
@@ -51,8 +51,15 @@
 
   let { onclose = () => {} } = $props();
 
-  let curl = $state('');
-  let curlNote = $state('');
+  // Grok accounts — a named list of pasted cURL sessions. Mutations save immediately
+  // (like Theme), not via the modal's Save button: the list is its own little CRUD page.
+  let accounts = $state([]);
+  let editingAccount = $state(null); // null | { id, name, configured, mtime } — id '' = new account
+  let acctName = $state('');
+  let acctCurl = $state('');
+  let acctBusy = $state(false);
+  let acctMsg = $state('');
+  let confirmDeleteAcct = $state(false);
   let whisper = $state('');
   let envLocked = $state(false);
   let burn = $state(false);
@@ -106,6 +113,7 @@
   // The 11-theme gallery lives behind a "Change" disclosure instead of dominating
   // the pane — Appearance shows the current theme, the picker opens in-place.
   let pickingTheme = $state(false);
+  let pickingAccounts = $state(false);
   let pickingPromptAi = $state(false);
   let pickingImagine = $state(false);
   let pickingBackup = $state(false);
@@ -124,12 +132,15 @@
   const current = $derived(THEMES.find((t) => t.id === $theme) || THEMES[0]);
   const llmProviderLabel = $derived(providerLabel(llmProvider));
   const embedProviderLabel = $derived(providerLabel(embedProvider));
+  const acctActiveCount = $derived(accounts.filter((a) => a.active).length);
+  const acctSummary = $derived(
+    accounts.length === 1
+      ? (accounts[0].active ? '1 account' : '1 account · paused')
+      : `${acctActiveCount} of ${accounts.length} active`
+  );
 
   onMount(async () => {
-    try {
-      const c = await getConfig();
-      curlNote = c.configured ? `Saved ${c.mtime || ''} — paste again to replace.` : 'No config saved yet.';
-    } catch {}
+    refreshAccounts();
     try {
       const s = await getSettings();
       whisper = s.whisper_server_url || '';
@@ -179,6 +190,72 @@
 
   function providerLabel(id) {
     return providers.find((p) => p.id === id)?.label || 'Local';
+  }
+
+  async function refreshAccounts() {
+    try { accounts = (await getAccounts()).accounts || []; } catch {}
+  }
+
+  function openAccountEditor(a) {
+    editingAccount = a ? { ...a } : { id: '', name: '', configured: false, mtime: '' };
+    acctName = a?.name || '';
+    acctCurl = '';
+    acctMsg = '';
+    confirmDeleteAcct = false;
+  }
+
+  async function toggleAccountActive(a) {
+    const want = !a.active;
+    accounts = accounts.map((x) => (x.id === a.id ? { ...x, active: want } : x)); // optimistic
+    try {
+      const r = await updateAccount(a.id, { active: want });
+      if (!r.ok) throw new Error();
+    } catch {
+      toast('Could not update the account', { type: 'error' });
+    }
+    refreshAccounts(); // reconcile either way
+  }
+
+  async function saveAccount() {
+    const name = acctName.trim();
+    if (!name) { acctMsg = 'Give the account a name.'; return; }
+    const isNew = !editingAccount.id;
+    if (isNew && !acctCurl.trim()) { acctMsg = 'Paste the account’s cURL request.'; return; }
+    acctBusy = true; acctMsg = '';
+    try {
+      const r = isNew
+        ? await createAccount({ name, curl: acctCurl })
+        : await updateAccount(editingAccount.id, { name, ...(acctCurl.trim() ? { curl: acctCurl } : {}) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || j.ok === false) { acctMsg = j.error || 'Could not save the account.'; return; }
+      await refreshAccounts();
+      editingAccount = null;
+      toast('Account saved', { type: 'success' });
+    } catch {
+      acctMsg = 'Could not save the account.';
+    } finally {
+      acctBusy = false;
+    }
+  }
+
+  async function deleteAccountNow() {
+    acctBusy = true;
+    try {
+      const r = await deleteAccount(editingAccount.id);
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        acctMsg = j.error || 'Could not delete the account.';
+        return;
+      }
+      await refreshAccounts();
+      editingAccount = null;
+      toast('Account deleted', { type: 'success' });
+    } catch {
+      acctMsg = 'Could not delete the account.';
+    } finally {
+      acctBusy = false;
+      confirmDeleteAcct = false;
+    }
   }
 
   function providerDefaultsFor(kind, provider) {
@@ -273,11 +350,6 @@
 
   async function save() {
     msg = 'Saving…'; msgClass = '';
-    let curlErr = '';
-    if (curl.trim()) {
-      const r = await postConfig(curl);
-      if (!r.ok) { const j = await r.json().catch(() => ({})); curlErr = j.error || 'cURL save failed.'; }
-    }
     const body = { burn_subtitles: burn, autonomous_mode: autonomous };
     if (!envLocked) body.whisper_server_url = whisper.trim();
     body.llm_provider = llmProvider;
@@ -312,8 +384,7 @@
       if (r && r.ok === false) settingsErr = 'Could not save settings.';
     } catch { settingsErr = 'Could not save settings.'; }
     await loadSettings();
-    const err = curlErr || settingsErr;
-    if (err) { msg = err; msgClass = 'text-[var(--danger-ink)]'; }
+    if (settingsErr) { msg = settingsErr; msgClass = 'text-[var(--danger-ink)]'; }
     else { msg = 'Saved.'; msgClass = 'text-[var(--success-ink)]'; setTimeout(onclose, 800); }
   }
 
@@ -362,6 +433,8 @@
     if (showSubStyle) return; // the subtitle dialog handles its own Escape
     if (restoring) return; // don't let Escape disrupt an in-flight restore
     if (pickingTheme) pickingTheme = false;
+    else if (editingAccount) editingAccount = null; // back out of the account editor first
+    else if (pickingAccounts) pickingAccounts = false;
     else if (pickingPromptAi) pickingPromptAi = false;
     else if (pickingImagine) pickingImagine = false;
     else if (restoreFile) restoreFile = null; // back out of the restore confirm first
@@ -503,6 +576,87 @@
   </div>
 {/snippet}
 
+{#snippet accountsSettings()}
+  {#if editingAccount}
+    <!-- Editor: one account's name + pasted cURL session. Saves immediately. -->
+    <div class="space-y-4">
+      <div>
+        <label for="acct-name" class="mb-1 block text-xs font-semibold text-muted">Account name</label>
+        <input id="acct-name" class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
+          placeholder="e.g. Personal" maxlength="60" bind:value={acctName} />
+      </div>
+      <div>
+        <label for="acct-curl" class="mb-1 block text-xs font-semibold text-muted">Grok session</label>
+        <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-[var(--code-bg)] px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-[var(--code-bg)] px-1">grok.com/rest/media/post/list</code> while signed in to this account. Stored only on this server.</p>
+        <textarea id="acct-curl" class="h-24 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
+          placeholder={editingAccount.configured ? 'Leave blank to keep the saved session' : "curl 'https://grok.com/rest/media/post/list' ..."}
+          bind:value={acctCurl}></textarea>
+        {#if editingAccount.id}
+          <p class="mt-1 text-xs text-muted">{editingAccount.configured ? `Session saved ${editingAccount.mtime} — paste again to replace.` : 'No session saved yet.'}</p>
+        {/if}
+      </div>
+      {#if acctMsg}
+        <p class="text-sm text-[var(--danger-ink)]">{acctMsg}</p>
+      {/if}
+      <div class="flex flex-wrap items-center gap-2">
+        <Button variant="primary" class="pointer-coarse:min-h-11" disabled={acctBusy} onclick={saveAccount}>
+          {acctBusy ? 'Saving…' : editingAccount.id ? 'Save changes' : 'Add account'}
+        </Button>
+        <Button variant="secondary" class="pointer-coarse:min-h-11" disabled={acctBusy} onclick={() => (editingAccount = null)}>Cancel</Button>
+        {#if editingAccount.id && !confirmDeleteAcct}
+          <Button variant="secondary" class="ml-auto text-[var(--danger-ink)] pointer-coarse:min-h-11" disabled={acctBusy} onclick={() => (confirmDeleteAcct = true)}>Delete…</Button>
+        {/if}
+      </div>
+      {#if confirmDeleteAcct}
+        <div class="rounded-xl border border-line bg-[var(--surface-2)] p-3">
+          <div class="text-sm font-bold text-[var(--danger-ink)]">Delete “{editingAccount.name}”?</div>
+          <p class="mt-1 text-sm text-muted">Removes the account and its saved session. Media already archived from it stays in your library.</p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <Button variant="danger" class="pointer-coarse:min-h-11" disabled={acctBusy} onclick={deleteAccountNow}>Delete account</Button>
+            <Button variant="secondary" class="pointer-coarse:min-h-11" disabled={acctBusy} onclick={() => (confirmDeleteAcct = false)}>Keep</Button>
+          </div>
+        </div>
+      {/if}
+    </div>
+  {:else}
+    <!-- Account list: tap a row to edit, flip the switch to include/exclude it from Sync. -->
+    <p class="mb-3 text-sm text-muted">Sync fetches every <strong class="text-ink">active</strong> account, one at a time. Toggle an account off to skip it without losing its session.</p>
+    {#if accounts.length}
+      <div class="overflow-hidden rounded-xl border border-line">
+        {#each accounts as a, i (a.id)}
+          {#if i}<div class="border-t border-line"></div>{/if}
+          <div class="flex items-center gap-1 pr-3 {a.active ? '' : 'opacity-70'}">
+            <button type="button" class="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-14"
+              aria-label={`Edit ${a.name}`} onclick={() => openAccountEditor(a)}>
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-sm font-semibold">{a.name}</span>
+                <span class="block truncate text-xs {a.configured ? 'text-muted' : 'text-[var(--danger-ink)]'}">
+                  {a.configured ? `Session saved ${a.mtime}` : 'No session — tap to paste the cURL'}{a.active ? '' : ' · paused'}
+                </span>
+              </span>
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </button>
+            <button type="button" role="switch" aria-checked={a.active} class="acct-switch shrink-0"
+              title={a.active ? 'Active — included in Sync' : 'Paused — excluded from Sync'}
+              aria-label={`${a.name}: ${a.active ? 'active' : 'paused'}`} onclick={() => toggleAccountActive(a)}>
+              <span class="acct-knob" aria-hidden="true"></span>
+            </button>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <div class="rounded-xl border border-dashed border-line px-4 py-8 text-center text-sm text-muted">
+        No accounts yet — add your first Grok account so Sync can fetch your media.
+      </div>
+    {/if}
+    <button type="button" class="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-line px-3 py-2.5 text-sm font-semibold transition hover:border-[var(--accent)] hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+      onclick={() => openAccountEditor(null)}>
+      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+      Add account
+    </button>
+  {/if}
+{/snippet}
+
 {#snippet imagineSettings()}
   <div class="space-y-3">
     <p class="text-sm text-muted">xAI API key for <strong class="text-ink">Imagine</strong> image &amp; video generation — create one at <code class="rounded-sm bg-[var(--code-bg)] px-1">console.x.ai</code>. Write-only: after saving, Config only shows whether a key exists. Stored only on this server.</p>
@@ -615,13 +769,13 @@
   <div class="config-panel panel flex h-[100dvh] w-full flex-col overflow-hidden sm:h-auto sm:max-h-[calc(100dvh-2rem)] sm:max-w-[640px] sm:rounded-card"
        role="dialog" aria-modal="true" aria-label="Config" tabindex="-1" use:trapFocus>
     <header class="cfg-header flex shrink-0 items-center gap-2 border-b border-line px-4 py-3 sm:px-5">
-      {#if pickingTheme || pickingPromptAi || pickingImagine || pickingBackup}
+      {#if pickingTheme || pickingAccounts || pickingPromptAi || pickingImagine || pickingBackup}
         <button type="button" class="-ml-1 flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-semibold transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-11"
-          aria-label="Back to settings" onclick={() => { pickingTheme = false; pickingPromptAi = false; pickingImagine = false; pickingBackup = false; if (!restoring) restoreFile = null; }}>
+          aria-label="Back to settings" onclick={() => { if (editingAccount) { editingAccount = null; return; } pickingTheme = false; pickingAccounts = false; pickingPromptAi = false; pickingImagine = false; pickingBackup = false; if (!restoring) restoreFile = null; }}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
-        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : pickingImagine ? 'Grok Imagine API' : pickingBackup ? 'Backup & Restore' : 'Prompt Studio AI'}</h2>
+        <h2 class="text-base font-bold">{pickingTheme ? 'Theme' : pickingAccounts ? (editingAccount ? (editingAccount.id ? 'Edit account' : 'Add account') : 'Grok accounts') : pickingImagine ? 'Grok Imagine API' : pickingBackup ? 'Backup & Restore' : 'Prompt Studio AI'}</h2>
       {:else}
         <h2 class="text-lg font-bold">Config</h2>
         <button type="button" class="ml-auto grid h-9 w-9 place-items-center rounded-lg border border-line transition hover:bg-[var(--surface-2)] pointer-coarse:h-11 pointer-coarse:w-11"
@@ -629,7 +783,7 @@
       {/if}
     </header>
 
-    <div class="config-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5" class:cfg-safe-bottom={pickingTheme || pickingBackup}>
+    <div class="config-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5" class:cfg-safe-bottom={pickingTheme || pickingAccounts || pickingBackup}>
       {#if pickingTheme}
         <!-- Theme gallery: 1 col on phone, 2 on tablet, 3 on desktop. Applies live. -->
         <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -645,6 +799,8 @@
             </button>
           {/each}
         </div>
+      {:else if pickingAccounts}
+        {@render accountsSettings()}
       {:else if pickingPromptAi}
         {@render promptAiSettings()}
       {:else if pickingImagine}
@@ -679,11 +835,19 @@
         </section>
 
         <section class="mt-6">
-          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Grok account</div>
-          <p class="mb-2 text-sm text-muted">Paste the <code class="rounded-sm bg-[var(--code-bg)] px-1">Copy as cURL (bash)</code> request from <code class="rounded-sm bg-[var(--code-bg)] px-1">grok.com/rest/media/post/list</code>. Stored only on this server.</p>
-          <textarea class="h-20 w-full resize-y rounded-lg border border-line bg-[var(--input-code-bg)] p-3 font-mono text-xs outline-none"
-            placeholder="curl 'https://grok.com/rest/media/post/list' ..." bind:value={curl}></textarea>
-          <p class="mt-1 text-xs text-muted">{curlNote}</p>
+          <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Grok accounts</div>
+          <button type="button" class="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left transition hover:bg-[var(--surface-2)] pointer-coarse:min-h-12"
+            aria-label="Manage Grok accounts" onclick={() => (pickingAccounts = true)}>
+            <span class="text-sm font-semibold">Accounts</span>
+            <span class="ml-auto flex min-w-0 items-center gap-2 text-sm">
+              {#if accounts.length}
+                <span class="min-w-0 truncate font-medium">{acctSummary}</span>
+              {:else}
+                <span class="shrink-0 text-xs text-muted">Not set</span>
+              {/if}
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+            </span>
+          </button>
         </section>
 
         <section class="mt-6">
@@ -789,7 +953,7 @@
       {/if}
     </div>
 
-    {#if !pickingTheme && !pickingBackup}
+    {#if !pickingTheme && !pickingAccounts && !pickingBackup}
       <footer class="cfg-footer config-actions flex shrink-0 items-center justify-end gap-2 px-4 py-3 sm:px-5">
         <span class="mr-auto min-w-0 flex-1 truncate text-sm {msgClass}">{msg}</span>
         <Button variant="secondary" size="lg" class="pointer-coarse:min-h-11" onclick={onclose}>Cancel</Button>
@@ -832,6 +996,55 @@
 
   .theme-choice {
     background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+  }
+
+  /* Account active/paused switch — iOS-style track + knob, accent when on. Sized so
+     the touch target (with row padding) clears ~44px on coarse pointers. */
+  .acct-switch {
+    background: color-mix(in srgb, var(--muted) 30%, var(--surface-2));
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    flex: 0 0 auto;
+    height: 1.5rem;
+    padding: 0.125rem;
+    transition: background 160ms ease, border-color 160ms ease;
+    width: 2.6rem;
+  }
+
+  .acct-switch[aria-checked='true'] {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .acct-knob {
+    background: #fff;
+    border-radius: 999px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    display: block;
+    height: 1.125rem;
+    transform: translateX(0);
+    transition: transform 160ms ease;
+    width: 1.125rem;
+  }
+
+  .acct-switch[aria-checked='true'] .acct-knob {
+    transform: translateX(1.1rem);
+  }
+
+  @media (pointer: coarse) {
+    .acct-switch {
+      height: 1.75rem;
+      width: 3rem;
+    }
+
+    .acct-knob {
+      height: 1.375rem;
+      width: 1.375rem;
+    }
+
+    .acct-switch[aria-checked='true'] .acct-knob {
+      transform: translateX(1.25rem);
+    }
   }
 
   .theme-choice-active {

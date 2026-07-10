@@ -605,38 +605,32 @@
     if (!list.length) { toast('No photos in this canvas to show.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: false, autoSlideshow: true, title: c.name || 'Canvas' };
   }
-  async function playFavorites() {
-    // Play every favorited video (not just the loaded page) in the current sort
-    // order — same bounded-pagination shape as playCanvas, scoped to the favorites
-    // view. Transient refinements (search/tags/etc.) are cleared so it's "play all
-    // my favorites"; sort is kept. Unlike the top-bar Play, this is not shuffled.
-    const favFilters = {
-      ...$filters,
-      view: 'favorites',
-      canvas: null,
-      mediaType: 'video',
-      query: '',
-      tags: [],
-      models: [],
-      resolutions: [],
-      period: 'all'
-    };
-    const FAV_PAGE = 500;
+  async function playCurrentView() {
+    // Play every video in the CURRENT media view (Recent / All Media / Favorites /
+    // Archive), honoring the active search + filters, in the current sort order — so a
+    // search's results play as a queue. Same bounded-pagination shape as playCanvas;
+    // scoped by $filters.view server-side (favorites/archive stay within their set).
+    // Unlike the top-bar Play this is NOT shuffled — it plays what you're looking at.
+    const viewFilters = { ...$filters, canvas: null, mediaType: 'video' };
+    const PAGE = 500;
     let nextPage = 1;
     let loaded = [];
     let expected = Infinity;
     while (loaded.length < expected) {
-      const res = await fetchMedia(favFilters, nextPage, FAV_PAGE);
+      const res = await fetchMedia(viewFilters, nextPage, PAGE);
       const batch = res.items || [];
       loaded = [...loaded, ...batch];
       expected = res.total || loaded.length;
       nextPage += 1;
-      if (batch.length < FAV_PAGE) break;
-      if (nextPage > Math.ceil(expected / FAV_PAGE) + 1) break;
+      if (batch.length < PAGE) break;
+      if (nextPage > Math.ceil(expected / PAGE) + 1) break;
     }
     const list = loaded.filter((it) => it.media_type === 'video');
-    if (!list.length) { toast('No favorite videos to play yet.', { type: 'error' }); return; }
-    lb = { list, index: 0, autoAdvance: true, title: `Favorites (${list.length})` };
+    if (!list.length) { toast('No videos to play here.', { type: 'error' }); return; }
+    const scope = $filters.query
+      ? `“${$filters.query}”`
+      : ($filters.view === 'favorites' ? 'Favorites' : $filters.view === 'archive' ? 'Archive' : $filters.view === 'all' ? 'All Media' : 'Recent');
+    lb = { list, index: 0, autoAdvance: true, title: `${scope} (${list.length})` };
   }
   async function playRandomLibrary() {
     // "Play" in the top bar: shuffle every video on disk into a random queue and hand
@@ -852,11 +846,9 @@
         {/if}
         <MediaTypeTabs class="ml-auto" />
         <SortSelect />
-        {#if $filters.view === 'favorites'}
-          <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
-            disabled={!displayItems.some((it) => it.media_type === 'video')}
-            title="Play all favorite videos" onclick={playFavorites}>Play videos</button>
-        {/if}
+        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
+          disabled={!displayItems.some((it) => it.media_type === 'video')}
+          title={$filters.query ? 'Play videos matching your search' : 'Play all videos in this view'} onclick={playCurrentView}>Play videos</button>
       </div>
 
       {#if displayItems.length === 0 && !loading}

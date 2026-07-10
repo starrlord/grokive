@@ -5,8 +5,9 @@ injected into the page:
 
 * **Sync**   -> runs ``grokive.py reindex`` -> ``download`` -> ``agents`` -> ``index``
                in a background thread, streaming output to a rolling log.
-* **Config** -> stores the captured browser cURL (``grok_auth.txt``) on the
-               persistent data volume.
+* **Config** -> stores one or more named Grok accounts, each a captured browser
+               cURL (``grok_accounts.json`` registry + per-account session files),
+               on the persistent data volume.
 
 All state lives under ``GROK_DATA_DIR`` (``/data`` in the container) so it survives
 container recreation. Designed to run under waitress as a single process; sync
@@ -24,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,7 +36,10 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import httpx
 
 from flask import (
     Flask,
@@ -49,6 +54,7 @@ from flask import (
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import db
+import gdownloader
 import moviegen
 import promptstudio
 import xai_imagine
@@ -72,6 +78,12 @@ THUMBS_DIR = GALLERY_DIR / "thumbnails"
 CURL_FILE = DATA_DIR / "grok_auth.txt"
 # Legacy filename (pre-rename); still read so existing data volumes keep working.
 LEGACY_CURL_FILE = DATA_DIR / "curl_samples.txt"
+# Multi-account Grok sessions: the registry (names / active flags) lives in
+# grok_accounts.json; each account's pasted cURL lives in grok_accounts/<id>.txt.
+# The migrated "default" account keeps using grok_auth.txt so from-source CLI runs
+# and old backups keep lining up unchanged.
+ACCOUNTS_FILE = DATA_DIR / "grok_accounts.json"
+ACCOUNTS_DIR = DATA_DIR / "grok_accounts"
 METADATA_FILE = DATA_DIR / "metadata.json"
 DELETED_FILE = DATA_DIR / "deleted_ids.json"  # blocklist: ids the downloader must never re-pull
 PLAYLISTS_FILE = DATA_DIR / "playlists.json"
@@ -212,6 +224,112 @@ app.config["SESSION_COOKIE_SECURE"] = _cookie_secure
 
 
 # --------------------------------------------------------------------------- #
+# Grok accounts — one or more named sessions, each a pasted browser cURL. The
+# registry holds names/active flags only; the secrets stay in per-account files.
+# --------------------------------------------------------------------------- #
+
+# New account ids are secrets.token_hex(4); "default" is the migrated legacy slot.
+_ACCOUNT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,31}$")
+MAX_ACCOUNTS = 20
+# Serialises the registry's read-modify-write cycles (waitress is multithreaded, so
+# two overlapping saves would otherwise be last-write-wins and silently drop one
+# request's toggle/rename). Endpoints take this around load->mutate->save;
+# _load_accounts itself must stay lock-free (it's called inside these sections).
+_accounts_lock = threading.Lock()
+
+
+def _utc_stamp() -> str:
+    """Sortable full-precision UTC timestamp. Lexicographically compatible with the
+    date-only stamps written before it existed ('2026-07-08' < '2026-07-08T09:00:00Z')."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _account_curl_path(acct_id: str) -> Path:
+    return CURL_FILE if acct_id == "default" else ACCOUNTS_DIR / f"{acct_id}.txt"
+
+
+def _account_curl_rel(acct_id: str) -> str:
+    """The --curl path handed to the CLI, relative to DATA_DIR (the CLI's cwd)."""
+    return CURL_FILE.name if acct_id == "default" else f"{ACCOUNTS_DIR.name}/{acct_id}.txt"
+
+
+def _account_configured(acct_id: str) -> bool:
+    if acct_id == "default":
+        # gdownloader itself falls back to the legacy filename, so honour it here too.
+        return CURL_FILE.exists() or LEGACY_CURL_FILE.exists()
+    return _account_curl_path(acct_id).exists()
+
+
+def _curl_error(text: str) -> str | None:
+    """Validation shared by every route that accepts a pasted cURL; None when it looks right."""
+    text = (text or "").strip()
+    if not text:
+        return "Empty config."
+    if "grok.com" not in text or "Cookie" not in text:
+        return "That doesn't look like a Grok cURL request (missing grok.com / Cookie)."
+    return None
+
+
+def _write_account_curl(acct_id: str, body: str) -> None:
+    dest = _account_curl_path(acct_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".txt.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(dest)
+    # Saving the default slot migrates off the legacy file so there's one source of truth.
+    if acct_id == "default" and LEGACY_CURL_FILE.exists():
+        try:
+            LEGACY_CURL_FILE.unlink()
+        except OSError:
+            pass
+
+
+def _save_accounts(accounts: list[dict]) -> None:
+    _atomic_write_json(ACCOUNTS_FILE, accounts)
+
+
+def _load_accounts() -> list[dict]:
+    """The sanitised account registry. A pre-registry grok_auth.txt is migrated into a
+    single always-on 'default' entry on first read (kept at that filename so CLI runs
+    and old backups still line up)."""
+    data: list = []
+    if ACCOUNTS_FILE.exists():
+        try:
+            loaded = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                data = loaded
+        except Exception:
+            data = []
+    clean: list[dict] = []
+    seen: set[str] = set()
+    for entry in data[:MAX_ACCOUNTS]:
+        if not isinstance(entry, dict):
+            continue
+        acct_id = str(entry.get("id") or "").strip()
+        name = str(entry.get("name") or "").strip()[:60]
+        if not name or acct_id in seen:
+            continue
+        # The id doubles as the session filename — regex-gate it so a hand-edited
+        # registry can never point outside grok_accounts/.
+        if acct_id != "default" and not _ACCOUNT_ID_RE.fullmatch(acct_id):
+            continue
+        seen.add(acct_id)
+        clean.append({
+            "id": acct_id,
+            "name": name,
+            "active": bool(entry.get("active", True)),
+            "created_at": str(entry.get("created_at") or "")[:32],
+            "updated_at": str(entry.get("updated_at") or "")[:32],
+        })
+    if not clean and not ACCOUNTS_FILE.exists() and (CURL_FILE.exists() or LEGACY_CURL_FILE.exists()):
+        stamp = _utc_stamp()
+        clean = [{"id": "default", "name": "Account 1", "active": True,
+                  "created_at": stamp, "updated_at": stamp}]
+        _save_accounts(clean)
+    return clean
+
+
+# --------------------------------------------------------------------------- #
 # Sync job state (single in-process job, guarded by a lock)
 # --------------------------------------------------------------------------- #
 
@@ -322,32 +440,59 @@ def _run_autonomous_steps() -> None:
 def _sync_worker() -> None:
     py = sys.executable
     cli = str(ROOT / "grokive.py")
-    # Reindex FIRST so any media that exists on disk but is missing from
-    # metadata.json is folded back in before the downloader runs (prevents
-    # re-downloading files we already have).
-    steps = [
-        ("reindex", [py, cli, "reindex"]),
-        ("download", [py, cli, "download"]),
-        ("agents", [py, cli, "agents"]),
-        ("index", [py, cli, "index"]),  # thumbnails + SQLite read-model
-    ]
+    active = [a for a in _load_accounts() if a.get("active")]
+    # With several accounts each step label carries the account name — " [Name]" —
+    # which the UI splits back apart for the status pill and the Summary view. The
+    # name is kept out of the "label: command" framing separator (no colons).
+    multi = len(active) > 1
     rc = 0
     try:
-        for label, args in steps:
-            rc = _run_step(label, args)
-            if rc != 0:
-                _sync["step"] = "error"
-                break
-        else:
-            # All download/index steps succeeded → media is now indexed and visible
-            # to the API. Mark the milestone so the UI can refresh the gallery NOW,
-            # before the optional (and potentially slow) autotagging post-steps run.
-            _sync["media_ready_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            # Run optional post-sync automation (best-effort; never flips the sync to
-            # error). Off unless the toggle is set.
-            if _autonomous_enabled():
-                _run_autonomous_steps()
-            _sync["step"] = "done"
+        # Reindex FIRST so any media that exists on disk but is missing from
+        # metadata.json is folded back in before the downloader runs (prevents
+        # re-downloading files we already have).
+        rc = _run_step("reindex", [py, cli, "reindex"])
+        if rc != 0:
+            _sync["step"] = "error"
+            return
+        # Download each active account in turn, exactly like a single-account sync.
+        # A failing account is logged and skipped so the remaining accounts still
+        # sync; the whole job then finishes as an error to surface the failure.
+        failures = 0
+        if not active:
+            _log("no active Grok accounts — skipping download/agents (add one in Config)")
+        for acct in active:
+            tag = f" [{acct['name'].replace(':', ' ')}]" if multi else ""
+            if not _account_configured(acct["id"]):
+                _log(f"=== download{tag}: skipped ===")
+                _log(f"account '{acct['name']}' has no saved cURL session — edit it in Config")
+                _log(f"--- download{tag} exited with code 1 ---")
+                failures += 1
+                continue
+            curl_rel = _account_curl_rel(acct["id"])
+            acct_rc = _run_step(f"download{tag}", [py, cli, "download", "--curl", curl_rel])
+            if acct_rc == 0:
+                acct_rc = _run_step(f"agents{tag}", [py, cli, "agents", "--curl", curl_rel])
+            if acct_rc != 0:
+                failures += 1
+                rc = acct_rc
+        if failures and rc == 0:
+            rc = 1  # skipped-unconfigured accounts must fail the job too
+        # Index once at the end so media from the accounts that DID succeed becomes
+        # visible even when another account failed.
+        idx_rc = _run_step("index", [py, cli, "index"])  # thumbnails + SQLite read-model
+        if idx_rc != 0:
+            rc = idx_rc
+            _sync["step"] = "error"
+            return
+        # Media is now indexed and visible to the API. Mark the milestone so the UI
+        # can refresh the gallery NOW, before the optional (and potentially slow)
+        # autotagging post-steps run.
+        _sync["media_ready_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Run optional post-sync automation (best-effort; never flips the sync to
+        # error). Off unless the toggle is set.
+        if _autonomous_enabled():
+            _run_autonomous_steps()
+        _sync["step"] = "error" if failures else "done"
     except Exception as exc:  # pragma: no cover - defensive
         rc = 1
         _sync["step"] = "error"
@@ -1168,6 +1313,7 @@ def api_settings_models() -> Response:
 
 @app.get("/api/config")
 def api_config_get() -> Response:
+    """Legacy single-account view — reports the 'default' slot (grok_auth.txt)."""
     src = CURL_FILE if CURL_FILE.exists() else LEGACY_CURL_FILE
     if src.exists():
         mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(src.stat().st_mtime))
@@ -1177,26 +1323,343 @@ def api_config_get() -> Response:
 
 @app.post("/api/config")
 def api_config_post() -> Response:
+    """Legacy single-account route: writes the 'default' account (grok_auth.txt) and
+    makes sure it's registered, so older clients keep working alongside /api/accounts."""
     body = request.get_data(as_text=True) or ""
-    text = body.strip()
-    if not text:
-        return jsonify(ok=False, error="Empty config."), 400
-    if "grok.com" not in text or "Cookie" not in text:
-        return jsonify(
-            ok=False,
-            error="That doesn't look like a Grok cURL request (missing grok.com / Cookie).",
-        ), 400
+    err = _curl_error(body)
+    if err:
+        return jsonify(ok=False, error=err), 400
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CURL_FILE.with_suffix(".txt.tmp")
-    tmp.write_text(body, encoding="utf-8")
-    tmp.replace(CURL_FILE)
-    # Saving migrates off the legacy file so there's only one source of truth.
-    if LEGACY_CURL_FILE.exists():
+    with _accounts_lock:
+        _write_account_curl("default", body)
+        accounts = _load_accounts()
+        if not any(a["id"] == "default" for a in accounts):
+            stamp = _utc_stamp()
+            accounts.append({"id": "default", "name": "Account 1", "active": True,
+                             "created_at": stamp, "updated_at": stamp})
+            _save_accounts(accounts)
+    return jsonify(ok=True)
+
+
+def _account_summary(acct: dict) -> dict:
+    """Public shape for one account: registry fields plus whether a session is saved
+    (and when) — never the cURL itself, which is write-only like the API keys."""
+    path = _account_curl_path(acct["id"])
+    if acct["id"] == "default" and not path.exists() and LEGACY_CURL_FILE.exists():
+        path = LEGACY_CURL_FILE
+    configured = path.exists()
+    mtime = ""
+    if configured:
         try:
-            LEGACY_CURL_FILE.unlink()
+            mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path.stat().st_mtime))
         except OSError:
             pass
+    return {"id": acct["id"], "name": acct["name"], "active": acct["active"],
+            "configured": configured, "mtime": mtime}
+
+
+@app.get("/api/accounts")
+def api_accounts_get() -> Response:
+    return jsonify(accounts=[_account_summary(a) for a in _load_accounts()])
+
+
+@app.post("/api/accounts")
+def api_accounts_create() -> Response:
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()[:60]
+    if not name:
+        return jsonify(ok=False, error="Give the account a name."), 400
+    curl = str(payload.get("curl") or "")
+    err = _curl_error(curl)
+    if err:
+        return jsonify(ok=False, error=err), 400
+    with _accounts_lock:
+        accounts = _load_accounts()
+        if len(accounts) >= MAX_ACCOUNTS:
+            return jsonify(ok=False, error=f"Account limit reached ({MAX_ACCOUNTS})."), 400
+        # The very first account takes the legacy 'default' slot (grok_auth.txt) so a
+        # from-source CLI run keeps working with no flags; later ones get their own file.
+        if not accounts and not _account_configured("default"):
+            acct_id = "default"
+        else:
+            acct_id = secrets.token_hex(4)
+            while any(a["id"] == acct_id for a in accounts):  # vanishingly unlikely
+                acct_id = secrets.token_hex(4)
+        stamp = _utc_stamp()
+        acct = {"id": acct_id, "name": name, "active": bool(payload.get("active", True)),
+                "created_at": stamp, "updated_at": stamp}
+        _write_account_curl(acct_id, curl)
+        accounts.append(acct)
+        _save_accounts(accounts)
+    return jsonify(ok=True, account=_account_summary(acct))
+
+
+@app.post("/api/accounts/<acct_id>")
+def api_accounts_update(acct_id: str) -> Response:
+    """Partial update: any of name / active / curl. A blank curl keeps the saved session."""
+    payload = request.get_json(silent=True) or {}
+    curl = str(payload.get("curl") or "")
+    if curl.strip():
+        err = _curl_error(curl)
+        if err:
+            return jsonify(ok=False, error=err), 400
+    with _accounts_lock:
+        accounts = _load_accounts()
+        acct = next((a for a in accounts if a["id"] == acct_id), None)
+        if acct is None:
+            return jsonify(ok=False, error="No such account."), 404
+        if "name" in payload:
+            name = str(payload.get("name") or "").strip()[:60]
+            if not name:
+                return jsonify(ok=False, error="Name can't be empty."), 400
+            acct["name"] = name
+        if "active" in payload:
+            acct["active"] = bool(payload.get("active"))
+        if curl.strip():
+            _write_account_curl(acct_id, curl)
+        acct["updated_at"] = _utc_stamp()
+        _save_accounts(accounts)
+    return jsonify(ok=True, account=_account_summary(acct))
+
+
+@app.delete("/api/accounts/<acct_id>")
+def api_accounts_delete(acct_id: str) -> Response:
+    with _accounts_lock:
+        accounts = _load_accounts()
+        keep = [a for a in accounts if a["id"] != acct_id]
+        if len(keep) == len(accounts):
+            return jsonify(ok=False, error="No such account."), 404
+        # The session file is the account's secret — it goes with the record.
+        doomed = (CURL_FILE, LEGACY_CURL_FILE) if acct_id == "default" else (_account_curl_path(acct_id),)
+        for path in doomed:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _save_accounts(keep)
     return jsonify(ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# Grok weekly usage (credits) — per-account quota readout for the top-bar bolts.
+# Grok serves usage as a gRPC-Web unary RPC (proto-encoded, no JSON variant), so we
+# frame the request and walk the response bytes by hand — a small, flat message.
+# This mirrors the Firefox extension's decoder (firefox/content/grok.js); field
+# numbers come from the service's proto descriptor, verified against live responses.
+# --------------------------------------------------------------------------- #
+
+# Overridable so tests can point at a local mock; production always uses grok.com.
+GROK_CREDITS_URL = os.environ.get(
+    "GROK_CREDITS_URL",
+    "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
+)
+# billing_product.Product enum -> (key, label). Imagine first in fallback ordering.
+_CREDIT_PRODUCTS = {
+    5: ("imagine", "Imagine"),
+    4: ("chat", "Chat"),
+    6: ("voice", "Voice"),
+    2: ("build", "Build"),
+    3: ("plugins", "Plugins"),
+    1: ("api", "API"),
+}
+_CREDIT_PERIODS = {1: "monthly", 2: "weekly"}
+QUOTA_TTL = 240  # seconds; weekly numbers move slowly (the extension polls at 5 min)
+_quota_lock = threading.Lock()
+_quota_cache: dict[str, tuple[float, dict]] = {}  # account id -> (fetched_at, entry)
+
+
+def _pb_fields(data: bytes):
+    """Minimal protobuf wire walker: yields (field, wire_type, value) — varint ->
+    int, 64-bit -> float, length-delimited -> bytes, 32-bit -> float. Bails on
+    malformed/unknown input instead of raising (a non-quota body decodes to nothing)."""
+    i, n = 0, len(data)
+
+    def varint() -> int:
+        nonlocal i
+        shift = result = 0
+        while i < n:
+            b = data[i]
+            i += 1
+            result |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return result
+            shift += 7
+        raise ValueError("truncated varint")
+
+    try:
+        while i < n:
+            tag = varint()
+            field, wt = tag >> 3, tag & 7
+            if wt == 0:
+                yield field, wt, varint()
+            elif wt == 1:
+                if i + 8 > n:
+                    return
+                val = struct.unpack_from("<d", data, i)[0]
+                i += 8
+                yield field, wt, val
+            elif wt == 2:
+                ln = varint()
+                if i + ln > n:
+                    return
+                val = data[i:i + ln]
+                i += ln
+                yield field, wt, val
+            elif wt == 5:
+                if i + 4 > n:
+                    return
+                val = struct.unpack_from("<f", data, i)[0]
+                i += 4
+                yield field, wt, val
+            else:
+                return
+    except ValueError:
+        return
+
+
+def _pb_first_varint(msg: bytes) -> int:
+    """Field 1 as a varint — covers both prod_charger.Cent {1: cents} and
+    google.protobuf.Timestamp {1: seconds}."""
+    return next((v for f, wt, v in _pb_fields(msg) if f == 1 and wt == 0), 0)
+
+
+def _decode_credits_config(cfg: bytes) -> dict:
+    """GrokCreditsConfig -> view model. Fields: 1 credit_usage_percent(float),
+    2 on_demand_cap(Cent), 3 on_demand_used(Cent), 7 product_usage(repeated),
+    8 current_period, 12 prepaid_balance(Cent)."""
+    out = {
+        "used_percent": None, "period_type": "unspecified", "reset_at": None,
+        "products": [], "prepaid_cents": 0, "on_demand_cap_cents": 0, "on_demand_used_cents": 0,
+    }
+    for f, wt, v in _pb_fields(cfg):
+        if f == 1 and wt == 5:
+            out["used_percent"] = round(v, 2)
+        elif f == 2 and wt == 2:
+            out["on_demand_cap_cents"] = _pb_first_varint(v)
+        elif f == 3 and wt == 2:
+            out["on_demand_used_cents"] = _pb_first_varint(v)
+        elif f == 7 and wt == 2:  # ProductUsage { 1: product, 2: usage_percent }
+            product, pct = 0, 0.0
+            for pf, pwt, pv in _pb_fields(v):
+                if pf == 1 and pwt == 0:
+                    product = pv
+                elif pf == 2 and pwt == 5:
+                    pct = pv
+            meta = _CREDIT_PRODUCTS.get(product)
+            if meta:
+                out["products"].append({"key": meta[0], "label": meta[1], "percent": round(pct, 2)})
+        elif f == 8 and wt == 2:  # UsagePeriod { 1: type, 3: end(Timestamp) }
+            for uf, uwt, uv in _pb_fields(v):
+                if uf == 1 and uwt == 0:
+                    out["period_type"] = _CREDIT_PERIODS.get(uv, "unspecified")
+                elif uf == 3 and uwt == 2:
+                    out["reset_at"] = _pb_first_varint(uv) * 1000  # ms epoch
+        elif f == 12 and wt == 2:
+            out["prepaid_cents"] = _pb_first_varint(v)
+    return out
+
+
+def _decode_grpc_web(body: bytes) -> dict | None:
+    """Split a gRPC-Web response (5-byte-prefixed frames) into the data frame and the
+    trailer (flag 0x80, carries grpc-status); returns the decoded config or None."""
+    i, message, status_ok = 0, None, True
+    while i + 5 <= len(body):
+        flag = body[i]
+        ln = int.from_bytes(body[i + 1:i + 5], "big")
+        i += 5
+        payload = body[i:i + ln]
+        i += ln
+        if flag & 0x80:
+            m = re.search(rb"grpc-status:\s*(\d+)", payload, re.IGNORECASE)
+            if m and m.group(1) != b"0":
+                status_ok = False
+        elif not flag & 0x01:
+            message = payload  # uncompressed data frame
+    if not status_ok or message is None:
+        return None
+    cfg = next((v for f, wt, v in _pb_fields(message) if f == 1 and wt == 2), None)
+    return _decode_credits_config(cfg) if cfg is not None else None
+
+
+def _account_auth_spec(acct_id: str):
+    """The account's parsed browser auth (headers + cookies) from its stored cURL,
+    or None when there's no readable session."""
+    path = _account_curl_path(acct_id)
+    if acct_id == "default" and not path.exists():
+        path = LEGACY_CURL_FILE
+    if not path.exists():
+        return None
+    try:
+        specs = gdownloader.parse_curl_samples(path)
+        return gdownloader.choose_grok_auth_spec(specs)
+    except (Exception, SystemExit):  # parse_curl_samples SystemExits on an empty file
+        return None
+
+
+def _fetch_account_quota(acct: dict) -> dict:
+    """One account's weekly usage, shaped for the UI. Never raises: failures come
+    back as {ok: False, error} — 'auth' marks a dead/expired session specifically."""
+    base = {"id": acct["id"], "name": acct["name"]}
+    spec = _account_auth_spec(acct["id"])
+    if spec is None:
+        return {**base, "ok": False, "error": "no-session"}
+    # Reuse the captured browser headers (UA & co. keep Cloudflare happy) but swap
+    # the content negotiation over to gRPC-Web proto. accept-encoding is dropped so
+    # httpx negotiates only codings it can decode (a captured 'zstd' would arrive
+    # as bytes we can't parse).
+    headers = {k: v for k, v in spec.headers_with_cookies().items()
+               if k.lower() not in ("content-type", "accept", "accept-encoding",
+                                    "content-length", "x-grpc-web", "x-user-agent")}
+    headers.update({
+        "Content-Type": "application/grpc-web+proto",
+        "Accept": "application/grpc-web+proto",
+        "X-Grpc-Web": "1",
+        "x-user-agent": "grpc-web-javascript/0.1",
+    })
+    try:
+        # The request message sets no fields -> body is one empty frame.
+        resp = httpx.post(GROK_CREDITS_URL, headers=headers,
+                          content=b"\x00\x00\x00\x00\x00", timeout=15)
+    except Exception:
+        return {**base, "ok": False, "error": "network"}
+    if resp.status_code in (401, 403):
+        return {**base, "ok": False, "error": "auth"}
+    if resp.status_code != 200:
+        return {**base, "ok": False, "error": f"http-{resp.status_code}"}
+    decoded = _decode_grpc_web(resp.content)
+    if not decoded or not isinstance(decoded.get("used_percent"), (int, float)):
+        return {**base, "ok": False, "error": "unavailable"}
+    return {**base, "ok": True, **decoded}
+
+
+@app.get("/api/accounts/quota")
+def api_accounts_quota() -> Response:
+    """Weekly usage for every ACTIVE account, cached ~4 min per account so the UI
+    can poll freely; ?refresh=1 forces a refetch. Accounts are fetched concurrently."""
+    refresh = request.args.get("refresh", "").strip().lower() in ("1", "true", "yes", "on")
+    active = [a for a in _load_accounts() if a.get("active")]
+    now = time.time()
+    out: list = [None] * len(active)
+    to_fetch: list[tuple[int, dict]] = []
+    with _quota_lock:
+        # Cache hygiene: drop entries for accounts that were deleted or paused.
+        keep = {a["id"] for a in active}
+        for stale in [k for k in _quota_cache if k not in keep]:
+            _quota_cache.pop(stale, None)
+        for idx, acct in enumerate(active):
+            hit = _quota_cache.get(acct["id"])
+            if not refresh and hit and now - hit[0] < QUOTA_TTL:
+                out[idx] = {**hit[1], "name": acct["name"]}  # honour a rename
+            else:
+                to_fetch.append((idx, acct))
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=min(4, len(to_fetch))) as pool:
+            fetched = list(pool.map(lambda pair: _fetch_account_quota(pair[1]), to_fetch))
+        with _quota_lock:
+            for (idx, acct), entry in zip(to_fetch, fetched):
+                _quota_cache[acct["id"]] = (time.time(), entry)
+                out[idx] = entry
+    return jsonify(accounts=out, ttl=QUOTA_TTL)
 
 
 @app.get("/api/playlists")
@@ -1268,7 +1731,9 @@ def _clean_collection(entry: dict) -> dict | None:
     ids = _collection_id_list(entry.get("ids"))
     if not name:
         return None
-    now = time.strftime("%Y-%m-%d")
+    # Full timestamp (not date-only) so "Recently updated" can order collections
+    # touched on the same day; legacy date-only stamps still compare correctly.
+    now = _utc_stamp()
     out = {
         "id": str(entry.get("id") or "")[:64] or name,
         "name": name,
@@ -1753,7 +2218,7 @@ def api_import_commit() -> Response:
         return jsonify(ok=False, error="Nothing to import."), 400
 
     ids = [r["id"] for r in records]
-    today = time.strftime("%Y-%m-%d")
+    today = _utc_stamp()
 
     if target is not None:
         seen = set(target.get("ids", []))
@@ -2768,7 +3233,7 @@ def _commit_montage() -> dict:
     collections = _load_collections(strict=True)
     coll = next((c for c in collections
                  if c.get("id") == BEAT_MONTAGE_COLLECTION or str(c.get("name", "")).lower() == "beat montage"), None)
-    today = time.strftime("%Y-%m-%d")
+    today = _utc_stamp()
     if coll is None:
         collections.insert(0, {
             "id": BEAT_MONTAGE_COLLECTION, "name": "Beat Montage", "ids": [mid],
@@ -4948,7 +5413,7 @@ def _purge_ids_from_collections(ids: set) -> None:
             coll["ids"] = kept
             if coll.get("cover_id") and str(coll["cover_id"]) in ids:
                 coll["cover_id"] = kept[0] if kept else ""
-            coll["updated_at"] = time.strftime("%Y-%m-%d")
+            coll["updated_at"] = _utc_stamp()
             changed = True
     if changed:
         _atomic_write_json(COLLECTIONS_FILE, data)
@@ -5103,14 +5568,21 @@ _BACKUP_TARGETS = {
 # Secret files — included on export and accepted on restore ONLY in secrets mode.
 _BACKUP_SECRET_TARGETS = {
     "grok_auth.txt": CURL_FILE,
+    "grok_accounts.json": ACCOUNTS_FILE,
     "admin_password.txt": ADMIN_PW_FILE,
 }
+# Per-account session files ride along in secrets mode under grok_accounts/<id>.txt.
+# Dynamic names, so they can't live in the static allowlist above — restore instead
+# accepts exactly this pattern, whose id segment is the same regex the registry
+# enforces, so a crafted member can never escape grok_accounts/.
+_ACCOUNT_ARC_RE = re.compile(r"^grok_accounts/([a-z0-9][a-z0-9-]{2,31})\.txt$")
 # Members that must parse as JSON before being written (validated up front so a
 # corrupt entry aborts the whole restore rather than half-overwriting live data).
 _BACKUP_JSON_NAMES = {
     "metadata.json", "library.json", "collections.json", "playlists.json",
     "saved_responses.json", "scenes.json", "personas.json",
     "freeform_presets.json", "deleted_ids.json", "settings.json",
+    "grok_accounts.json",
 }
 
 
@@ -5205,6 +5677,19 @@ def api_backup_export() -> Response:
                     continue
             zf.writestr(name, payload)
             manifest["files"].append({"name": name, "bytes": len(payload)})
+        if include_secrets:
+            # Per-account sessions (the 'default' account is grok_auth.txt, already above).
+            for acct in _load_accounts():
+                path = _account_curl_path(acct["id"])
+                if acct["id"] == "default" or not path.exists():
+                    continue
+                try:
+                    payload = path.read_bytes()
+                except OSError:
+                    continue
+                arc = f"{ACCOUNTS_DIR.name}/{acct['id']}.txt"
+                zf.writestr(arc, payload)
+                manifest["files"].append({"name": arc, "bytes": len(payload)})
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
 
     data = buf.getvalue()
@@ -5286,6 +5771,15 @@ def api_backup_import() -> Response:
                         merged = {**current, **parsed}
                         raw = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
                 pending.append((dest, raw))
+
+            # Per-account session files: dynamic names, gated by the same id regex
+            # the registry enforces (see _ACCOUNT_ARC_RE) so they can only land as
+            # grok_accounts/<id>.txt.
+            for arcname in sorted(names):
+                m = _ACCOUNT_ARC_RE.fullmatch(arcname)
+                if m:
+                    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+                    pending.append((ACCOUNTS_DIR / f"{m.group(1)}.txt", zf.read(arcname)))
 
             if not pending:
                 return jsonify(ok=False, error="Backup contained no recognised state files."), 400

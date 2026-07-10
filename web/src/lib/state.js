@@ -111,6 +111,18 @@ export function setQuery(query) {
   filters.update((f) => ({ ...f, query }));
 }
 
+// Jump to All Media carrying a search query. Used when Enter is pressed from a context
+// where the query is ignored (the Collections/Library landing, or the Studio/Imagine
+// workspaces) so the matches actually render as a grid instead of doing nothing. Like
+// setView it's a fresh context — refinements other than the query reset; sort persists.
+export function searchAllMedia(query) {
+  activeCollectionId.set(null);
+  filters.update((f) => ({
+    ...f, view: 'all', canvas: null, query,
+    tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all'
+  }));
+}
+
 // Which Prompt Studio sub-tab is active. Lifted out of the component so the top-bar
 // island can jump straight to a tab (the "Prompts" → Saved button) and reflect which
 // one is showing. compose | scene | freeform are the authoring tabs; 'saved' is the library.
@@ -511,7 +523,10 @@ export const collections = writable([]);
 // its controls. Owned by the page: set on open, cleared on Back / when leaving the view.
 export const activeCollectionId = writable(null);
 const cid = () => 'co-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
-const today = () => new Date().toISOString().slice(0, 10);
+// Full ISO timestamp, not date-only: "Recently updated" sorts on this string, and a
+// date-only stamp made every collection touched the same day tie (so nothing moved).
+// Legacy date-only values still compare correctly against these lexicographically.
+const today = () => new Date().toISOString();
 
 // Collection mutations persist with a fire-and-forget POST, but several reads resolve a
 // collection's ids from the server's collections.json (the /api/media + /api/facets

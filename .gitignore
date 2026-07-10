@@ -1,5 +1,7 @@
 grok_auth.txt
 curl_samples.txt
+grok_accounts.json
+grok_accounts/
 metadata.json
 failed_downloads.json
 admin_password.txt
@@ -20,5 +22,5 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
-
+.claude
 specs/

@@ -267,9 +267,19 @@ export const syncStatus = () => getJSON('/api/sync/status');
 export const getStats = () => getJSON('/api/stats');
 
 // --- Config + settings -----------------------------------------------------
-export const getConfig = () => getJSON('/api/config');
-export const postConfig = (curlText) =>
-  fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: curlText });
+// Grok accounts: named cURL sessions. { accounts: [{ id, name, active, configured, mtime }] }
+// — the pasted cURL itself is write-only and never comes back.
+export const getAccounts = () => getJSON('/api/accounts');
+export const createAccount = (body) =>
+  fetch('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+export const updateAccount = (id, body) =>
+  fetch(`/api/accounts/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+export const deleteAccount = (id) =>
+  fetch(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+// Weekly Grok usage per ACTIVE account (server-cached ~4 min):
+// { accounts: [{ id, name, ok, used_percent, period_type, reset_at, products, ... } | { id, name, ok:false, error }] }
+export const getAccountsQuota = (refresh = false) =>
+  getJSON(`/api/accounts/quota${refresh ? '?refresh=1' : ''}`);
 export const getSettings = () => getJSON('/api/settings');
 export const postSettings = (body) =>
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

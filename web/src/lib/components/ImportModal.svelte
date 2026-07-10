@@ -16,7 +16,13 @@
   // they're hidden here just as they are in the "Add to Collection" picker.
   let target = $state('new'); // 'new' | 'existing'
   let existingId = $state('');
-  const pickable = $derived(($collections || []).filter((c) => !(c.locked && !c.unlocked)));
+  // Most-recently-touched first, like the Add to Collection picker — the likely
+  // destination is whatever was just added to. filter() copies, so sort() is safe.
+  const pickable = $derived(
+    ($collections || [])
+      .filter((c) => !(c.locked && !c.unlocked))
+      .sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''))
+  );
   // Keep the destination valid as the collections store changes underneath (a relock or
   // unlock-expiry can drop the chosen collection): clear a selection that left the list,
   // and fall back to "new" when there's nothing eligible to add to.
