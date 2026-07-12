@@ -4218,7 +4218,8 @@ def api_facets() -> Response:
 
 @app.get("/api/stats")
 def api_stats() -> Response:
-    """Library totals (video/image counts + summed size) for the Stats panel."""
+    """Library totals (video/image counts + summed size) plus current-month
+    creation counts for the Stats panel's per-day averages."""
     if not DB_FILE.exists():
         rebuild_db()
     return jsonify(db.stats(DB_FILE))

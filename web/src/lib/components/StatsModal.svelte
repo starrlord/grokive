@@ -31,6 +31,16 @@
       loading = false;
     }
   });
+
+  // Current-month per-day average, formatted like fmtSize's numbers: one decimal
+  // under 10, whole at/above, trailing ".0" dropped. Null when the payload lacks
+  // month data (older backend) so the line is omitted rather than showing junk.
+  function perDay(count) {
+    const m = data.month;
+    if (!m?.days) return null;
+    const n = count / m.days;
+    return (n < 10 ? n.toFixed(1) : Math.round(n).toString()).replace(/\.0$/, '');
+  }
 </script>
 
 <Modal {onclose} ariaLabel="Library Stats" panelClass="panel w-full max-w-md overflow-hidden rounded-card">
@@ -71,6 +81,9 @@
             <span class="text-xs font-bold uppercase tracking-wider">Videos</span>
           </div>
           <div class="text-3xl font-black leading-none tabular-nums">{fmtCount(Math.round(tVideos.current))}</div>
+          {#if data.month}
+            <div class="mt-1.5 text-xs text-muted tabular-nums">≈ {perDay(data.month.videos)}/day this month</div>
+          {/if}
         </div>
         <div class="rounded-2xl border border-line p-4">
           <div class="mb-2 flex items-center gap-2 text-muted">
@@ -78,6 +91,9 @@
             <span class="text-xs font-bold uppercase tracking-wider">Images</span>
           </div>
           <div class="text-3xl font-black leading-none tabular-nums">{fmtCount(Math.round(tImages.current))}</div>
+          {#if data.month}
+            <div class="mt-1.5 text-xs text-muted tabular-nums">≈ {perDay(data.month.images)}/day this month</div>
+          {/if}
         </div>
       </div>
     {/if}

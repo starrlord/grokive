@@ -16,6 +16,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -714,7 +715,11 @@ def stats(db_path: str | Path) -> dict[str, Any]:
     """Whole-library totals for the Stats panel: media counts by type and the
     summed on-disk size. ``size_bytes`` is captured at index time, so this is a
     single cheap aggregate query — no filesystem walk. Rows with a missing size
-    (older indexes) just contribute 0 to the byte total."""
+    (older indexes) just contribute 0 to the byte total.
+
+    ``month`` carries current-month creation counts plus the days elapsed so far,
+    from which the UI derives per-day averages. ISO ``created_at`` strings compare
+    lexicographically, so the month-start bound is a plain string comparison."""
     conn = _connect(db_path)
     try:
         row = conn.execute(
@@ -725,11 +730,20 @@ def stats(db_path: str | Path) -> dict[str, Any]:
             "COALESCE(SUM(size_bytes), 0) AS bytes "
             "FROM media"
         ).fetchone()
+        today = date.today()
+        month = conn.execute(
+            "SELECT "
+            "COALESCE(SUM(media_type='video'), 0) AS videos, "
+            "COALESCE(SUM(media_type='image'), 0) AS images "
+            "FROM media WHERE created_at >= ?",
+            (today.strftime("%Y-%m-01"),),
+        ).fetchone()
         return {
             "videos": row["videos"],
             "images": row["images"],
             "total": row["total"],
             "bytes": row["bytes"],
+            "month": {"videos": month["videos"], "images": month["images"], "days": today.day},
         }
     finally:
         conn.close()
