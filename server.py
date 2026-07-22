@@ -2530,10 +2530,21 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
     AAC (a silent track is added to any clip lacking audio so audio is never
     dropped); the normalised clips are then losslessly concatenated.
 
+    A clip that opens on a Grok character-sheet intro card (a static held frame,
+    then a hard cut, inside the first ~1.5s — see moviegen.detect_head_trim) gets
+    that head cut off. A frame-accurate trim can't be stream-copied (the cut isn't
+    a keyframe), so any detected card forces the re-encode path for the whole
+    merge — near-lossless at CRF 10, and the only way to keep the cards out.
+
     Raises RuntimeError if ffmpeg exits non-zero.
     """
     signatures = [_probe_signature(p) for p in paths]
-    lossless = all(sig is not None for sig in signatures) and len(set(signatures)) == 1
+    trims = [moviegen.detect_head_trim(p) for p in paths]
+    if any(t > 0 for t in trims):
+        _log(f"export: trimming intro card from {sum(1 for t in trims if t > 0)} "
+             f"of {len(paths)} clip(s)")
+    lossless = (all(sig is not None for sig in signatures)
+                and len(set(signatures)) == 1 and not any(t > 0 for t in trims))
     listfile = out_path.parent / "concat.txt"
 
     if lossless:
@@ -2564,6 +2575,9 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
     normalised: list[Path] = []
     for index, src in enumerate(paths):
         temp = out_path.parent / f"norm_{index}.mp4"
+        # Input-side -ss + re-encode = a frame-accurate cut of the intro card
+        # (video and this input's audio both trimmed; the lavfi silence isn't).
+        seek = ["-ss", f"{trims[index]:.3f}"] if trims[index] > 0 else []
         common_v = [
             "-vf", vf,
             *_video_encode_args(CRF),
@@ -2571,11 +2585,11 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
             "-movflags", "+faststart", str(temp),
         ]
         if _has_audio(src):
-            cmd = ["ffmpeg", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0"] + common_v
+            cmd = ["ffmpeg", "-y", *seek, "-i", str(src), "-map", "0:v:0", "-map", "0:a:0"] + common_v
         else:
             # No audio stream -> mux in silence so every clip carries audio.
             cmd = [
-                "ffmpeg", "-y", "-i", str(src),
+                "ffmpeg", "-y", *seek, "-i", str(src),
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
             ] + common_v

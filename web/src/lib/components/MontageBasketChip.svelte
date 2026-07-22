@@ -3,13 +3,22 @@
   // Appears whenever the basket is non-empty (state.js `basket`), independent of
   // select mode / current view / collection — so clips gathered across libraries
   // stay one tap from a montage. Tapping opens a panel to review, remove, clear, or
-  // fire the montage. Anchored bottom-LEFT so it never collides with the bottom-RIGHT
-  // MontageStatusChip on desktop; both relocate to the top on phones (see media query).
+  // fire the montage. Default anchor is bottom-LEFT so it never collides with the
+  // bottom-RIGHT MontageStatusChip on desktop; both relocate to the top on phones
+  // (see media query). The chip is also DRAGGABLE — it floats over content, so the
+  // default corner can cover controls (especially on phones); the dropped spot is
+  // persisted per-device and the panel flips to open away from the nearest edges.
   import { fly } from 'svelte/transition';
-  import { basket, clearBasket, toggleBasket, montageMode, isMontageSource } from '$lib/state.js';
+  import { basket, basketChipPos, clearBasket, toggleBasket, montageMode, isMontageSource } from '$lib/state.js';
   import { mediaByIds } from '$lib/api.js';
 
-  let { onmontage = () => {} } = $props();
+  // onview(list, index) — open the resolved queue in the Lightbox at that item, so a
+  // queued clip can be watched before deciding to keep it. The panel deliberately
+  // STAYS OPEN: it sits above the Lightbox (z-60 vs z-50), acting as a triage
+  // sidebar — view a row, remove it (row ✕ or the viewer's own queue toggle), click
+  // the next. `previewing` (a Lightbox is open) hides the scrim so the viewer stays
+  // clickable and defers Escape to it; `previewId` highlights the row being viewed.
+  let { onmontage = () => {}, onview = () => {}, previewing = false, previewId = null } = $props();
 
   const ids = $derived($basket);
   const count = $derived(ids.length);
@@ -43,16 +52,93 @@
   // Auto-close when the queue empties (last item removed from the panel or elsewhere).
   $effect(() => { if (count === 0 && open) open = false; });
 
-  function onKey(e) { if (e.key === 'Escape' && open) open = false; }
+  // While a preview Lightbox is up, Escape belongs to it (this listener registered
+  // first, so it would otherwise close the panel on the same keypress).
+  function onKey(e) { if (e.key === 'Escape' && open && !previewing) open = false; }
+
+  // Keep the row being previewed visible in the scrollable list as the viewer's
+  // prev/next moves through the queue.
+  let listEl = $state(null);
+  $effect(() => {
+    if (!previewing || previewId == null || !listEl) return;
+    listEl.querySelector(`[data-id="${CSS.escape(String(previewId))}"]`)?.scrollIntoView({ block: 'nearest' });
+  });
+
+  // --- Drag-to-move ----------------------------------------------------------
+  // The dropped spot lives in state.js `basketChipPos` as viewport FRACTIONS
+  // (0..1 of the space the chip can occupy) — persisted per-device, so it
+  // survives reloads and stays proportionally placed across window resizes and
+  // phone rotation. Null -> the CSS default anchors above apply.
+  const pos = $derived($basketChipPos);
+  let vw = $state(typeof window === 'undefined' ? 0 : window.innerWidth);
+  let vh = $state(typeof window === 'undefined' ? 0 : window.innerHeight);
+  let chipEl = $state(null);
+  let chipW = $state(0), chipH = $state(0);
+  let dragging = $state(false);
+  let suppressClick = false;
+  let start = null; // pointer + chip origin at pointerdown
+
+  const placed = $derived.by(() => {
+    if (!pos || !vw || !vh || !chipW || !chipH) return null;
+    const x = pos.fx * Math.max(0, vw - chipW);
+    const y = pos.fy * Math.max(0, vh - chipH);
+    return { x, y, right: pos.fx > 0.5, up: pos.fy > 0.5 };
+  });
+  // Anchor the wrap by the chip corner nearest the closest viewport edge so the
+  // panel grows toward open space, and cap the wrap's width so the panel can
+  // never extend past the viewport (it shrinks instead — max-width: 100%).
+  const wrapStyle = $derived.by(() => {
+    if (!placed) return '';
+    const hpos = placed.right
+      ? `left:auto;right:${Math.round(vw - placed.x - chipW)}px;max-width:${Math.round(placed.x + chipW)}px;`
+      : `left:${Math.round(placed.x)}px;right:auto;max-width:${Math.round(vw - placed.x - 12)}px;`;
+    const vpos = placed.up
+      ? `top:auto;bottom:${Math.round(vh - placed.y - chipH)}px;`
+      : `top:${Math.round(placed.y)}px;bottom:auto;`;
+    return hpos + vpos;
+  });
+
+  function dragStart(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const r = chipEl.getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+    chipEl.setPointerCapture?.(e.pointerId);
+  }
+  function dragMove(e) {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (!dragging && Math.hypot(dx, dy) < 6) return; // still a tap until it travels
+    dragging = true;
+    const maxX = Math.max(0, vw - chipW), maxY = Math.max(0, vh - chipH);
+    const x = Math.min(Math.max(0, start.left + dx), maxX);
+    const y = Math.min(Math.max(0, start.top + dy), maxY);
+    basketChipPos.set({ fx: maxX ? x / maxX : 0, fy: maxY ? y / maxY : 0 });
+  }
+  function dragEnd() {
+    if (dragging) {
+      // A click fires right after pointerup on a drag — it must not toggle the panel.
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 0);
+    }
+    dragging = false;
+    start = null;
+  }
+  function onChipClick() {
+    if (suppressClick) return;
+    open = !open;
+  }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} bind:innerWidth={vw} bind:innerHeight={vh} />
 
 {#if count}
-  {#if open}
+  {#if open && !previewing}
+    <!-- Hidden while a preview Lightbox is open — the scrim sits ABOVE the Lightbox
+         (z-59 vs z-50) and would swallow every click meant for the player. -->
     <button type="button" class="basket-scrim" aria-label="Close montage queue" onclick={() => (open = false)}></button>
   {/if}
-  <div class="basket-wrap" class:open transition:fly={{ y: 16, duration: 200 }}>
+  <div class="basket-wrap" class:open class:custom={!!placed} class:panel-down={placed && !placed.up} class:anchor-right={!!placed?.right}
+    style={wrapStyle} transition:fly={{ y: 16, duration: 200 }}>
     {#if open}
       <div class="basket-panel" role="dialog" aria-label="Montage queue">
         <div class="basket-head">
@@ -65,20 +151,25 @@
           <button type="button" class="basket-mode-btn" class:active={!picVideo} aria-pressed={!picVideo} onclick={() => montageMode.set('video')}>Video only</button>
           <button type="button" class="basket-mode-btn" class:active={picVideo} aria-pressed={picVideo} onclick={() => montageMode.set('picture-video')}>Picture &amp; Video</button>
         </div>
-        <div class="basket-list">
+        <div class="basket-list" bind:this={listEl}>
           {#if loading && !items.length}
             <p class="basket-status">Loading…</p>
           {:else if !items.length}
             <p class="basket-status">Nothing queued.</p>
           {:else}
-            {#each items as it (it.id)}
-              <div class="basket-row" class:ineligible={!isMontageSource(it, $montageMode)} title={!isMontageSource(it, $montageMode) ? 'Not used in Video-only mode — switch to Picture & Video to include this photo' : undefined}>
-                {#if it.thumb}
-                  <img class="basket-thumb" src={it.thumb} alt="" loading="lazy" decoding="async" />
-                {:else}
-                  <span class="basket-thumb basket-thumb--empty"></span>
-                {/if}
-                <span class="basket-rowtext">{it.prompt || it.model || 'Untitled'}</span>
+            {#each items as it, idx (it.id)}
+              <div class="basket-row" data-id={it.id}
+                class:ineligible={!isMontageSource(it, $montageMode)}
+                class:previewing={previewing && String(it.id) === String(previewId)}
+                title={!isMontageSource(it, $montageMode) ? 'Not used in Video-only mode — switch to Picture & Video to include this photo' : undefined}>
+                <button type="button" class="basket-rowmain" title="View / play" onclick={() => onview(items, idx)}>
+                  {#if it.thumb}
+                    <img class="basket-thumb" src={it.thumb} alt="" loading="lazy" decoding="async" />
+                  {:else}
+                    <span class="basket-thumb basket-thumb--empty"></span>
+                  {/if}
+                  <span class="basket-rowtext">{it.prompt || it.model || 'Untitled'}</span>
+                </button>
                 <button type="button" class="basket-remove" aria-label="Remove from queue" title="Remove" onclick={() => toggleBasket(it.id)}>✕</button>
               </div>
             {/each}
@@ -92,8 +183,10 @@
       </div>
     {/if}
 
-    <button type="button" class="basket-chip" onclick={() => (open = !open)} aria-expanded={open}
-      title="Montage queue — {count} {picVideo ? 'item' : 'video'}{count === 1 ? '' : 's'}">
+    <button type="button" bind:this={chipEl} bind:clientWidth={chipW} bind:clientHeight={chipH}
+      class="basket-chip" class:grabbing={dragging} onclick={onChipClick} aria-expanded={open}
+      onpointerdown={dragStart} onpointermove={dragMove} onpointerup={dragEnd} onpointercancel={dragEnd}
+      title="Montage queue — {count} {picVideo ? 'item' : 'video'}{count === 1 ? '' : 's'} · drag to move">
       <span class="basket-chip-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
       </span>
@@ -133,7 +226,11 @@
     gap: 0.4rem;
     min-height: 2.5rem;
     padding: 0.4rem 0.85rem 0.4rem 0.55rem;
+    touch-action: none; /* the chip pans itself — without this, touch drags scroll the page */
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .basket-chip.grabbing { cursor: grabbing; }
   .basket-chip:hover,
   .basket-wrap.open .basket-chip { border-color: var(--accent); }
 
@@ -162,6 +259,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+    max-width: 100%; /* shrink to the wrap's inline max-width when the chip sits near an edge */
     padding: 0.6rem;
     width: min(20rem, calc(100vw - 2rem));
   }
@@ -215,10 +313,22 @@
     align-items: center;
     border-radius: var(--r-lg);
     display: flex;
-    gap: 0.5rem;
+    gap: 0.25rem;
     padding: 0.25rem;
   }
   .basket-row:hover { background: var(--surface-2); }
+  .basket-row.previewing { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+  /* The thumbnail + title is itself a button: click to view/play this item in the
+     Lightbox (the panel stays open above it as a triage sidebar). */
+  .basket-rowmain {
+    align-items: center;
+    display: flex;
+    flex: 1 1 auto;
+    gap: 0.5rem;
+    min-width: 0;
+    text-align: left;
+  }
 
   .basket-thumb {
     background: var(--media-bg);
@@ -282,4 +392,11 @@
       top: calc(56px + max(0.5rem, env(safe-area-inset-top)) + 3.25rem);
     }
   }
+
+  /* User-dragged position: inline left/top/right/bottom out-specificity everything;
+     these two-class rules out-specificity the phone media query's flex flip so the
+     panel opens away from whichever vertical half the chip sits in. */
+  .basket-wrap.custom { flex-direction: column; } /* chip in bottom half -> panel above */
+  .basket-wrap.custom.panel-down { flex-direction: column-reverse; } /* top half -> panel below */
+  .basket-wrap.custom.anchor-right { align-items: flex-end; } /* right half -> panel grows leftward */
 </style>

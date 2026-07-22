@@ -42,7 +42,10 @@
     setTimeout(() => (b.textContent = prev), 1200);
   }
 
-  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {}, onopencollection = () => {} } = $props();
+  // onitemchange(id|null) — reports which item is showing as the viewer navigates
+  // (arrows, deletes, prop updates). Lets a launcher that stays visible above the
+  // Lightbox (the Montage-queue triage panel) highlight the row being viewed.
+  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {}, onopencollection = () => {}, onitemchange = () => {} } = $props();
   // Honour reduced-motion for the slide crossfade (and skip it entirely there).
   const reduceMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const FADE_MS = 360;
@@ -58,6 +61,7 @@
     else if (i > liveList.length - 1) i = liveList.length - 1;
   });
   const item = $derived(liveList[i] || null);
+  $effect(() => { onitemchange(item?.id ?? null); });
   let confirmingDelete = $state(false);
   let autoplayVideos = $state(false);
   // Photo slideshow mode (image-only). The ▶ control drives this when the open item is

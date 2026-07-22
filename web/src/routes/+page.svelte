@@ -47,6 +47,9 @@
   let facets = $state({ tags: [], models: [], canvases: [] });
 
   let lb = $state(null); // { list, index, autoAdvance, title }
+  // Id of the item the Lightbox is currently showing (via onitemchange) — feeds the
+  // Montage-queue panel's "now viewing" row highlight while it triages above the viewer.
+  let previewItemId = $state(null);
   let editing = $state(null); // playlist being edited
   // activeCollectionId now lives in the shared store (state.js) so the TopBar can read collection context.
   let collectionItems = $state([]);
@@ -491,6 +494,14 @@
   // (NOT the grid-scoped `byId` map) so clips queued from collections we've since
   // navigated away from are still found. Hands off to the montage panel the same way
   // a collection does; the basket itself is left intact so an aborted launch keeps the picks.
+  // View/play a queued item from the basket panel: the panel already resolved the
+  // queue via mediaByIds, so its list goes straight to the Lightbox (no refetch).
+  // No autoAdvance — triage is a per-item decision, not a screening. The panel stays
+  // open above the viewer (z-60 vs z-50); its rows and the viewer's own queue-toggle
+  // button both remove items while previewing.
+  function openBasketPreview(list, index) {
+    lb = { list, index, autoAdvance: false, title: `Montage queue (${list.length})` };
+  }
   async function launchBasketMontage() {
     const list = (await mediaByIds($basket)).filter((v) => isMontageSource(v, $montageMode));
     if (list.length < 2) {
@@ -889,7 +900,8 @@
 
 {#if lb}
   <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} autoSlideshow={lb.autoSlideshow} title={lb.title}
-    onopenrelated={openRelatedLightbox} onopencollection={enterCollection} onclose={() => (lb = null)} />
+    onopenrelated={openRelatedLightbox} onopencollection={enterCollection} onitemchange={(id) => (previewItemId = id)}
+    onclose={() => { lb = null; previewItemId = null; }} />
 {/if}
 
 {#if editing}
@@ -930,7 +942,7 @@
 
 <!-- Cross-library Montage queue: floating chip (bottom-left) that surfaces clips
      gathered across collections/views and launches the montage from them. -->
-<MontageBasketChip onmontage={launchBasketMontage} />
+<MontageBasketChip onmontage={launchBasketMontage} onview={openBasketPreview} previewing={!!lb} previewId={previewItemId} />
 
 <!-- Cross-library Play Queue: playback sibling of the Montage basket. Floating chip
      (bottom-left, stacked above the montage chip when both are present) that surfaces

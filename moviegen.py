@@ -33,6 +33,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -184,6 +185,31 @@ W_SCENE_SPAN = 0.6
 W_LOWCONTRAST = 0.5
 LOWCONTRAST_FLOOR = 0.045  # mean normalized motion below this reads as dead footage
 
+# Character reference-sheet head trim. Grok prepends some generations with a
+# "character sheet" card (a grid of poses + face crops) that then transitions into
+# the real footage. Two shapes exist in the wild, both unmistakable on the RAW
+# (unnormalized) frame-diff curve, so the montage analysis pass and the server's
+# Merge/Export head scan detect them the same way (_head_trim_from_diffs):
+#   - FLASH card (measured on real exports): the card lives on the very first
+#     frame(s) and cross-fades out within ~0.25s — a huge first diff (~45-65 vs a
+#     settled baseline of ~2-5), i.e. raw[0] towers over the post-dissolve median.
+#   - HELD card: the card sits static for ~0.5-1.0s, then cuts/dissolves — a run
+#     of near-zero diffs ended by a spike run.
+# Thresholds are on the raw 0-255 mean-abs-diff scale: detection MUST run before
+# peak normalization, because the card's exit spike is often the clip's peak — it
+# would otherwise both survive as the normalization divisor (deflating every real
+# motion value) and attract the planner's peak-anchor math to the card itself.
+HEAD_STATIC_DIFF = 2.0     # raw diff below which a frame pair reads as "held still"
+HEAD_SPIKE_DIFF = 12.0     # raw diff that reads as part of the cut/dissolve out of the card
+HEAD_MIN_STATIC_S = 0.25   # a HELD card needs at least this much leading stillness
+HEAD_FLASH_MIN = 20.0      # a FLASH card's first diff must be at least this big...
+HEAD_FLASH_RATIO = 5.0     # ...and this many times the settled post-dissolve median
+                           # (real cards measure 14-23x; opening motion stays ~1x)
+HEAD_DISSOLVE_MAX_S = 0.5  # a card's exit spike-run can't run longer (that's real action)
+HEAD_MAX_TRIM_S = 1.5      # a card exit later than this is content, not an intro card
+HEAD_MIN_REMAIN_S = 1.0    # never trim a clip down below this much remaining footage
+HEAD_SCAN_S = 3.0          # how much of the head detect_head_trim() decodes
+
 # Picture & Video preset — still images allowed as beats. A still has no container
 # duration and no decodable motion, so it never survives the normal video pipeline
 # (motion analysis drops it, and the planner's length gate rejects a zero-duration
@@ -294,6 +320,10 @@ class MotionCurve:
     duration: float
     fps_analyzed: float
     samples: list[float] = field(default_factory=list)  # normalized 0..1
+    # Seconds cut off the clip's head (a detected character-sheet intro card).
+    # duration/samples and every window time below are in TRIMMED clip time; the
+    # render adds this back when seeking the source (see _render_segment).
+    head_offset: float = 0.0
     _prefix: list[float] = field(default_factory=list, repr=False)
     scene_cuts: list[float] = field(default_factory=list, repr=False)  # internal shot-change times
 
@@ -415,6 +445,9 @@ class EDLEntry:
     # clip fills the SAME timeline slot (it just consumes proportionally less source,
     # which setpts stretches back to fill). The duration-tiling invariant stays exact.
     playback_speed: float = 1.0
+    # Source-time seconds trimmed off this clip's head (detected intro card).
+    # in_point/out_point are in trimmed clip time; the render seek adds this back.
+    head_offset: float = 0.0
 
 
 @dataclass
@@ -691,26 +724,36 @@ def _sections_structural(y, sr, beat_frames, times: list[float],
 # Stage 2 — motion analysis -> MotionCurve per clip
 # --------------------------------------------------------------------------- #
 
-def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve:
-    """Per-frame motion curve via CPU frame-differencing.
+def _gray_diffs(src: Path, hwaccel_decode: bool, limit_s: float | None = None,
+                timeout_s: float = 900.0) -> list[float]:
+    """RAW mean-abs frame diffs (0-255 scale) at ANALYSIS_FPS over downscaled
+    grayscale frames — the shared decode pass behind analyze_motion and
+    detect_head_trim. ``limit_s`` caps how much of the clip is decoded (the
+    head-only scan); None decodes the whole clip.
 
-    Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
-    then motion[t] = mean(|frame[t] - frame[t-1]|), normalized 0..1. No OpenCV.
-    """
+    ``timeout_s`` is a kill-watchdog on the decode: unlike every other ffmpeg
+    call here (subprocess.run with a timeout), this one streams from a pipe, and
+    a wedged read (stalled network/FUSE mount) would otherwise block forever.
+    detect_head_trim runs on a server request thread holding an export slot, so
+    it MUST eventually return — a killed decode just yields the samples read so
+    far, which at worst means no trim for that clip."""
     import numpy as np
 
-    duration = probe_duration(src)
     frame_bytes = ANALYSIS_W * ANALYSIS_H
     cmd = ["ffmpeg", "-v", "error"]
     if hwaccel_decode:
         cmd += ["-hwaccel", "cuda"]
+    cmd += ["-i", str(src)]
+    if limit_s is not None:
+        cmd += ["-t", f"{limit_s:.3f}"]
     cmd += [
-        "-i", str(src),
         "-vf", f"fps={ANALYSIS_FPS},scale={ANALYSIS_W}:{ANALYSIS_H},format=gray",
         "-f", "rawvideo", "-pix_fmt", "gray", "-",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert proc.stdout is not None
+    watchdog = threading.Timer(timeout_s, proc.kill)
+    watchdog.start()
     samples: list[float] = []
     prev = None
     try:
@@ -723,14 +766,100 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve
                 samples.append(float(np.abs(arr - prev).mean()))
             prev = arr
     finally:
+        watchdog.cancel()
         proc.stdout.close()
-        proc.wait()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return samples
 
+
+def _head_trim_from_diffs(raw: list[float], fps: float) -> float:
+    """Seconds to cut off a clip's head when it opens on a character-sheet intro
+    card. ``raw[i]`` is the diff between frames i and i+1; the shared shape is an
+    optional leading static run (the held card), then a short spike-run (the
+    cut/dissolve out of the card), then settled content — trim to the first frame
+    after the spike-run. Returns 0.0 when neither card signature is present:
+    immediate ordinary motion never clears the spike threshold from a standing
+    start, a fade-in rises gradually with no spike, sustained fast action keeps
+    the spike-run going past HEAD_DISSOLVE_MAX_S, and a late exit is content.
+
+    HELD card: the static run alone is proof (real footage that still for 0.25s+
+    does not then jump straight to a 12+ diff). FLASH card (no static run — the
+    card lives inside frame 0 and dissolves immediately): the first diff must
+    tower over the settled post-dissolve median (HEAD_FLASH_MIN/_RATIO), which
+    ordinary opening motion can't do — motion doesn't stop instantly."""
+    if fps <= 0 or len(raw) < 2:
+        return 0.0
+    i = 0
+    while i < len(raw) and raw[i] < HEAD_STATIC_DIFF:
+        i += 1
+    j = i
+    while j < len(raw) and raw[j] >= HEAD_SPIKE_DIFF:
+        j += 1
+    if j == i or j >= len(raw):
+        return 0.0                      # no card exit / elevated to the end of the scan
+    trim = j / fps
+    if trim > HEAD_MAX_TRIM_S or (j - i) / fps > HEAD_DISSOLVE_MAX_S:
+        return 0.0                      # exit too late, or "dissolve" is sustained action
+    if i >= max(1, round(HEAD_MIN_STATIC_S * fps)):
+        return trim                     # HELD card: static run, then the exit spike-run
+    if i == 0 and raw[0] >= HEAD_FLASH_MIN:
+        settled = sorted(raw[j:j + 8])
+        med = settled[len(settled) // 2]
+        if raw[0] >= HEAD_FLASH_RATIO * max(med, 1.0):
+            return trim                 # FLASH card: frame 0 towers over settled content
+    return 0.0
+
+
+def detect_head_trim(src: Path, *, hwaccel_decode: bool = False) -> float:
+    """Standalone head scan for callers outside the montage pipeline (the server's
+    Merge/Export): decode only the first HEAD_SCAN_S seconds and return the seconds
+    to trim off a detected character-sheet intro card, 0.0 when there's nothing to
+    trim. Never raises — detection must not be able to break an export."""
+    try:
+        if _is_image(src):
+            return 0.0
+        trim = _head_trim_from_diffs(
+            _gray_diffs(Path(src), hwaccel_decode, limit_s=HEAD_SCAN_S, timeout_s=120.0),
+            float(ANALYSIS_FPS))
+        if trim <= 0.0:
+            return 0.0
+        duration = probe_duration(Path(src))
+        if duration > 0 and duration - trim < HEAD_MIN_REMAIN_S:
+            return 0.0
+        return trim
+    except Exception:
+        return 0.0
+
+
+def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve:
+    """Per-frame motion curve via CPU frame-differencing.
+
+    Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
+    then motion[t] = mean(|frame[t] - frame[t-1]|), normalized 0..1. No OpenCV.
+
+    A detected character-sheet intro card is cut off the head FIRST, on the raw
+    diffs (see _head_trim_from_diffs): the leading samples are dropped, duration
+    shrinks, and the trim is recorded as MotionCurve.head_offset — so the curve,
+    its windows/scene cuts, and everything the planner derives are all in trimmed
+    clip time, and normalization is no longer poisoned by the card's cut spike."""
+    duration = probe_duration(src)
+    samples = _gray_diffs(src, hwaccel_decode)
+    head = _head_trim_from_diffs(samples, float(ANALYSIS_FPS))
+    if head > 0 and duration - head >= HEAD_MIN_REMAIN_S:
+        samples = samples[round(head * ANALYSIS_FPS):]
+        duration -= head
+    else:
+        head = 0.0
     peak = max(samples) if samples else 0.0
     if peak > 0:
         samples = [s / peak for s in samples]
     return MotionCurve(clip_id=clip_id, src_path=str(src), duration=duration,
-                       fps_analyzed=float(ANALYSIS_FPS), samples=samples)
+                       fps_analyzed=float(ANALYSIS_FPS), samples=samples,
+                       head_offset=head)
 
 
 def _is_image(path) -> bool:
@@ -876,7 +1005,8 @@ def _trim_to_sentences(start: float, end: float, text: str,
 
 
 def _utterances_for_clip(clip_idx: int, clip_path: Path, clip_dur: float,
-                         min_words: int = MIN_SPEAK_WORDS) -> list[Utterance]:
+                         min_words: int = MIN_SPEAK_WORDS,
+                         head_offset: float = 0.0) -> list[Utterance]:
     """Merge a clip's cues into lines, trim each to whole sentences, and keep only
     the substantial ones.
 
@@ -884,6 +1014,11 @@ def _utterances_for_clip(clip_idx: int, clip_path: Path, clip_dur: float,
     across cues becomes one line); each line is then cut to whole sentences up to
     ``SPEAK_MAX_DUR`` (never mid-sentence); finally a line must clear ``min_words``
     and fit inside the clip. Filters out the "I" / "are" one-word noise.
+
+    Sidecar cues are in ORIGINAL clip time while the pipeline runs in trimmed time
+    (``head_offset`` = a cut intro card), so each line is shifted by -head_offset
+    and any line starting inside the trimmed head is dropped — nobody speaks over
+    a static character sheet, and ``clip_dur`` is the trimmed duration.
     """
     merged: list[list] = []
     for s, e, t in _parse_subtitles(clip_path):
@@ -895,6 +1030,9 @@ def _utterances_for_clip(clip_idx: int, clip_path: Path, clip_dur: float,
     out: list[Utterance] = []
     for s, e, t in merged:
         e2, t2 = _trim_to_sentences(s, e, t, SPEAK_MAX_DUR)
+        s, e2 = s - head_offset, e2 - head_offset
+        if s < 0:
+            continue
         if len(t2.split()) >= min_words and (clip_dur <= 0 or e2 <= clip_dur + 0.05):
             out.append(Utterance(clip_idx, str(clip_path), s, e2, t2))
     return out
@@ -1421,6 +1559,7 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     entries: list[EDLEntry] = []
     recent: list[str] = []
     use_count: dict[str, int] = {c.clip_id: 0 for c in curves}
+    head_by_id = {c.clip_id: c.head_offset for c in curves}
     n_intervals = max(1, len(boundaries) - 1)
     max_uses = max(1, -(-n_intervals // len(curves)))  # ceil
 
@@ -1458,7 +1597,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
             entries.append(EDLEntry(
                 clip_id=cid, src_path=fm.src_path,
                 in_point=round(fm.in_point, 4), out_point=round(fm.in_point + d, 4),
-                duration=round(d, 4), place_at=round(b0, 4), speak=True))
+                duration=round(d, 4), place_at=round(b0, 4), speak=True,
+                head_offset=head_by_id.get(cid, 0.0)))
             recent.append(cid)
             if cid in use_count:
                 use_count[cid] += 1
@@ -1531,6 +1671,7 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
             clip_id=c.clip_id, src_path=c.src_path,
             in_point=round(in_point, 4), out_point=round(in_point + d, 4),
             duration=round(d, 4), place_at=round(b0, 4),
+            head_offset=c.head_offset,
         ))
         recent.append(c.clip_id)
         use_count[c.clip_id] += 1
@@ -1695,8 +1836,13 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
                "-movflags", "+faststart", str(out)]
         _run(cmd, f"render still @ {entry.place_at:.2f}s")
         return
-    ss = max(0.0, entry.in_point - lead)
-    dur = entry.duration + (entry.in_point - ss) + tail
+    # Seek math runs in TRIMMED clip time (the planner's timeline), then head_offset
+    # — a cut character-sheet intro card — is added back to reach source time. The
+    # ss>=0 clamp therefore floors at the card's END, so a transition lead handle can
+    # never reach back into the trimmed head.
+    ss_rel = max(0.0, entry.in_point - lead)
+    dur = entry.duration + (entry.in_point - ss_rel) + tail
+    ss = entry.head_offset + ss_rel
     zf = _zoom_filter(zoom, dur, fps, width, height)
 
     def _cpu_cmd() -> list[str]:
@@ -2026,8 +2172,10 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
             pass  # skip undecodable clips; fail later only if <2 remain
     if len(curves) < 2:
         raise RuntimeError("fewer than 2 usable clips after motion analysis")
+    n_trimmed = sum(1 for c in curves if c.head_offset > 0)
     progress("analyzing_motion", _overall("analyzing_motion", 1.0), 1.0,
-             f"Analyzed {len(curves)} clips")
+             f"Analyzed {len(curves)} clips"
+             + (f" · trimmed {n_trimmed} intro card(s)" if n_trimmed else ""))
 
     # 2b. speech moments (optional, preset-independent) ---------------------- #
     # Read dialogue timings from each usable clip's subtitle sidecar, then pick a
@@ -2039,7 +2187,8 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         utterances: list[Utterance] = []
         for c in curves:
             utterances += _utterances_for_clip(int(c.clip_id), Path(c.src_path),
-                                                clip_dur[c.clip_id])
+                                                clip_dur[c.clip_id],
+                                                head_offset=c.head_offset)
         T = float(target or grid.duration)
         if str(speak_moments).lower() == "auto":
             want = max(1, min(4, round(T / 60.0)))
@@ -2143,7 +2292,10 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         fu = (_clamp(nb - up_start, SPEAK_UNDUCK_MIN, SPEAK_UNDUCK_MAX) if nb is not None
               else SPEAK_UNDUCK_MIN)
         duck_windows.append({
-            "place_at": e.place_at, "dur": e.duration, "in_point": e.in_point,
+            "place_at": e.place_at, "dur": e.duration,
+            # _duck_and_mux seeks the RAW source file for the dialogue, so this
+            # in_point must be in original clip time — add the trimmed head back.
+            "in_point": e.in_point + e.head_offset,
             "src_path": e.src_path, "a_start": max(0.0, e.place_at - SPEAK_DUCK_FADE),
             "up_start": up_start, "up_end": up_start + fu,
         })
@@ -2177,6 +2329,7 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         "duration": round(actual if actual > 0 else edl.timeline_duration, 3),
         "size_bytes": size, "cuts": len(edl.entries), "seed": seed,
         "preset": preset, "transitions": n_trans, "spoken": len(duck_windows),
+        "intro_cards_trimmed": n_trimmed,
         "beat_engine": grid.engine, "beat_device": grid.device,
         "beat_engine_note": grid.engine_note,
     }

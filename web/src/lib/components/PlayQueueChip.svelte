@@ -9,7 +9,7 @@
   // (it reads `basket` purely for that layout offset); both relocate to the top on phones.
   import { fly } from 'svelte/transition';
   import {
-    playQueue, basket, clearPlayQueue, togglePlayQueue, shufflePlayQueue, addPlaylist
+    playQueue, basket, basketChipPos, clearPlayQueue, togglePlayQueue, shufflePlayQueue, addPlaylist
   } from '$lib/state.js';
   import { mediaByIds } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
@@ -20,9 +20,10 @@
 
   const ids = $derived($playQueue);
   const count = $derived(ids.length);
-  // Stack above the Montage basket chip only when it's actually showing, so an absent
-  // basket doesn't leave this chip floating over an empty gap.
-  const stacked = $derived($basket.length > 0);
+  // Stack above the Montage basket chip only when it's actually showing AND still in
+  // its default slot ($basketChipPos null — the chip is draggable), so an absent or
+  // relocated basket doesn't leave this chip floating over an empty gap.
+  const stacked = $derived($basket.length > 0 && !$basketChipPos);
 
   let open = $state(false);
   let items = $state([]);

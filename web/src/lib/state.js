@@ -372,6 +372,20 @@ selection.subscribe((ids) => {
 export const basket = writable(LS('basket', []));
 basket.subscribe((ids) => persist('basket', ids));
 
+// Where the user last DROPPED the draggable basket chip — viewport fractions
+// {fx, fy} (0..1 of the space the chip can occupy), or null for the default CSS
+// anchors. Per-device (localStorage, same tier as theme/volume): it's a screen-
+// layout preference, not data. Lives here rather than in MontageBasketChip so
+// PlayQueueChip can stop stacking above the default slot once the chip moves.
+const _chipPos = (v) => {
+  const fx = Number(v?.fx), fy = Number(v?.fy);
+  return Number.isFinite(fx) && Number.isFinite(fy)
+    ? { fx: Math.min(1, Math.max(0, fx)), fy: Math.min(1, Math.max(0, fy)) }
+    : null;
+};
+export const basketChipPos = writable(_chipPos(LS('ga.basketChipPos', null)));
+basketChipPos.subscribe((v) => persist('ga.basketChipPos', v));
+
 // Per-card membership mirror — same per-key reactive trick as selectionMembers, so
 // toggling one card only re-renders that card, not every visible cell.
 export const basketMembers = new SvelteSet();

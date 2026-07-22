@@ -444,6 +444,85 @@ def test_breakdown_presets_configured():
     print("  presets: slow-mo on cinematic+musicvideo, off classic/moody OK")
 
 
+def test_head_trim_detects_reference_sheet():
+    fps = 8.0
+    # HELD card, 0.5s: frames 0..3 held (3 near-zero raw diffs), hard cut at
+    # raw[3], then normal motion. Content starts at frame 4 -> trim 4/8 = 0.5s.
+    raw = [0.4, 0.5, 0.3, 38.0] + [9.0, 11.0, 7.5] * 20
+    assert m._head_trim_from_diffs(raw, fps) == 0.5, m._head_trim_from_diffs(raw, fps)
+    # HELD card, 1.0s: 7 static diffs, cut at raw[7] -> trim 1.0s.
+    raw = [0.5] * 7 + [45.0] + [8.0] * 40
+    assert m._head_trim_from_diffs(raw, fps) == 1.0
+    # HELD card exiting via a short dissolve instead of a single hard cut.
+    raw = [0.5] * 4 + [30.0, 25.0, 18.0] + [5.0] * 30
+    assert m._head_trim_from_diffs(raw, fps) == 7 / 8
+    # FLASH cards — raw diffs measured on real Grok exports: the card lives on
+    # frame 0 and cross-fades out within 1-2 analysis frames.
+    real_a = [45.2, 18.0, 2.8, 3.2, 3.0, 3.2, 3.5, 3.9, 3.5, 3.2, 3.0, 3.4, 2.9, 2.7]
+    assert m._head_trim_from_diffs(real_a, fps) == 0.25, m._head_trim_from_diffs(real_a, fps)
+    real_b = [65.7, 5.2, 4.3, 3.3, 2.8, 2.6, 2.1, 1.6, 1.6, 2.1, 2.0, 2.0, 2.1, 1.9]
+    assert m._head_trim_from_diffs(real_b, fps) == 0.125, m._head_trim_from_diffs(real_b, fps)
+    print("  head-trim: held (0.5s/1.0s/dissolve) + real flash cards detected OK")
+
+
+def test_head_trim_leaves_normal_footage_alone():
+    fps = 8.0
+    # Motion from the very first frame — no static run, nothing to trim.
+    assert m._head_trim_from_diffs([12.0, 9.0, 14.0] * 10, fps) == 0.0
+    # A fade-in rises gradually — the static run ends on a gentle rise, not a spike.
+    ramp = [0.2, 0.5, 1.0, 2.5, 4.0, 6.0, 9.0, 12.0] + [10.0] * 30
+    assert m._head_trim_from_diffs(ramp, fps) == 0.0
+    # A hard cut at ~2s is a real scene change, not an intro card.
+    late = [0.5] * 16 + [40.0] + [9.0] * 30
+    assert m._head_trim_from_diffs(late, fps) == 0.0
+    # A clip that is static throughout has no cut to trim to.
+    assert m._head_trim_from_diffs([0.3] * 40, fps) == 0.0
+    # An opening spike over BUSY content isn't a flash card (ratio < 5x baseline).
+    assert m._head_trim_from_diffs([38.0] + [9.0] * 30, fps) == 0.0
+    # Sustained fast action from frame 0 — a long spike-run is not a dissolve.
+    assert m._head_trim_from_diffs([40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 13.0] + [9.0] * 30, fps) == 0.0
+    # Real calm clips (measured): baselines hover at/under the static floor with
+    # no exit spike — never confused with a held card.
+    real_calm = [2.2, 2.0, 2.0, 2.1, 2.5, 2.5, 2.5, 2.8, 3.1, 3.1] + [3.0] * 10
+    assert m._head_trim_from_diffs(real_calm, fps) == 0.0
+    real_fade = [0.6, 0.8, 1.2, 2.2, 3.9, 5.3, 5.6, 5.0, 5.1, 4.6] + [5.0] * 10
+    assert m._head_trim_from_diffs(real_fade, fps) == 0.0
+    assert m._head_trim_from_diffs([], fps) == 0.0
+    print("  head-trim: motion/fade-in/late-cut/static/busy-open clips untouched OK")
+
+
+def test_head_offset_flows_to_edl():
+    # A trimmed clip's head_offset must ride every EDL entry that uses it (the
+    # render adds it to the source seek); untrimmed clips stay 0.
+    grid = _grid(16, 0.5)
+    trimmed = m.MotionCurve(clip_id="t", src_path="/tmp/t.mp4", duration=6.0,
+                            fps_analyzed=8.0, samples=[0.1] * 48, head_offset=0.75)
+    other = _curve("o", 6.0, 2.0)
+    edl = m.plan_cuts(grid, [trimmed, other], tightness=0.5, target_duration=None)
+    assert any(e.clip_id == "t" for e in edl.entries), "trimmed clip never chosen"
+    for e in edl.entries:
+        want = 0.75 if e.clip_id == "t" else 0.0
+        assert e.head_offset == want, (e.clip_id, e.head_offset)
+    print("  head-offset: rides EDL entries (0.75s on trimmed clip, 0 elsewhere) OK")
+
+
+def test_utterance_head_offset_shift():
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    clip = d / "clip.mp4"
+    clip.write_bytes(b"")  # only the sidecar is read
+    (d / "clip.srt").write_text(
+        "1\n00:00:00,200 --> 00:00:01,800\nthis line starts on the card\n\n"
+        "2\n00:00:03,000 --> 00:00:05,000\nthis line is real dialogue\n", encoding="utf-8")
+    us = m._utterances_for_clip(0, clip, clip_dur=9.0, head_offset=1.0)
+    # The line starting inside the trimmed head is dropped; the survivor is
+    # shifted into trimmed clip time (3.0..5.0 -> 2.0..4.0).
+    assert len(us) == 1, [u.text for u in us]
+    assert abs(us[0].start - 2.0) < 1e-6 and abs(us[0].end - 4.0) < 1e-6, us[0]
+    print("  head-offset: card-time line dropped, survivor shifted into trimmed time OK")
+
+
 if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
@@ -469,4 +548,8 @@ if __name__ == "__main__":
     test_cinematic_breakdown_slowmo_preserves_invariant()
     test_cinematic_hero_and_slowmo_deterministic()
     test_breakdown_presets_configured()
+    test_head_trim_detects_reference_sheet()
+    test_head_trim_leaves_normal_footage_alone()
+    test_head_offset_flows_to_edl()
+    test_utterance_head_offset_shift()
     print("all passed")
