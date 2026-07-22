@@ -1884,7 +1884,7 @@ def _is_media_hidden(media_id: str) -> bool:
 
 def _collection_summaries(collections: list[dict]) -> list[dict]:
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     unlocked = _session_unlocked()
     grants = session.get("unlocked") or {}
     summaries = []
@@ -3309,14 +3309,55 @@ def api_movie_dismiss() -> Response:
     return jsonify(ok=True, acknowledged=acknowledged)
 
 
-def rebuild_db() -> None:
-    """Rebuild the SQLite read-model from metadata.json + on-disk thumbnails/subs.
-    Safe to call anytime; the DB is purely derived."""
+_rebuild_lock = threading.Lock()
+_rebuild_running = False
+_rebuild_dirty = False
+
+
+def _do_rebuild() -> None:
     try:
         rows = db.build_index(DB_FILE, METADATA_FILE, GALLERY_DIR)
         print(f"index.db rebuilt: {rows} media rows")
     except Exception as exc:  # pragma: no cover - defensive
         print(f"index.db rebuild failed: {exc}")
+
+
+def _rebuild_worker() -> None:
+    # Trailing-run loop: anything that dirtied the index while a rebuild was in
+    # flight is picked up by exactly one more pass (a rebuild snapshots
+    # metadata.json at its start, so mid-flight changes need that second pass).
+    global _rebuild_running, _rebuild_dirty
+    while True:
+        with _rebuild_lock:
+            _rebuild_dirty = False
+        _do_rebuild()
+        with _rebuild_lock:
+            if not _rebuild_dirty:
+                _rebuild_running = False
+                return
+
+
+def rebuild_db(wait: bool = False) -> None:
+    """Rebuild the SQLite read-model from metadata.json + on-disk thumbnails/subs.
+    Safe to call anytime; the DB is purely derived.
+
+    By default the rebuild is COALESCED onto a single background thread: a burst
+    of calls (heavy generation nights fire one per finished item) folds into at
+    most one in-flight rebuild plus one trailing pass, and no request thread
+    stalls behind the ~O(library) scan. The new item shows up when the pass
+    lands — seconds — instead of blocking its request. ``wait=True`` runs inline
+    for callers that must query the fresh index immediately (startup before
+    serving, backup restore, and the DB-file-missing bootstrap guards)."""
+    global _rebuild_running, _rebuild_dirty
+    if wait:
+        _do_rebuild()
+        return
+    with _rebuild_lock:
+        _rebuild_dirty = True
+        if _rebuild_running:
+            return
+        _rebuild_running = True
+    threading.Thread(target=_rebuild_worker, daemon=True, name="rebuild-db").start()
 
 
 # --------------------------------------------------------------------------- #
@@ -4165,7 +4206,7 @@ def _period_range(period: str) -> tuple[str | None, str | None]:
 def api_media() -> Response:
     """Paginated, filtered, full-text-searchable media for the new SPA."""
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     favorites, stashed = _library_sets()
     collection_id = request.args.get("collection") or ""
     collection_ids: list[str] = []
@@ -4201,7 +4242,7 @@ def api_media() -> Response:
 @app.get("/api/facets")
 def api_facets() -> Response:
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     favorites, stashed = _library_sets()
     collection_id = request.args.get("collection") or ""
     collection_ids: list[str] = []
@@ -4235,7 +4276,7 @@ def api_stats() -> Response:
     """Library totals (video/image counts + summed size) plus current-month
     creation counts for the Stats panel's per-day averages."""
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     return jsonify(db.stats(DB_FILE))
 
 
@@ -4243,7 +4284,7 @@ def api_stats() -> Response:
 def api_media_by_ids() -> Response:
     """Resolve an ordered id list to full media records (for playlist playback)."""
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     ids = (request.get_json(silent=True) or {}).get("ids")
     if not isinstance(ids, list):
         return jsonify(items=[])
@@ -4256,7 +4297,7 @@ def api_media_by_ids() -> Response:
 def api_media_related() -> Response:
     """Local parent/child media links for the lightbox info panel."""
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     media_id = str(request.args.get("id") or "").strip()
     if not media_id:
         return jsonify(base=None, generated=[])
@@ -4438,7 +4479,7 @@ def api_prompts_similar() -> Response:
     if not base:
         return jsonify(ok=False, error="No embeddings endpoint configured.", results=[]), 400
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     text = request.args.get("text") or ""
     exclude = None
     if not text and request.args.get("id"):
@@ -4495,7 +4536,7 @@ def api_prompts_themes() -> Response:
     if not base:
         return jsonify(ok=False, error="No embeddings endpoint configured.", themes=[]), 400
     if not DB_FILE.exists():
-        rebuild_db()
+        rebuild_db(wait=True)
     k_arg = request.args.get("k")
     k = int(k_arg) if (k_arg and k_arg.isdigit()) else None
     hidden = _list_hidden_media_ids()
@@ -5828,9 +5869,11 @@ def api_backup_import() -> Response:
             restored = [dest.name for dest, _ in done]
 
         # index.db is purely derived — rebuild it from the restored metadata.json so the
-        # gallery reflects the restore immediately. (The locked-collection cache keys on
+        # gallery reflects the restore immediately (inline: the restored library must be
+        # queryable the moment this response lands, and a stale index would show items
+        # the restore just replaced). (The locked-collection cache keys on
         # collections.json's mtime, so it refreshes itself on the next request.)
-        rebuild_db()
+        rebuild_db(wait=True)
 
         return jsonify(
             ok=True,
@@ -5882,7 +5925,7 @@ def maybe_reindex() -> None:
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     maybe_reindex()
-    rebuild_db()
+    rebuild_db(wait=True)  # inline: schema + rows must exist before the first request
     mode = _auth_mode()
     auth = {"login": "login screen", "basic": "HTTP basic", "off": "DISABLED"}[mode]
     print(f"Grokive server")

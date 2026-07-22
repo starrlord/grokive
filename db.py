@@ -85,6 +85,11 @@ def _connect(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+    # Writers can briefly collide (a background rebuild vs. delete_media on a
+    # request thread); wait out the other writer instead of failing with
+    # "database is locked". build_index keeps its write transaction short so
+    # this ceiling is never approached.
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
@@ -186,18 +191,23 @@ def build_index(
         except sqlite3.OperationalError:
             pass  # already present
         # Carry probed dimensions forward from the previous build so we only ffprobe
-        # each video once (not on every startup/sync rebuild).
+        # each video once (not on every startup/sync rebuild). size_bytes rides along
+        # as a change marker: it lets the upscaled-video branch below trust the cache
+        # while the file on disk is unchanged.
         try:
             dim_cache = {
-                r[0]: (r[1], r[2]) for r in conn.execute(
-                    "SELECT id, media_w, media_h FROM media WHERE media_w IS NOT NULL AND media_h IS NOT NULL"
+                r[0]: (r[1], r[2], r[3]) for r in conn.execute(
+                    "SELECT id, media_w, media_h, size_bytes FROM media "
+                    "WHERE media_w IS NOT NULL AND media_h IS NOT NULL"
                 )
             }
         except sqlite3.OperationalError:
             dim_cache = {}
-        conn.execute("DELETE FROM media")
-        conn.execute("DELETE FROM media_tags")
-        conn.execute("DELETE FROM media_fts")
+        # End the implicit transaction the DDL above opened. The per-item loop below
+        # does slow filesystem work (stats, thumbnail headers, the odd ffprobe) and
+        # must NOT hold the write lock while it runs — that's minutes at library
+        # scale, and it starved delete_media into "database is locked" failures.
+        conn.commit()
         media_rows = []
         tag_rows = []
         fts_rows = []
@@ -215,32 +225,42 @@ def build_index(
                 if flat.exists():
                     thumb_path, thumb_rel = flat, f"thumbnails/{mid}.jpg"
             tw, th = _thumb_dims(thumb_path)
+            media_file = gallery_dir / rel
+            # File size is a cheap stat (no ffprobe), so capture it every build — it
+            # doubles as the dim_cache's "has the file changed?" marker below.
+            try:
+                size_bytes = media_file.stat().st_size
+            except OSError:
+                size_bytes = None
             # Real source dimensions for the resolution badge: prefer values captured
             # from Grok at download time, else the previous build's cache, else probe
             # the file once (ffprobe/Pillow) and let the next build read it from cache.
             mw, mh = item.get("width"), item.get("height")
             src_name = str(item.get("source_url") or "").rsplit("?", 1)[0].rsplit("/", 1)[-1].lower()
+            cached = dim_cache.get(mid)  # (w, h, size_bytes) from the previous build
             if item.get("media_type") == "video" and ("_hd" in src_name or "1080" in src_name):
-                # Upscaled-in-place video: Grok's captured `resolution` is the BASE generation
-                # size, and the id-keyed dim_cache still holds the pre-upscale dims (the file
-                # changed under the same id), so a 1424² upscale would wrongly badge as 544p.
-                # Read the real size straight from the file instead.
-                pw, ph = _video_dims(gallery_dir / rel)
-                if pw and ph:
-                    mw, mh = pw, ph
-                elif not (mw and mh):
-                    mw, mh = dim_cache.get(mid) or (mw, mh)
+                # Upscaled-in-place video: Grok's captured `resolution` is the BASE
+                # generation size, and an upscale replaces the file under the SAME id —
+                # so neither metadata nor a stale cache can be trusted blindly (a 1424²
+                # upscale would wrongly badge as 544p). But an upscale always changes
+                # the file's size, so the cache IS trustworthy while size_bytes still
+                # matches the size recorded when the dims were cached. Only a changed
+                # (or unknown) size re-probes: re-ffprobing every _hd video on every
+                # rebuild cost ~50s per rebuild at 15k-library scale.
+                if cached and size_bytes is not None and cached[2] == size_bytes:
+                    mw, mh = cached[0], cached[1]
+                else:
+                    pw, ph = _video_dims(media_file)
+                    if pw and ph:
+                        mw, mh = pw, ph
+                    elif not (mw and mh):
+                        mw, mh = (cached[0], cached[1]) if cached else (mw, mh)
             elif not (mw and mh):
-                mw, mh = dim_cache.get(mid) or _media_dims(item.get("media_type"), gallery_dir / rel)
+                mw, mh = ((cached[0], cached[1]) if cached
+                          else _media_dims(item.get("media_type"), media_file))
             thumb_href = thumb_rel if thumb_path.exists() else None
-            media_file = gallery_dir / rel
             vtt = media_file.with_suffix(".vtt")
             subtitles = href.rsplit(".", 1)[0] + ".vtt" if vtt.exists() else None
-            # File size is a cheap stat (no ffprobe), so capture it every build.
-            try:
-                size_bytes = media_file.stat().st_size
-            except OSError:
-                size_bytes = None
             tags = tags_by_id.get(mid, [])
             key, _ = group_key_and_label(item)
             media_rows.append((
@@ -258,6 +278,12 @@ def build_index(
                 mid, item.get("prompt") or "", " ".join(tags),
                 item.get("model") or "", rel.rsplit("/", 1)[-1],
             ))
+        # Swap the tables in one SHORT write transaction (rows were prepared above
+        # with no lock held): delete-all + bulk insert is a couple of seconds even
+        # at library scale, so concurrent writers just wait it out via busy_timeout.
+        conn.execute("DELETE FROM media")
+        conn.execute("DELETE FROM media_tags")
+        conn.execute("DELETE FROM media_fts")
         conn.executemany(
             f"INSERT OR REPLACE INTO media ({','.join(MEDIA_COLUMNS)}) "
             f"VALUES ({','.join('?' for _ in MEDIA_COLUMNS)})",
