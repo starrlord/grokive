@@ -5111,19 +5111,55 @@ def _read_responses() -> list:
 
 def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool = False) -> tuple[list, list, str]:
     """Merge the media library's prompts (metadata.json) into Saved responses, adding only those
-    not already saved (deduped by normalized prompt hash). Backs up the current list and can only
-    grow it. Returns ``(merged, new_entries, backup_path)`` — ``new_entries`` is the delta added
-    this call (empty list + no write when nothing is new). Shared by the manual import endpoint
-    and Autonomous Mode's post-sync step."""
+    not already saved. The dedup key is the normalized-prompt hash of the text AS IT IS STORED —
+    i.e. after the 2000-char storage cap — because that's the only form a future run can see in
+    the file. Hashing the FULL library text instead made every >2000-char prompt permanently
+    "new": its stored truncation hashes differently, so each sync re-imported (and re-tagged)
+    the same prompts forever, one duplicate copy per sync.
+
+    Exact-duplicate records that accumulated that way (identical stored-text hash) are collapsed
+    on the way through: the FIRST copy is kept (the original import — already tagged), later
+    copies' tags/starred are unioned into it. Only records whose normalized text is identical
+    ever merge, so this can't collapse two genuinely different prompts. Backs up the current
+    list before any write. Returns ``(merged, new_entries, backup_path)`` — ``new_entries`` is
+    the delta added this call (empty list + no write when nothing is new and nothing collapsed).
+    Shared by the manual import endpoint and Autonomous Mode's post-sync step."""
     with _responses_lock:
         current = _read_responses()
-        have = {promptstudio.prompt_hash(t) for t in
-                (str(x.get("text", "")).strip() for x in current) if t}
+        seen: dict = {}   # stored-text hash -> the kept (first) record
+        deduped: list = []
+        for x in current:
+            t = str(x.get("text", "")).strip()
+            if not t:
+                deduped.append(x)  # blank text: not ours to judge, keep as-is
+                continue
+            h = promptstudio.prompt_hash(t)
+            kept = seen.get(h)
+            if kept is None:
+                seen[h] = x
+                deduped.append(x)
+                continue
+            if not isinstance(kept.get("tags"), list):
+                kept["tags"] = []
+            for tag in (x.get("tags") or []):
+                if isinstance(tag, str) and tag and tag not in kept["tags"]:
+                    kept["tags"].append(tag)
+            if x.get("starred") and not kept.get("starred"):
+                kept["starred"] = True
+            if not str(kept.get("folder") or "").strip() and str(x.get("folder") or "").strip():
+                kept["folder"] = x["folder"]
+        collapsed = len(current) - len(deduped)
         uniq = _library_unique_prompts(exclude_hidden=exclude_hidden)
-        missing = [(h, r) for h, r in uniq.items() if h not in have]
-        if not missing:
+        # Membership test + in-batch dedup both keyed by the hash of the CAPPED text —
+        # the exact string the entry below stores, so the next run's file matches it.
+        missing: dict = {}
+        for r in uniq.values():
+            stored_h = promptstudio.prompt_hash(r["text"][:2000])
+            if stored_h not in seen and stored_h not in missing:
+                missing[stored_h] = r
+        if not missing and not collapsed:
             return current, [], ""
-        missing.sort(key=lambda hr: hr[1]["created"], reverse=True)  # newest first
+        rows = sorted(missing.values(), key=lambda r: r["created"], reverse=True)  # newest first
         today = datetime.date.today().isoformat()
         new_entries = [{
             "id": "rs-" + secrets.token_hex(6),
@@ -5131,8 +5167,8 @@ def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool 
             "created_at": (r["created"][:10] or today),
             "folder": folder,
             "tags": [],
-        } for _, r in missing]
-        merged = current + new_entries  # keep existing/curated on top; imports appended
+        } for r in rows]
+        merged = deduped + new_entries  # keep existing/curated on top; imports appended
         backup = _atomic_write_json(RESPONSES_FILE, merged)
         return merged, new_entries, backup
 
