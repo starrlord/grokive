@@ -978,6 +978,80 @@ def _media_res_rank(url: str) -> int:
     return 1
 
 
+# Imagine v2 stopped advertising upscales. A v1 post carried hd1080MediaUrl / hdMediaUrl
+# next to mediaUrl, so _best_media_url could pick the best tier and refresh_hd could swap a
+# better one in later. The v2 conversation payload carries only the asset's own `key` —
+# always ".../generated_video.mp4" — even when a 1080p render is sitting beside it on the
+# CDN and the Imagine UI is serving that. post/get is no help either: it still reports
+# resolutionName "720p", childPosts [] and omits BOTH hd fields. Measured against the whole
+# archive, every 1080p/_hd file we hold came from the v1 route; the v2 walker has never once
+# produced one. So the only way left to find an upscale is to ask the CDN for the sibling key.
+SD_VIDEO_BASENAME = "generated_video.mp4"
+HD1080_BASENAME = "generated_video_1080_hd.mp4"
+# Per-run memo of sibling probes. The answer can't change mid-sync, and a wrong "yes" is
+# expensive: download_media retries a dead URL 5 times with exponential backoff.
+_HD1080_PROBES: dict[str, bool] = {}
+
+
+def _hd1080_sibling_url(url: str) -> str:
+    """The 1080p sibling of a v2 generated-video URL, or "" when there can't be one."""
+    base, _, name = _asset_path(url).rpartition("/")
+    if name != SD_VIDEO_BASENAME or not base:
+        return ""
+    parts = urlparse(url)
+    return urlunparse((parts.scheme, parts.netloc, f"{base}/{HD1080_BASENAME}", "", "", ""))
+
+
+def _media_url_exists(spec: RequestSpec, url: str) -> bool:
+    """Is this asset actually on the CDN? HEAD it through the same browser impersonation
+    download_media uses — assets.grok.com sits behind the same bot protection, so a plain
+    httpx probe would 403 and we'd wrongly conclude the file is missing."""
+    if url in _HD1080_PROBES:
+        return _HD1080_PROBES[url]
+    try:
+        response = cffi_requests.head(
+            url, headers=spec.headers, cookies=spec.cookies,
+            impersonate="firefox", allow_redirects=True, timeout=60,
+        )
+        exists = response.status_code == 200
+    except CffiRequestException:
+        exists = False  # unreachable is indistinguishable from absent; either way, keep SD
+    _HD1080_PROBES[url] = exists
+    return exists
+
+
+def prefer_hd1080(spec: RequestSpec, items: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> int:
+    """Point each v2 video at its 1080p render when the CDN has one. Returns how many moved.
+
+    Rewriting source_url is the entire fix: it lifts _media_res_rank from 1 to 3, which is
+    exactly the condition process_item already reads as an upgrade — so a clip we already
+    hold at 720p gets re-downloaded in place by refresh_hd (thumbnail dropped with it), and
+    db.py re-ffprobes the true dimensions on the next index because the name now says 1080.
+
+    PROBING, rather than swapping blind, is what keeps a missing sibling cheap: a 404 URL
+    written into the record would cost 5 backed-off download attempts on EVERY later sync —
+    the same forever-retry trap moderated generations set (see extract_conversation_items)."""
+    upgraded = 0
+    for raw in items:
+        sibling = _hd1080_sibling_url(str(raw.get("source_url") or ""))
+        if not sibling:
+            continue
+        # Already archived at 1080? The rank compare would no-op anyway — skip the request.
+        held = str(by_id.get(str(raw.get("id")), {}).get("source_url") or "")
+        if _media_res_rank(held) >= 3:
+            continue
+        if not _media_url_exists(spec, sibling):
+            continue
+        raw["source_url"] = sibling
+        # The asset metadata's width/height describe the SD render (1280x720). Rather than
+        # let the record assert a resolution we know the file won't have, drop them — db.py
+        # ffprobes 1080-named videos anyway, so the index still gets the real dimensions.
+        raw["width"] = None
+        raw["height"] = None
+        upgraded += 1
+    return upgraded
+
+
 def _record_mistyped(record: dict[str, Any]) -> bool:
     """True if a stored record's media_type disagrees with its source_url's actual file type —
     the signature of the earlier bug that stamped a child video's URL onto an image record
@@ -1352,6 +1426,13 @@ def archive_conversations(
             print(f"conversation {conv_id}: failed ({exc})")
             continue
         print(f"conversation {conv_id} '{title}': {len(items)} media items")
+        # v2 never names its 1080p renders, so ask the CDN before downloading anything.
+        # Skipped under --refresh-metadata: that path only patches records, and pointing one
+        # at a file we haven't downloaded would leave the record describing bytes we don't have.
+        if not args.refresh_metadata:
+            upgraded = prefer_hd1080(media_spec, items, by_id)
+            if upgraded:
+                print(f"  {upgraded} video(s) have a 1080p render — taking that instead of SD")
         for raw in items:
             if args.refresh_metadata:
                 saved_count += patch_existing_record(raw, by_id)

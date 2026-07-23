@@ -248,6 +248,118 @@ def test_conversation_specs_are_bodyless_gets_that_ask_for_imagine_chats():
     assert responses.method == "GET" and responses.body is None
 
 
+SD = "https://assets.grok.com/users/u1/generated/vid-1/generated_video.mp4"
+HD = "https://assets.grok.com/users/u1/generated/vid-1/generated_video_1080_hd.mp4"
+
+
+SPEC = g.RequestSpec("GET", "https://assets.grok.com/", {"User-Agent": "ua"}, {"sso": "t"}, None)
+
+
+class _Response:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def _fake_cdn(present, raises=False):
+    """Stand in for the CDN at the TRANSPORT seam (curl_cffi), not at _media_url_exists —
+    the per-run memo lives inside that function, so stubbing it would hide what we're
+    testing. `present` is the set of urls answering 200; calls records every request made."""
+    calls = []
+
+    def head(url, **_kwargs):
+        calls.append(url)
+        if raises:
+            raise g.CffiRequestException("boom")
+        return _Response(200 if url in present else 404)
+
+    return head, calls
+
+
+def _with_cdn(head, fn):
+    original = g.cffi_requests.head
+    g.cffi_requests.head = head
+    g._HD1080_PROBES.clear()
+    try:
+        return fn()
+    finally:
+        g.cffi_requests.head = original
+        g._HD1080_PROBES.clear()
+
+
+def test_the_1080_sibling_is_derived_only_for_v2_generated_videos():
+    """Grok never names the upscale, so we reconstruct its key — but only where one can exist."""
+    assert g._hd1080_sibling_url(SD) == HD
+    assert g._hd1080_sibling_url(SD + "?sig=tok") == HD      # signing query dropped
+    assert g._hd1080_sibling_url(HD) == ""                   # already the upscale
+    assert g._hd1080_sibling_url("https://assets.grok.com/users/u1/generated/i/image.jpg") == ""
+    assert g._hd1080_sibling_url("https://assets.grok.com/x/content") == ""  # canvas, extensionless
+    assert g._hd1080_sibling_url("") == ""
+
+
+def test_a_video_with_a_1080_render_is_repointed_at_it():
+    """The whole fix: rewriting source_url lifts the rank 1 -> 3, which is exactly what
+    process_item already treats as an upgrade, so refresh_hd replaces the SD file in place."""
+    head, calls = _fake_cdn({HD})
+    items = [{"id": "vid-1", "source_url": SD, "width": 1280, "height": 720}]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
+    assert moved == 1
+    assert items[0]["source_url"] == HD
+    assert calls == [HD]
+    assert g._media_res_rank(items[0]["source_url"]) > g._media_res_rank(SD)
+    # SD dimensions describe the file we're no longer taking; db.py re-ffprobes 1080 names.
+    assert items[0]["width"] is None and items[0]["height"] is None
+
+
+def test_a_video_without_one_keeps_its_sd_url():
+    """The fallback. A 404 url written into the record would cost 5 backed-off download
+    attempts on EVERY later sync, so a missing sibling must change nothing at all."""
+    head, _ = _fake_cdn(set())
+    items = [{"id": "vid-1", "source_url": SD, "width": 1280, "height": 720}]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
+    assert moved == 0
+    assert items[0]["source_url"] == SD
+    assert items[0]["width"] == 1280 and items[0]["height"] == 720
+
+
+def test_an_unreachable_cdn_keeps_the_sd_url():
+    """A refused/errored probe is indistinguishable from absent, and guessing wrong costs
+    5 backed-off download attempts per sync — so a transport failure must never swap."""
+    head, calls = _fake_cdn({HD}, raises=True)
+    items = [{"id": "vid-1", "source_url": SD, "width": 1280, "height": 720}]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
+    assert moved == 0 and calls == [HD]
+    assert items[0]["source_url"] == SD and items[0]["width"] == 1280
+
+
+def test_an_item_already_held_at_1080_is_not_probed_again():
+    head, calls = _fake_cdn({HD})
+    items = [{"id": "vid-1", "source_url": SD}]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {"vid-1": {"source_url": HD}}))
+    assert moved == 0 and calls == []
+
+
+def test_probe_results_are_memoised_within_a_run():
+    head, calls = _fake_cdn({HD})
+
+    def run():
+        g.prefer_hd1080(SPEC, [{"id": "vid-1", "source_url": SD}], {})
+        g.prefer_hd1080(SPEC, [{"id": "vid-1", "source_url": SD}], {})
+
+    _with_cdn(head, run)
+    assert calls == [HD]
+
+
+def test_images_and_canvas_assets_are_left_alone():
+    head, calls = _fake_cdn({HD})
+    items = [
+        {"id": "img-1", "source_url": "https://assets.grok.com/users/u1/generated/img-1/image.jpg"},
+        {"id": "can-1", "source_url": "https://assets.grok.com/x/content"},
+    ]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
+    assert moved == 0 and calls == []
+    assert items[0]["source_url"].endswith("image.jpg")
+
+
 if __name__ == "__main__":
     print("imagine conversation walking golden tests")
     for name, test in sorted(dict(globals()).items()):
