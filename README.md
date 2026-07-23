@@ -32,6 +32,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
   - [GPU video encoding (NVENC)](#gpu-video-encoding-nvidia-nvenc)
 - [Security](#security)
 - [Web App](#web-app-modern-ui)
+  - [Collection groups](#collection-groups)
 - [Playlists and export](#playlists-and-export)
 - [Song Beat Montage](#song-beat-montage)
 - [Prompt Studio](#prompt-studio)
@@ -64,7 +65,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Open a same-prompt view to see every image/video created from that prompt.
 - Click/copy prompts for reuse.
 - Show parent media when parent metadata is available.
-- Build **collections** for mixed images/videos, or video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder. Collections and playlists live together under a **Library** tab.
+- Build **collections** for mixed images/videos, organize related collections into named **collection groups**, or make video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder. Collections and playlists live together under a **Library** tab.
 - **Import a folder** of your own videos/images straight into a new or existing collection — files are copied in with thumbnails and indexed alongside your synced media.
 - **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
 - **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with optional GPU-accelerated rendering (NVENC when available, else CPU) and one-click **Add to Collection**. Gather clips into a cross-library **Montage basket** to build one montage from videos spread across collections and canvases.
@@ -93,9 +94,9 @@ Long jobs stream their progress into an on-page **Log** overlay.
 All state (`grok_auth.txt` + `grok_accounts.json`/`grok_accounts/` (Grok account
 sessions), `metadata.json`, `index.db` (the derived SQLite
 read-model), `library.json` (favorites/archive), `deleted_ids.json` (delete blocklist),
-`playlists.json`, `collections.json`, `settings.json`, `scenes.json` (saved Scene Builder
-scenes), `saved_responses.json` (starred prompts), `personas.json` (Prompt Studio persona
-cards), `freeform_presets.json` (saved Freeform request presets), `prompt_studio.db`
+`playlists.json`, `collections.json`, `collection_groups.json` (collection group lock state),
+`settings.json`, `scenes.json` (saved Scene Builder scenes), `saved_responses.json` (starred
+prompts), `personas.json` (Prompt Studio persona cards), `freeform_presets.json` (saved Freeform request presets), `prompt_studio.db`
 (durable prompt embeddings), `imagine_sessions.json` + `imagine_staging/` (un-saved Grok
 Imagine generations, per workspace), `admin_password.txt` (the auto-generated login
 password), `backups/` (rolling atomic-write backups of the JSON state, newest few kept),
@@ -270,7 +271,7 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 
 - **Views:** Recent, All Media, **Library**, Favorites, Archive, and Canvases tabs. The **Library** tab is the single home for both **Collections** and **Playlists** (switchable inside it). All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
 - **Workspaces:** beyond browsing, two top-bar tools — **✦ Prompt Studio** (compose prompts) and **✨ Grok Imagine** (generate images & video). See those sections below.
-- **Collections:** group mixed images and videos into named cards with covers, then drill into each collection with the normal gallery controls and scoped tag/resolution filters. **Import a folder** of local files into a new or existing collection (per-file progress; imports are auto-archived so they don't crowd Recent), and toggle **Group** to cluster a collection's clips into *families* by the base image each was generated from (lineage traced through `parent_id`) — each family ready to merge-export or turn into a montage in one click.
+- **Collections:** group mixed images and videos into named cards with covers, organize related collection cards into named **collection groups**, then drill into each collection with the normal gallery controls and scoped tag/resolution filters. **Import a folder** of local files into a new or existing collection (per-file progress; imports are auto-archived so they don't crowd Recent), and toggle **Group** inside an open collection to cluster its clips into *families* by the base image each was generated from (lineage traced through `parent_id`) — each family ready to merge-export or turn into a montage in one click.
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
@@ -296,6 +297,32 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
   *Prompt Studio → Describe for Grok*).
 - **Installable PWA:** add to your home screen on iOS/Android for a full-screen app.
 - **Mobile:** a **Filters** button opens the same tag/model/type modal.
+
+### Collection Groups
+
+Collection groups are one-level folders for collections in **Library → Collections**. They
+are meant for sets like *Identity Sheets*, where you may want separate named collections
+for characters, outfits, poses, or reference batches without leaving all of those cards
+loose on the main Library page.
+
+This is separate from the **Group** toggle inside an open collection. The collection-level
+toggle clusters media by base image lineage; a **collection group** organizes multiple
+collection cards together.
+
+Use collection groups like this:
+
+1. Open any collection and edit the **Group** field next to the collection name. Type a
+   new group name, or pick an existing one from the autocomplete list. Press Enter or
+   leave the field to save. Clearing the field removes that collection from its group.
+2. On the Library landing page, grouped collections collapse into one group card with
+   combined covers and counts. Open the group card to see its member collections, then
+   open any collection normally.
+3. To move sheets/items out of a main collection into a new grouped collection, open the
+   source collection, click **Select**, choose the items, then click **Move/Add**. Create
+   a new collection, fill in its **Group** field, and enable **Remove from current
+   collection after adding** if this is a move instead of a copy.
+4. Existing collections can be moved into or out of a group at any time by changing their
+   **Group** field. There are no nested groups; the group name is the shared folder.
 
 ## Playlists And Export
 
@@ -755,6 +782,7 @@ config** plus a `manifest.json` describing it:
   parameters); the canonical source the gallery's `index.db` is rebuilt from
 - `library.json` — favorites and archive
 - `collections.json` — collections (including any password-lock state)
+- `collection_groups.json` — collection group lock state
 - `playlists.json` — playlists
 - `saved_responses.json` — Prompt Studio saved prompts, with their **folders & tags**
 - `scenes.json`, `personas.json`, `freeform_presets.json` — Prompt Studio scenes, persona

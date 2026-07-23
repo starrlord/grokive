@@ -88,10 +88,12 @@ METADATA_FILE = DATA_DIR / "metadata.json"
 DELETED_FILE = DATA_DIR / "deleted_ids.json"  # blocklist: ids the downloader must never re-pull
 PLAYLISTS_FILE = DATA_DIR / "playlists.json"
 COLLECTIONS_FILE = DATA_DIR / "collections.json"
+COLLECTION_GROUPS_FILE = DATA_DIR / "collection_groups.json"
 SCENES_FILE = DATA_DIR / "scenes.json"  # saved Prompt Studio Scene Builder scenes
 RESPONSES_FILE = DATA_DIR / "saved_responses.json"  # Prompt Studio responses the user starred
 PERSONAS_FILE = DATA_DIR / "personas.json"  # Prompt Studio persona / voice cards
 FREEFORM_PRESETS_FILE = DATA_DIR / "freeform_presets.json"  # saved Freeform request + required text presets
+SAVED_PROMPT_TEXT_LIMIT = 100_000
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LIBRARY_FILE = DATA_DIR / "library.json"
 DB_FILE = DATA_DIR / "index.db"
@@ -1726,6 +1728,10 @@ def _collection_id_list(value) -> list[str]:
     return out
 
 
+def _clean_group_name(value) -> str:
+    return str(value or "").strip()[:120]
+
+
 def _clean_collection(entry: dict) -> dict | None:
     name = str(entry.get("name", "")).strip()[:120]
     ids = _collection_id_list(entry.get("ids"))
@@ -1742,6 +1748,9 @@ def _clean_collection(entry: dict) -> dict | None:
         "created_at": str(entry.get("created_at") or now)[:32],
         "updated_at": str(entry.get("updated_at") or now)[:32],
     }
+    group = _clean_group_name(entry.get("group"))
+    if group:
+        out["group"] = group
     # Password-lock state rides through every write. It's server-authoritative: the
     # bulk /api/collections POST re-supplies it from disk, and the dedicated lock
     # endpoints set it — so a normal client save can never forge or clear a lock here.
@@ -1775,6 +1784,105 @@ def _load_collections(strict: bool = False) -> list[dict]:
     return clean
 
 
+def _clean_group_record(entry: dict) -> dict | None:
+    name = _clean_group_name(entry.get("name"))
+    if not name:
+        return None
+    if not (entry.get("locked") and entry.get("pass_hash")):
+        return None
+    out = {
+        "name": name,
+        "locked": True,
+        "pass_hash": str(entry.get("pass_hash"))[:512],
+    }
+    if entry.get("locked_at"):
+        out["locked_at"] = str(entry.get("locked_at"))[:32]
+    return out
+
+
+def _load_groups(strict: bool = False) -> dict:
+    data = {"seeded": False, "groups": []}
+    if COLLECTION_GROUPS_FILE.exists():
+        try:
+            loaded = json.loads(COLLECTION_GROUPS_FILE.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception as exc:
+            if strict:
+                raise CorruptStateError(f"collection_groups.json exists but could not be read: {exc}") from exc
+            data = {"seeded": False, "groups": []}
+    groups = []
+    seen = set()
+    raw_groups = data.get("groups") if isinstance(data, dict) else []
+    if isinstance(raw_groups, list):
+        for entry in raw_groups[:1000]:
+            if not isinstance(entry, dict):
+                continue
+            rec = _clean_group_record(entry)
+            if not rec:
+                continue
+            key = rec["name"].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            groups.append(rec)
+    return {"seeded": bool(data.get("seeded")) if isinstance(data, dict) else False, "groups": groups}
+
+
+def _save_groups(state: dict) -> None:
+    clean = _load_groups_from_value(state)
+    _atomic_write_json(COLLECTION_GROUPS_FILE, clean)
+
+
+def _load_groups_from_value(value: dict) -> dict:
+    if not isinstance(value, dict):
+        value = {}
+    groups = []
+    seen = set()
+    raw = value.get("groups")
+    if isinstance(raw, list):
+        for entry in raw[:1000]:
+            if not isinstance(entry, dict):
+                continue
+            rec = _clean_group_record(entry)
+            if not rec:
+                continue
+            key = rec["name"].casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            groups.append(rec)
+    return {"seeded": bool(value.get("seeded")), "groups": groups}
+
+
+def _group_record(name: str, state: dict | None = None) -> dict | None:
+    target = _clean_group_name(name)
+    if not target:
+        return None
+    data = state if state is not None else _load_groups()
+    for rec in data.get("groups", []):
+        if str(rec.get("name", "")).casefold() == target.casefold():
+            return rec
+    return None
+
+
+def _canonical_group_name(name: str, collections: list[dict] | None = None, groups_state: dict | None = None) -> str:
+    clean = _clean_group_name(name)
+    if not clean:
+        return ""
+    key = clean.casefold()
+    if groups_state is not None:
+        rec = _group_record(clean, groups_state)
+        if rec:
+            return str(rec.get("name"))
+    if collections is not None:
+        for coll in collections:
+            group = _clean_group_name(coll.get("group"))
+            if group and group.casefold() == key:
+                return group
+    return clean
+
+
 # --------------------------------------------------------------------------- #
 # Collection locks — password-gate a collection so its media disappear from every
 # listing (All Media / Archive / search / facets), the collection card's cover, and
@@ -1784,29 +1892,69 @@ def _load_collections(strict: bool = False) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 UNLOCK_TTL = 24 * 3600  # seconds a successful unlock lasts (per session)
-_locked_cache: dict = {"mtime": None, "map": {}}
+_locked_cache: dict = {"mtime": None, "collections": {}, "groups": {}, "group_collections": {}}
 _locked_cache_lock = threading.Lock()
 
 
-def _locked_collections_map() -> dict[str, frozenset]:
-    """{collection_id: frozenset(media_ids)} for every password-locked collection,
-    cached on collections.json mtime so the per-file gates stay cheap (a library with
-    no locks pays nothing)."""
+def _lock_mtime_key() -> tuple[float, float]:
     try:
-        mtime = COLLECTIONS_FILE.stat().st_mtime if COLLECTIONS_FILE.exists() else 0.0
+        collections_mtime = COLLECTIONS_FILE.stat().st_mtime if COLLECTIONS_FILE.exists() else 0.0
     except OSError:
-        mtime = 0.0
+        collections_mtime = 0.0
+    try:
+        groups_mtime = COLLECTION_GROUPS_FILE.stat().st_mtime if COLLECTION_GROUPS_FILE.exists() else 0.0
+    except OSError:
+        groups_mtime = 0.0
+    return collections_mtime, groups_mtime
+
+
+def _locked_maps() -> tuple[dict[str, frozenset], dict[str, frozenset], dict[str, frozenset]]:
+    """Return cached collection locks, group media locks, and group member-cid locks."""
+    mtime = _lock_mtime_key()
     with _locked_cache_lock:
         if _locked_cache["mtime"] == mtime:
-            return _locked_cache["map"]
-    built: dict[str, frozenset] = {}
-    for coll in _load_collections():
+            return (_locked_cache["collections"],
+                    _locked_cache["groups"],
+                    _locked_cache["group_collections"])
+    collections = _load_collections()
+    collection_locks: dict[str, frozenset] = {}
+    for coll in collections:
         if coll.get("locked") and coll.get("pass_hash"):
-            built[str(coll.get("id"))] = frozenset(str(i) for i in coll.get("ids", []))
+            collection_locks[str(coll.get("id"))] = frozenset(str(i) for i in coll.get("ids", []))
+    lock_records = {str(rec.get("name")): rec for rec in _load_groups().get("groups", [])
+                    if rec.get("locked") and rec.get("pass_hash")}
+    group_locks: dict[str, frozenset] = {}
+    group_collections: dict[str, frozenset] = {}
+    for name in lock_records:
+        ids: set[str] = set()
+        cids: set[str] = set()
+        for coll in collections:
+            if _clean_group_name(coll.get("group")).casefold() == name.casefold():
+                cids.add(str(coll.get("id")))
+                ids.update(str(i) for i in coll.get("ids", []))
+        group_locks[name] = frozenset(ids)
+        group_collections[name] = frozenset(cids)
     with _locked_cache_lock:
         _locked_cache["mtime"] = mtime
-        _locked_cache["map"] = built
-    return built
+        _locked_cache["collections"] = collection_locks
+        _locked_cache["groups"] = group_locks
+        _locked_cache["group_collections"] = group_collections
+    return collection_locks, group_locks, group_collections
+
+
+def _locked_collections_map() -> dict[str, frozenset]:
+    """{collection_id: frozenset(media_ids)} for every password-locked collection."""
+    return _locked_maps()[0]
+
+
+def _locked_groups_map() -> dict[str, frozenset]:
+    """{group_name: frozenset(media_ids of ALL member collections)} for locked groups."""
+    return _locked_maps()[1]
+
+
+def _locked_group_collections_map() -> dict[str, frozenset]:
+    """{group_name: frozenset(collection_ids)} for locked groups."""
+    return _locked_maps()[2]
 
 
 def _session_unlocked(prune: bool = True) -> set[str]:
@@ -1822,6 +1970,37 @@ def _session_unlocked(prune: bool = True) -> set[str]:
     return set(valid)
 
 
+def _session_unlocked_groups(prune: bool = True) -> set[str]:
+    """Group names unlocked in THIS session. Older grants are invalidated when a
+    group is re-locked/re-passworded by comparing the grant's locked_at snapshot."""
+    grants = session.get("unlocked_groups")
+    if not isinstance(grants, dict) or not grants:
+        return set()
+    now = time.time()
+    records = {str(rec.get("name")): rec for rec in _load_groups().get("groups", [])}
+    valid = {}
+    out = set()
+    for name, grant in grants.items():
+        exp = None
+        locked_at = None
+        if isinstance(grant, dict):
+            exp = grant.get("expires")
+            locked_at = grant.get("locked_at")
+        elif isinstance(grant, (int, float)):
+            exp = grant
+        if not isinstance(exp, (int, float)) or exp <= now:
+            continue
+        rec = next((r for n, r in records.items() if n.casefold() == str(name).casefold()), None)
+        if rec and locked_at is not None and locked_at != rec.get("locked_at"):
+            continue
+        canonical = str(rec.get("name")) if rec else str(name)
+        valid[canonical] = {"expires": exp, "locked_at": rec.get("locked_at") if rec else locked_at}
+        out.add(canonical)
+    if prune and valid != grants:
+        session["unlocked_groups"] = valid
+    return out
+
+
 def _grant_unlock(cid: str) -> None:
     grants = dict(session.get("unlocked") or {})
     grants[str(cid)] = time.time() + UNLOCK_TTL
@@ -1829,10 +2008,34 @@ def _grant_unlock(cid: str) -> None:
     session.permanent = True
 
 
+def _grant_group_unlock(name: str) -> None:
+    clean = _clean_group_name(name)
+    if not clean:
+        return
+    rec = _group_record(clean)
+    canonical = str(rec.get("name")) if rec else clean
+    grants = dict(session.get("unlocked_groups") or {})
+    grants[canonical] = {"expires": time.time() + UNLOCK_TTL, "locked_at": rec.get("locked_at") if rec else None}
+    session["unlocked_groups"] = grants
+    session.permanent = True
+
+
 def _drop_unlock(cid: str) -> None:
     grants = dict(session.get("unlocked") or {})
     if grants.pop(str(cid), None) is not None:
         session["unlocked"] = grants
+
+
+def _drop_group_unlock(name: str) -> None:
+    clean = _clean_group_name(name)
+    grants = dict(session.get("unlocked_groups") or {})
+    removed = False
+    for key in list(grants.keys()):
+        if str(key).casefold() == clean.casefold():
+            grants.pop(key, None)
+            removed = True
+    if removed:
+        session["unlocked_groups"] = grants
 
 
 def _hidden_media_ids(reveal_ids=None) -> set[str]:
@@ -1845,12 +2048,17 @@ def _hidden_media_ids(reveal_ids=None) -> set[str]:
     shows items that also live in another, still-locked collection. Requires a request/session
     context."""
     locked = _locked_collections_map()
-    if not locked:
+    locked_groups = _locked_groups_map()
+    if not locked and not locked_groups:
         return set()
     unlocked = _session_unlocked()
+    unlocked_groups = _session_unlocked_groups()
     out: set[str] = set()
     for cid, ids in locked.items():
         if cid not in unlocked:
+            out |= ids
+    for name, ids in locked_groups.items():
+        if name not in unlocked_groups:
             out |= ids
     if reveal_ids:
         out -= {str(i) for i in reveal_ids}
@@ -1864,10 +2072,13 @@ def _list_hidden_media_ids() -> set[str]:
     the background library-prompt import. All Media / facets / search instead use the
     session-aware _hidden_media_ids(), so unlocking a collection surfaces its media there."""
     locked = _locked_collections_map()
-    if not locked:
+    locked_groups = _locked_groups_map()
+    if not locked and not locked_groups:
         return set()
     out: set[str] = set()
     for ids in locked.values():
+        out |= ids
+    for ids in locked_groups.values():
         out |= ids
     return out
 
@@ -1875,11 +2086,14 @@ def _list_hidden_media_ids() -> set[str]:
 def _is_media_hidden(media_id: str) -> bool:
     """Per-file membership check for the /media + /thumbnails gates (no session write)."""
     locked = _locked_collections_map()
-    if not locked:
+    locked_groups = _locked_groups_map()
+    if not locked and not locked_groups:
         return False
     unlocked = _session_unlocked(prune=False)
+    unlocked_groups = _session_unlocked_groups(prune=False)
     mid = str(media_id)
-    return any(cid not in unlocked and mid in ids for cid, ids in locked.items())
+    return (any(cid not in unlocked and mid in ids for cid, ids in locked.items())
+            or any(name not in unlocked_groups and mid in ids for name, ids in locked_groups.items()))
 
 
 def _collection_summaries(collections: list[dict]) -> list[dict]:
@@ -1899,6 +2113,7 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
             # Sealed card: size counts only — no thumbnails, no member ids.
             summaries.append({
                 **base, "ids": [], "cover_id": "", "cover": None, "covers": [],
+                "cover_items": [], "cover_peek": None,
                 "item_count": len(media),
                 "video_count": sum(1 for it in media if it.get("media_type") == "video"),
                 "image_count": sum(1 for it in media if it.get("media_type") == "image"),
@@ -1913,7 +2128,12 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         recent = sorted(media, key=lambda it: it.get("created_at") or "", reverse=True)
         cover_id = coll.get("cover_id") if coll.get("cover_id") in ids else (recent[0]["id"] if recent else "")
         cover_item = next((it for it in media if it["id"] == cover_id), None)
-        covers = [it.get("thumb") for it in recent if it.get("thumb")][:4]
+        # Long-press peek needs the full-media href behind each cover thumb.
+        # `cover_items` mirrors `covers` (same items, same order); `cover_peek` is the
+        # explicit/primary cover, which may be older than the recent-4 mosaic.
+        peek = lambda it: {"thumb": it.get("thumb"), "href": it.get("href"), "media_type": it.get("media_type")}
+        cover_pool = [it for it in recent if it.get("thumb")][:4]
+        covers = [it.get("thumb") for it in cover_pool]
         videos = sum(1 for it in media if it.get("media_type") == "video")
         images = sum(1 for it in media if it.get("media_type") == "image")
         summaries.append({
@@ -1922,6 +2142,8 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
             "cover_id": cover_id,
             "cover": cover_item.get("thumb") if cover_item else (covers[0] if covers else None),
             "covers": covers,
+            "cover_items": [peek(it) for it in cover_pool],
+            "cover_peek": peek(cover_item) if cover_item else (peek(cover_pool[0]) if cover_pool else None),
             "item_count": len(media),
             "video_count": videos,
             "image_count": images,
@@ -1932,10 +2154,54 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
     return summaries
 
 
+def _sealed_group_names() -> set[str]:
+    unlocked = _session_unlocked_groups()
+    return {name for name in _locked_groups_map() if name not in unlocked}
+
+
+def _sealed_group_collection_ids() -> set[str]:
+    sealed = {name.casefold() for name in _sealed_group_names()}
+    out: set[str] = set()
+    for name, cids in _locked_group_collections_map().items():
+        if name.casefold() in sealed:
+            out.update(cids)
+    return out
+
+
+def _collection_group_summaries(collections: list[dict]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for coll in collections:
+        group = _clean_group_name(coll.get("group"))
+        if group:
+            rec = _group_record(group)
+            name = str(rec.get("name")) if rec else group
+            counts[name] = counts.get(name, 0) + 1
+    grants = session.get("unlocked_groups") or {}
+    unlocked = _session_unlocked_groups()
+    out = []
+    for rec in _load_groups().get("groups", []):
+        name = str(rec.get("name"))
+        if not (rec.get("locked") and rec.get("pass_hash")):
+            continue
+        grant = grants.get(name)
+        expires = grant.get("expires") if isinstance(grant, dict) else (grant if isinstance(grant, (int, float)) else None)
+        out.append({
+            "name": name,
+            "locked": True,
+            "unlocked": name in unlocked,
+            "collection_count": counts.get(name, 0),
+            "unlock_expires": expires if name in unlocked else None,
+        })
+    return out
+
+
 @app.get("/api/collections")
 def api_collections_get() -> Response:
     """Return saved mixed-media collections with lightweight display summaries."""
-    return jsonify(collections=_collection_summaries(_load_collections()))
+    collections = _load_collections()
+    sealed_cids = _sealed_group_collection_ids()
+    visible = [c for c in collections if str(c.get("id")) not in sealed_cids]
+    return jsonify(collections=_collection_summaries(visible), groups=_collection_group_summaries(collections))
 
 
 @app.post("/api/collections")
@@ -1953,15 +2219,32 @@ def api_collections_post() -> Response:
     # would write the empty ids back and silently wipe it. A collection unlocked in this
     # session keeps its lock fields server-side but may have its (real, client-held) ids
     # edited. Unlocked/normal collections are handled as before.
-    existing = {str(c.get("id")): c for c in _load_collections()}
+    existing_list = _load_collections()
+    existing = {str(c.get("id")): c for c in existing_list}
     unlocked = _session_unlocked()
+    sealed_group_names = {name.casefold() for name in _sealed_group_names()}
+    sealed_group_cids = _sealed_group_collection_ids()
     clean = []
+    seen_payload_ids: set[str] = set()
     for entry in incoming[:1000]:
         if not isinstance(entry, dict):
             continue
-        cid = str(entry.get("id"))
+        cid = str(entry.get("id") or entry.get("name") or "")[:64]
+        if cid:
+            seen_payload_ids.add(cid)
         prior = existing.get(cid)
-        if prior and prior.get("locked") and prior.get("pass_hash"):
+        incoming_group = _clean_group_name(entry.get("group"))
+        prior_group = _clean_group_name(prior.get("group")) if prior else ""
+        incoming_group_key = incoming_group.casefold()
+        prior_group_key = prior_group.casefold()
+        if ((prior_group_key in sealed_group_names and incoming_group_key != prior_group_key)
+                or (incoming_group_key in sealed_group_names and incoming_group_key != prior_group_key)):
+            return jsonify(ok=False, error="Unlock the collection group before changing its members."), 403
+        if incoming_group:
+            entry = {**entry, "group": _canonical_group_name(incoming_group, existing_list, _load_groups())}
+        if prior and cid in sealed_group_cids:
+            entry = prior
+        elif prior and prior.get("locked") and prior.get("pass_hash"):
             if cid in unlocked:
                 entry = {**entry, "locked": True, "pass_hash": prior["pass_hash"], "locked_at": prior.get("locked_at")}
             else:
@@ -1971,6 +2254,11 @@ def api_collections_post() -> Response:
         coll = _clean_collection(entry)
         if coll:
             clean.append(coll)
+    reinjected = [c for c in existing_list
+                  if str(c.get("id")) in sealed_group_cids and str(c.get("id")) not in seen_payload_ids]
+    if len(clean) + len(reinjected) > 1000:
+        return jsonify(ok=False, error="Too many collections to preserve hidden group members safely."), 400
+    clean.extend(reinjected)
     _atomic_write_json(COLLECTIONS_FILE, clean)
     return jsonify(ok=True, count=len(clean))
 
@@ -2027,6 +2315,7 @@ def api_collection_relock(cid: str) -> Response:
 def api_collections_relock_all() -> Response:
     """Panic re-lock: revoke every active unlock grant in this session."""
     session["unlocked"] = {}
+    session["unlocked_groups"] = {}
     return jsonify(ok=True)
 
 
@@ -2048,11 +2337,131 @@ def api_collections_unlock_all() -> Response:
         if coll.get("locked") and coll.get("pass_hash") and check_password_hash(coll["pass_hash"], pw):
             _grant_unlock(str(coll.get("id")))
             matched += 1
+    for rec in _load_groups().get("groups", []):
+        if rec.get("locked") and rec.get("pass_hash") and check_password_hash(rec["pass_hash"], pw):
+            _grant_group_unlock(str(rec.get("name")))
+            matched += 1
     if not matched:
         _record_login_fail(ip)
         return jsonify(ok=False, error="No collections match that password."), 403
     _clear_login_fails(ip)
     return jsonify(ok=True, unlocked=matched)
+
+
+def _group_member_count(name: str, collections: list[dict] | None = None) -> int:
+    target = _clean_group_name(name).casefold()
+    if not target:
+        return 0
+    return sum(1 for c in (collections if collections is not None else _load_collections())
+               if _clean_group_name(c.get("group")).casefold() == target)
+
+
+def _group_unlock_expires(name: str):
+    grants = session.get("unlocked_groups") or {}
+    for key, grant in grants.items():
+        if str(key).casefold() != _clean_group_name(name).casefold():
+            continue
+        if isinstance(grant, dict):
+            return grant.get("expires")
+        if isinstance(grant, (int, float)):
+            return grant
+    return None
+
+
+@app.post("/api/collections/groups/lock")
+def api_collection_group_lock() -> Response:
+    payload = request.get_json(silent=True) or {}
+    name = _clean_group_name(payload.get("name"))
+    pw = str(payload.get("password") or "")
+    if not name:
+        return jsonify(ok=False, error="A group name is required."), 400
+    if not pw:
+        return jsonify(ok=False, error="A password is required."), 400
+    collections = _load_collections(strict=True)
+    state = _load_groups(strict=True)
+    rec = _group_record(name, state)
+    canonical = _canonical_group_name(name, collections, state)
+    if _group_member_count(canonical, collections) == 0 and rec is None:
+        return jsonify(ok=False, error="Collection group not found."), 404
+    if rec and rec.get("locked") and rec.get("pass_hash") and canonical not in _session_unlocked_groups():
+        return jsonify(ok=False, error="Unlock the collection group before changing its password."), 403
+    record = {
+        "name": canonical,
+        "locked": True,
+        "pass_hash": generate_password_hash(pw),
+        "locked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    groups = [g for g in state.get("groups", []) if str(g.get("name", "")).casefold() != canonical.casefold()]
+    groups.append(record)
+    _save_groups({"seeded": bool(state.get("seeded")), "groups": groups})
+    _drop_group_unlock(canonical)
+    return jsonify(ok=True, locked=True)
+
+
+@app.post("/api/collections/groups/unlock")
+def api_collection_group_unlock() -> Response:
+    ip = request.remote_addr or "?"
+    wait = _login_retry_after(ip)
+    if wait:
+        return jsonify(ok=False, error=f"Too many attempts. Try again in {wait} s."), 429
+    payload = request.get_json(silent=True) or {}
+    name = _clean_group_name(payload.get("name"))
+    pw = str(payload.get("password") or "")
+    rec = _group_record(name)
+    if rec is None or not (rec.get("locked") and rec.get("pass_hash")):
+        return jsonify(ok=False, error="Collection group is not locked."), 400
+    if not check_password_hash(rec["pass_hash"], pw):
+        _record_login_fail(ip)
+        return jsonify(ok=False, error="Incorrect password."), 403
+    _clear_login_fails(ip)
+    _grant_group_unlock(str(rec.get("name")))
+    return jsonify(ok=True, unlocked=True, expires=_group_unlock_expires(str(rec.get("name"))))
+
+
+@app.post("/api/collections/groups/relock")
+def api_collection_group_relock() -> Response:
+    name = _clean_group_name((request.get_json(silent=True) or {}).get("name"))
+    _drop_group_unlock(name)
+    return jsonify(ok=True, locked=True)
+
+
+@app.post("/api/collections/groups/remove-lock")
+def api_collection_group_remove_lock() -> Response:
+    payload = request.get_json(silent=True) or {}
+    name = _clean_group_name(payload.get("name"))
+    pw = str(payload.get("password") or "")
+    state = _load_groups(strict=True)
+    rec = _group_record(name, state)
+    if rec is None:
+        return jsonify(ok=False, error="Collection group is not locked."), 400
+    canonical = str(rec.get("name"))
+    if canonical not in _session_unlocked_groups() and not check_password_hash(rec["pass_hash"], pw):
+        return jsonify(ok=False, error="Incorrect password."), 403
+    groups = [g for g in state.get("groups", []) if str(g.get("name", "")).casefold() != canonical.casefold()]
+    _save_groups({"seeded": bool(state.get("seeded")), "groups": groups})
+    _drop_group_unlock(canonical)
+    return jsonify(ok=True, locked=False)
+
+
+@app.post("/api/collections/groups/force-unlock")
+def api_collection_group_force_unlock() -> Response:
+    if not _admin_configured():
+        return jsonify(ok=False, error="No admin password is configured for recovery."), 400
+    ip = request.remote_addr or "?"
+    wait = _login_retry_after(ip)
+    if wait:
+        return jsonify(ok=False, error=f"Too many attempts. Try again in {wait} s."), 429
+    payload = request.get_json(silent=True) or {}
+    if not secrets.compare_digest(str(payload.get("admin_password") or ""), ADMIN_PASSWORD):
+        _record_login_fail(ip)
+        return jsonify(ok=False, error="Incorrect admin password."), 403
+    name = _clean_group_name(payload.get("name"))
+    rec = _group_record(name)
+    if rec is None and _group_member_count(name) == 0:
+        return jsonify(ok=False, error="Collection group not found."), 404
+    _clear_login_fails(ip)
+    _grant_group_unlock(str(rec.get("name")) if rec else name)
+    return jsonify(ok=True, unlocked=True, expires=_group_unlock_expires(str(rec.get("name")) if rec else name))
 
 
 @app.post("/api/collections/<cid>/remove-lock")
@@ -2211,6 +2620,8 @@ def api_import_commit() -> Response:
         # offers it, and an import must not mutate a collection the user can't see.
         if target.get("locked") and target.get("pass_hash") and target_id not in _session_unlocked():
             return jsonify(ok=False, error="Unlock this collection before importing into it."), 403
+        if _clean_group_name(target.get("group")).casefold() in {g.casefold() for g in _sealed_group_names()}:
+            return jsonify(ok=False, error="Unlock this collection's group before importing into it."), 403
 
     with _imports_lock:
         records = _imports.pop(import_id, None)
@@ -4949,7 +5360,7 @@ def api_prompts_responses_post() -> Response:
     for entry in incoming:  # no cap — the client holds the full list and round-trips it whole
         if not isinstance(entry, dict):
             continue
-        text = str(entry.get("text", "")).strip()[:2000]
+        text = str(entry.get("text", "")).strip()[:SAVED_PROMPT_TEXT_LIMIT]
         if not text:
             continue
         # Tags: a deduped list of short lowercase labels (cross-cutting). Folder: a single bucket.
@@ -4990,7 +5401,7 @@ def api_prompts_responses_add() -> Response:
     so a context that hasn't loaded the list (e.g. the lightbox 'Describe for Grok') can add a
     prompt without wiping the others. Deduplicates by exact text."""
     payload = request.get_json(silent=True) or {}
-    text = str(payload.get("text") or "").strip()[:2000]
+    text = str(payload.get("text") or "").strip()[:SAVED_PROMPT_TEXT_LIMIT]
     if not text:
         return jsonify(ok=False, error="No text provided.", responses=[]), 400
     folder = str(payload.get("folder") or "").strip()[:40]
@@ -5112,8 +5523,8 @@ def _read_responses() -> list:
 def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool = False) -> tuple[list, list, str]:
     """Merge the media library's prompts (metadata.json) into Saved responses, adding only those
     not already saved. The dedup key is the normalized-prompt hash of the text AS IT IS STORED —
-    i.e. after the 2000-char storage cap — because that's the only form a future run can see in
-    the file. Hashing the FULL library text instead made every >2000-char prompt permanently
+    i.e. after the saved-prompt storage cap — because that's the only form a future run can see in
+    the file. Hashing the FULL library text instead made every over-limit prompt permanently
     "new": its stored truncation hashes differently, so each sync re-imported (and re-tagged)
     the same prompts forever, one duplicate copy per sync.
 
@@ -5154,7 +5565,8 @@ def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool 
         # the exact string the entry below stores, so the next run's file matches it.
         missing: dict = {}
         for r in uniq.values():
-            stored_h = promptstudio.prompt_hash(r["text"][:2000])
+            stored_text = r["text"][:SAVED_PROMPT_TEXT_LIMIT]
+            stored_h = promptstudio.prompt_hash(stored_text)
             if stored_h not in seen and stored_h not in missing:
                 missing[stored_h] = r
         if not missing and not collapsed:
@@ -5163,7 +5575,7 @@ def _import_library_into_saved(folder: str = "Library", *, exclude_hidden: bool 
         today = datetime.date.today().isoformat()
         new_entries = [{
             "id": "rs-" + secrets.token_hex(6),
-            "text": r["text"][:2000],
+            "text": r["text"][:SAVED_PROMPT_TEXT_LIMIT],
             "created_at": (r["created"][:10] or today),
             "folder": folder,
             "tags": [],
@@ -5644,6 +6056,7 @@ _BACKUP_TARGETS = {
     "metadata.json": METADATA_FILE,
     "library.json": LIBRARY_FILE,
     "collections.json": COLLECTIONS_FILE,
+    "collection_groups.json": COLLECTION_GROUPS_FILE,
     "playlists.json": PLAYLISTS_FILE,
     "saved_responses.json": RESPONSES_FILE,
     "scenes.json": SCENES_FILE,
@@ -5672,6 +6085,7 @@ _ACCOUNT_ARC_RE = re.compile(r"^grok_accounts/([a-z0-9][a-z0-9-]{2,31})\.txt$")
 # corrupt entry aborts the whole restore rather than half-overwriting live data).
 _BACKUP_JSON_NAMES = {
     "metadata.json", "library.json", "collections.json", "playlists.json",
+    "collection_groups.json",
     "saved_responses.json", "scenes.json", "personas.json",
     "freeform_presets.json", "deleted_ids.json", "settings.json",
     "grok_accounts.json",
@@ -5723,6 +6137,7 @@ def _backup_counts() -> dict:
     return {
         "media": _count_records(METADATA_FILE),
         "collections": _count_records(COLLECTIONS_FILE),
+        "collection_groups": _count_records(COLLECTION_GROUPS_FILE),
         "playlists": _count_records(PLAYLISTS_FILE),
         "saved_responses": _count_records(RESPONSES_FILE),
         "scenes": _count_records(SCENES_FILE),
@@ -5958,8 +6373,52 @@ def maybe_reindex() -> None:
         print(f"auto-reindex failed: {exc}")
 
 
+def _seed_collection_groups_once() -> None:
+    """One-time migration from '<Group> - <Name>' flat names to collection group labels."""
+    try:
+        groups_state = _load_groups(strict=True)
+    except CorruptStateError:
+        return
+    if COLLECTION_GROUPS_FILE.exists() and groups_state.get("seeded"):
+        return
+    try:
+        collections = _load_collections(strict=True)
+    except CorruptStateError:
+        return
+    if any(_clean_group_name(c.get("group")) for c in collections):
+        return
+
+    prefix_counts: dict[str, int] = {}
+    for coll in collections:
+        name = str(coll.get("name") or "")
+        if " - " not in name:
+            continue
+        prefix, rest = name.split(" - ", 1)
+        prefix = prefix.strip()
+        if prefix and rest.strip():
+            prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+    families = {prefix for prefix, count in prefix_counts.items() if count >= 2}
+    if families:
+        for coll in collections:
+            name = str(coll.get("name") or "")
+            if name in families:
+                coll["group"] = name
+                continue
+            if " - " not in name:
+                continue
+            prefix, rest = name.split(" - ", 1)
+            prefix = prefix.strip()
+            rest = rest.strip()
+            if prefix in families and rest:
+                coll["group"] = prefix
+                coll["name"] = rest
+        _atomic_write_json(COLLECTIONS_FILE, [c for c in (_clean_collection(c) for c in collections) if c])
+    _save_groups({"seeded": True, "groups": groups_state.get("groups", [])})
+
+
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _seed_collection_groups_once()
     maybe_reindex()
     rebuild_db(wait=True)  # inline: schema + rows must exist before the first request
     mode = _auth_mode()

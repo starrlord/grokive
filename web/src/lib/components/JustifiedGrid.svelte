@@ -2,19 +2,56 @@
   import { justify } from '$lib/justified.js';
   import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, togglePlayQueue, playQueueMembers } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import PeekOverlay from './PeekOverlay.svelte';
 
   let {
     items = [],
     targetHeight = 240,
     gap = 10,
     selectMode = false,
+    virtualize = false,
     onopen = () => {},
     ontoggleselect = () => {}
   } = $props();
 
   let width = $state(0);
+  let gridEl = $state(null);
+  let scrollY = $state(typeof window !== 'undefined' ? window.scrollY || 0 : 0);
+  let viewportHeight = $state(typeof window !== 'undefined' ? window.innerHeight || 0 : 0);
+  let gridTop = $state(0);
   const rows = $derived(width ? justify(items, width, targetHeight, gap) : []);
+  const VIRTUAL_MIN_ROWS = 40;
+  const VIRTUAL_OVERSCAN = 1200;
+  const rowOffsets = $derived.by(() => {
+    let y = 0;
+    return rows.map((row) => {
+      const offset = y;
+      y += (row.cells[0]?.h ?? targetHeight) + gap;
+      return offset;
+    });
+  });
+  const totalRowsHeight = $derived.by(() => {
+    if (!rows.length) return 0;
+    const last = rows[rows.length - 1];
+    return rowOffsets[rows.length - 1] + (last?.cells[0]?.h ?? targetHeight) + gap;
+  });
+  const virtualizationActive = $derived(virtualize && rows.length >= VIRTUAL_MIN_ROWS && viewportHeight > 0);
+  const virtualSlice = $derived.by(() => {
+    if (!virtualizationActive) return { start: 0, end: rows.length, before: 0, after: 0 };
+    const visibleTop = Math.max(0, scrollY - gridTop - VIRTUAL_OVERSCAN);
+    const visibleBottom = Math.max(visibleTop, scrollY - gridTop + viewportHeight + VIRTUAL_OVERSCAN);
+    let start = 0;
+    while (start < rows.length && rowOffsets[start] + (rows[start].cells[0]?.h ?? targetHeight) + gap < visibleTop) start += 1;
+    let end = start;
+    while (end < rows.length && rowOffsets[end] < visibleBottom) end += 1;
+    end = Math.min(rows.length, Math.max(end, start + 1));
+    const before = rowOffsets[start] ?? 0;
+    const after = Math.max(0, totalRowsHeight - (rowOffsets[end] ?? totalRowsHeight));
+    return { start, end, before, after };
+  });
+  const visibleRows = $derived(virtualizationActive ? rows.slice(virtualSlice.start, virtualSlice.end) : rows);
   let confirming = $state(null); // item pending delete confirmation
+  let viewportRAF = null;
 
   // Selection has three gestures, all funnelling through the same id-keyed store:
   //   • Mouse: press + drag to paint a run (the first card sets select vs. deselect);
@@ -32,6 +69,10 @@
   let autoScrollRAF = null;
   // Touch long-press arming.
   let pressId = null, pressX = 0, pressY = 0, longPressTimer = null;
+  // Long-press peek (OUTSIDE select mode): hold a card to preview its full media,
+  // release to dismiss. In select mode long-press stays the range gesture above.
+  let peek = $state(null);        // the held item while peeking
+  let peekTimer = null;
 
   function selectRange(fromId, toId) {
     const a = items.findIndex((x) => x.id === fromId);
@@ -43,7 +84,22 @@
   }
 
   function paintDown(e, it) {
-    if (!selectMode) return;
+    if (!selectMode) {
+      // Arm the peek. 400ms beats Android's ~500ms native long-press menu.
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (!it.href) return;
+      clickSuppressedFor = null;  // stale flag would eat the next open-click
+      pressX = e.clientX;
+      pressY = e.clientY;
+      clearTimeout(peekTimer);
+      peekTimer = setTimeout(() => {
+        peekTimer = null;
+        peek = it;
+        clickSuppressedFor = it.id;   // the click on release must not open the lightbox
+        navigator.vibrate?.(15);
+      }, 400);
+      return;
+    }
     clickSuppressedFor = null;    // clear any stale flag from a press that ended elsewhere
     if (e.pointerType === 'mouse') {
       if (e.button !== 0) return;
@@ -80,10 +136,10 @@
     if (selectMode && painting) setSelection(it.id, paintOn);
   }
   function cellClick(it) {
-    if (!selectMode) { onopen(it, items); return; }
     const suppressed = clickSuppressedFor === it.id;
     clickSuppressedFor = null;
-    if (suppressed) return;       // already handled on pointerdown / long-press
+    if (suppressed) return;       // already handled on pointerdown / long-press / peek
+    if (!selectMode) { onopen(it, items); return; }
     ontoggleselect(it);           // touch/pen tap or keyboard activation
     anchorId = it.id;
   }
@@ -137,22 +193,69 @@
       clearTimeout(longPressTimer);
       longPressTimer = null;
     }
+    // Same for a pending peek (an open peek survives small drift while held).
+    if (peekTimer != null && (Math.abs(e.clientX - pressX) > 10 || Math.abs(e.clientY - pressY) > 10)) {
+      clearTimeout(peekTimer);
+      peekTimer = null;
+    }
   }
   function onWinPointerUp() {
     endPaint();
     if (longPressTimer != null) { clearTimeout(longPressTimer); longPressTimer = null; }
+    if (peekTimer != null) { clearTimeout(peekTimer); peekTimer = null; }
+    peek = null;                  // release ends the peek
   }
+
+  function updateViewport() {
+    if (typeof window === 'undefined') return;
+    scrollY = window.scrollY || 0;
+    viewportHeight = window.innerHeight || 0;
+    gridTop = gridEl ? gridEl.getBoundingClientRect().top + scrollY : 0;
+  }
+
+  function scheduleViewportUpdate() {
+    if (viewportRAF != null) return;
+    viewportRAF = requestAnimationFrame(() => {
+      viewportRAF = null;
+      updateViewport();
+    });
+  }
+
+  $effect(() => {
+    if (typeof window === 'undefined') return;
+    updateViewport();
+    window.addEventListener('scroll', scheduleViewportUpdate, { passive: true });
+    window.addEventListener('resize', scheduleViewportUpdate);
+    return () => {
+      window.removeEventListener('scroll', scheduleViewportUpdate);
+      window.removeEventListener('resize', scheduleViewportUpdate);
+      if (viewportRAF != null) {
+        cancelAnimationFrame(viewportRAF);
+        viewportRAF = null;
+      }
+    };
+  });
+
+  $effect(() => {
+    width;
+    rows.length;
+    gridEl;
+    scheduleViewportUpdate();
+  });
 
 </script>
 
-<svelte:window onpointerup={onWinPointerUp} onpointercancel={onWinPointerUp} onpointermove={onWinPointerMove} />
+<!-- blur too: a window losing focus mid-hold would otherwise strand an open peek. -->
+<svelte:window onpointerup={onWinPointerUp} onpointercancel={onWinPointerUp} onpointermove={onWinPointerMove} onblur={onWinPointerUp} />
 
-<div class="w-full" bind:clientWidth={width} style="--g:{gap}px">
-  {#each rows as row (row.cells[0]?.item.id)}
-    <!-- content-visibility:auto (see .grid-row) lets the browser skip rendering rows
-         outside the viewport — cheap, native virtualization that keeps the DOM,
-         selection, and scroll behaviour intact. contain-intrinsic-size reserves the
-         row's real width×height so skipped rows don't collapse or shift the scrollbar. -->
+<div class="w-full" bind:this={gridEl} bind:clientWidth={width} style="--g:{gap}px">
+  {#if virtualizationActive && virtualSlice.before > 0}
+    <div aria-hidden="true" style="height:{virtualSlice.before}px"></div>
+  {/if}
+  {#each visibleRows as row (row.cells[0]?.item.id)}
+    <!-- content-visibility:auto (see .grid-row) lets the browser skip painting rows
+         outside the viewport. When virtualize is enabled for large views, only the
+         nearby rows are mounted and spacer blocks preserve the original scroll range. -->
     <div class="grid-row flex" style="gap:var(--g); margin-bottom:var(--g); contain-intrinsic-size:auto {width}px auto {row.cells[0]?.h ?? targetHeight}px">
       {#each row.cells as cell (cell.item.id)}
         {@const it = cell.item}
@@ -161,9 +264,8 @@
         {@const isMontage = it.model === 'Beat Montage'}
         <!-- The real click target is the Open/select button below. data-id lets the
              auto-scroll hit-test (elementFromPoint) map a point back to a card. -->
-        <div class="card-frame group relative shrink-0 overflow-hidden rounded-card bg-surface-2" role="presentation"
+        <div class="card-frame group relative shrink-0 select-none overflow-hidden rounded-card bg-surface-2" role="presentation"
              data-id={it.id}
-             class:select-none={selectMode}
              style="width:{cell.w}px; height:{cell.h}px">
           {#if it.thumb}
             <!-- Hover-zoom is disabled in select mode: dragging across cards would
@@ -188,6 +290,7 @@
             aria-label={selectMode ? (sel ? 'Deselect' : 'Select') : 'Open'}
             onpointerdown={(e) => paintDown(e, it)}
             onpointerenter={() => paintEnter(it)}
+            oncontextmenu={(e) => { if (peekTimer != null || peek) e.preventDefault(); }}
             onclick={() => cellClick(it)}></button>
 
           <!-- Resolution / video / CC badges, bottom-right — clear of the top-right
@@ -284,7 +387,12 @@
       {/each}
     </div>
   {/each}
+  {#if virtualizationActive && virtualSlice.after > 0}
+    <div aria-hidden="true" style="height:{virtualSlice.after}px"></div>
+  {/if}
 </div>
+
+<PeekOverlay item={peek} />
 
 {#if confirming}
   <ConfirmDialog title="Delete this item?"
@@ -302,13 +410,11 @@
     content-visibility: auto;
   }
 
+  /* Long-press always means something here now (range gesture in select mode, peek
+     otherwise) — stop iOS Safari from popping its image save/callout menu over it.
+     select-none rides along in the markup for the same reason. */
   .card-frame {
     container-type: inline-size;
-  }
-
-  /* In select mode, long-press is the range gesture — stop iOS Safari from popping
-     its image save/callout menu and hijacking it. */
-  .card-frame.select-none {
     -webkit-touch-callout: none;
   }
 

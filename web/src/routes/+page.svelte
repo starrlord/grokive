@@ -9,7 +9,7 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
+    collections, collectionGroups, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
     galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
     playQueue, enqueuePlayQueue
   } from '$lib/state.js';
@@ -55,6 +55,7 @@
   let collectionItems = $state([]);
   let collectionTotal = $state(0);
   let collectionName = $state('');
+  let collectionGroupName = $state('');
   let activeCanvasName = $state('');
   let canvasName = $state('');          // bound to the drilled-in canvas rename input
   let confirmingCanvas = $state(null);  // the canvas pending delete-confirmation
@@ -89,6 +90,18 @@
   // loaded/visible items can be acted on, so unloaded ones are unaffected.
   const displayTotal = $derived(Math.max(displayItems.length, total - (items.length - displayItems.length)));
   const activeCollection = $derived(($collections || []).find((c) => c.id === $activeCollectionId) || null);
+  const existingCollectionGroups = $derived.by(() => {
+    const byKey = {};
+    for (const c of $collections || []) {
+      const group = String(c.group || '').trim();
+      if (group && !byKey[group.toLowerCase()]) byKey[group.toLowerCase()] = group;
+    }
+    for (const g of $collectionGroups || []) {
+      const name = String(g.name || '').trim();
+      if (name && !byKey[name.toLowerCase()]) byKey[name.toLowerCase()] = name;
+    }
+    return Object.values(byKey).sort((a, b) => a.localeCompare(b));
+  });
   // The collections landing grid (not drilled into a collection) — chrome adapts to this.
   const onCollectionsLanding = $derived($filters.view === 'collections' && !activeCollection);
   const activeCanvas = $derived((facets.canvases || []).find((c) => c.id === $filters.canvas) || null);
@@ -292,11 +305,13 @@
     const next = JSON.stringify({
       id: activeCollection.id,
       ids: activeCollection.ids || [],
+      group: activeCollection.group || '',
       filters: $filters
     });
     if (next === collSig) return;
     collSig = next;
     collectionName = activeCollection.name;
+    collectionGroupName = activeCollection.group || '';
     refreshFacets();
     loadCollectionItems(activeCollection, true);
   });
@@ -525,6 +540,22 @@
     const name = collectionName.trim();
     if (name && name !== activeCollection.name) updateCollection(activeCollection.id, { name });
   }
+  function canonicalCollectionGroup(value) {
+    const clean = String(value || '').trim();
+    if (!clean) return '';
+    return existingCollectionGroups.find((g) => g.toLowerCase() === clean.toLowerCase()) || clean;
+  }
+  function saveCollectionGroup() {
+    if (!activeCollection) return;
+    const next = canonicalCollectionGroup(collectionGroupName);
+    const current = String(activeCollection.group || '').trim();
+    if (next.toLowerCase() === current.toLowerCase()) {
+      collectionGroupName = current;
+      return;
+    }
+    collectionGroupName = next;
+    updateCollection(activeCollection.id, { group: next });
+  }
   function removeSelectionFromCollection() {
     if (!activeCollection || !$selection.length) return;
     // Drop from the visible grid immediately so the action feels instant; the reactive
@@ -722,6 +753,17 @@
             <input class="absolute inset-0 h-full w-full rounded-lg border border-transparent bg-transparent px-1.5 py-1 text-base font-extrabold text-ink outline-none transition hover:border-line focus:border-[var(--accent)] focus:bg-[var(--surface-2)] sm:text-lg"
               aria-label="Collection name" title="Rename collection" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
           </label>
+          <label class="flex min-w-[8rem] max-w-48 shrink items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1 text-sm">
+            <span class="text-muted">Group</span>
+            <input class="min-w-0 flex-1 bg-transparent font-semibold text-ink outline-none placeholder:text-muted"
+              aria-label="Collection group" title="Collection group" placeholder="None" list="collection-group-options"
+              bind:value={collectionGroupName} maxlength="120" onblur={saveCollectionGroup} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+          </label>
+          <datalist id="collection-group-options">
+            {#each existingCollectionGroups as group (group)}
+              <option value={group}></option>
+            {/each}
+          </datalist>
           <span class="shrink-0 rounded-full border border-line bg-[var(--surface-2)] px-2.5 py-0.5 text-sm font-semibold text-muted tabular-nums" title={`${collectionTotal.toLocaleString()} items`}>{collectionTotal.toLocaleString()}</span>
         </div>
         <!-- One control cluster: right-aligned on desktop, a tidy full-width wrapping strip
@@ -765,6 +807,7 @@
         <EditorialList items={currentGridItems} onopen={openLightbox} />
       {:else}
         <JustifiedGrid items={currentGridItems} {targetHeight} {gap}
+          virtualize={currentGridItems.length >= 300}
           selectMode={$selectMode}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)} />
       {/if}
@@ -913,7 +956,7 @@
 {/if}
 
 {#if showCollectionPicker}
-  <CollectionPickerModal ids={$selection} onclose={() => (showCollectionPicker = false)} />
+  <CollectionPickerModal ids={$selection} currentCollection={activeCollection} onclose={() => (showCollectionPicker = false)} />
 {/if}
 
 {#if confirmingCanvas}

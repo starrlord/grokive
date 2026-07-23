@@ -536,6 +536,7 @@ export const collections = writable([]);
 // store so the top bar can tell "collections landing" from "inside a collection" and adapt
 // its controls. Owned by the page: set on open, cleared on Back / when leaving the view.
 export const activeCollectionId = writable(null);
+export const collectionGroups = writable([]);
 const cid = () => 'co-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 // Full ISO timestamp, not date-only: "Recently updated" sorts on this string, and a
 // date-only stamp made every collection touched the same day tie (so nothing moved).
@@ -554,7 +555,9 @@ export function collectionsSettled() {
 }
 export async function loadCollections() {
   await collectionsSaved;
-  collections.set(await fetchCollections());
+  const data = await fetchCollections();
+  collections.set(data.collections || []);
+  collectionGroups.set(data.groups || []);
 }
 function persistCollections() {
   collectionsSaved = saveCollections(get(collections));
@@ -570,7 +573,7 @@ function uniqueIds(ids) {
   }
   return out;
 }
-export function addCollection(name, ids = []) {
+export function addCollection(name, ids = [], patch = {}) {
   const cleanIds = uniqueIds(ids);
   const created = today();
   const coll = {
@@ -579,9 +582,34 @@ export function addCollection(name, ids = []) {
     ids: cleanIds,
     cover_id: cleanIds[0] || '',
     created_at: created,
-    updated_at: created
+    updated_at: created,
+    ...patch
   };
   collections.update((c) => [coll, ...c]);
+  persistCollections();
+  return coll.id;
+}
+export function addCollectionAndRemove(name, ids = [], patch = {}, sourceId = '') {
+  const cleanIds = uniqueIds(ids);
+  const remove = new Set(cleanIds.map(String));
+  const created = today();
+  const coll = {
+    id: cid(),
+    name,
+    ids: cleanIds,
+    cover_id: cleanIds[0] || '',
+    created_at: created,
+    updated_at: created,
+    ...patch
+  };
+  collections.update((c) => [
+    coll,
+    ...c.map((existing) => {
+      if (!sourceId || existing.id !== sourceId) return existing;
+      const next = (existing.ids || []).filter((mid) => !remove.has(String(mid)));
+      return { ...existing, ids: next, cover_id: remove.has(String(existing.cover_id)) ? (next[0] || '') : existing.cover_id, updated_at: today() };
+    })
+  ]);
   persistCollections();
   return coll.id;
 }
@@ -602,6 +630,23 @@ export function addToCollection(id, ids) {
     if (coll.id !== id) return coll;
     const next = uniqueIds([...(coll.ids || []), ...incoming]);
     return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: today() };
+  }));
+  persistCollections();
+}
+export function addToCollectionAndRemove(id, ids, sourceId = '') {
+  const incoming = uniqueIds(ids);
+  if (!incoming.length) return;
+  const remove = new Set(incoming.map(String));
+  collections.update((c) => c.map((coll) => {
+    if (coll.id === id) {
+      const next = uniqueIds([...(coll.ids || []), ...incoming]);
+      return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: today() };
+    }
+    if (sourceId && coll.id === sourceId) {
+      const next = (coll.ids || []).filter((mid) => !remove.has(String(mid)));
+      return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: today() };
+    }
+    return coll;
   }));
   persistCollections();
 }

@@ -78,7 +78,12 @@ export const savePlaylists = (playlists) => saveJSON('/api/playlists', { playlis
 
 // --- Collections -----------------------------------------------------------
 export async function fetchCollections() {
-  try { return (await getJSON('/api/collections')).collections || []; } catch { return []; }
+  try {
+    const data = await getJSON('/api/collections');
+    return { collections: data.collections || [], groups: data.groups || [] };
+  } catch {
+    return { collections: [], groups: [] };
+  }
 }
 export const saveCollections = (collections) => saveJSON('/api/collections', { collections });
 
@@ -170,6 +175,11 @@ export const relockAllCollections = () => postLock('/api/collections/relock-all'
 export const unlockAllCollections = (password) => postLock('/api/collections/unlock-all', { password });
 export const removeCollectionLock = (id, password) => postLock(`/api/collections/${encodeURIComponent(id)}/remove-lock`, { password });
 export const forceUnlockCollection = (id, adminPassword) => postLock(`/api/collections/${encodeURIComponent(id)}/force-unlock`, { admin_password: adminPassword });
+export const lockGroup = (name, password) => postLock('/api/collections/groups/lock', { name, password });
+export const unlockGroup = (name, password) => postLock('/api/collections/groups/unlock', { name, password });
+export const relockGroup = (name) => postLock('/api/collections/groups/relock', { name });
+export const removeGroupLock = (name, password) => postLock('/api/collections/groups/remove-lock', { name, password });
+export const forceUnlockGroup = (name, adminPassword) => postLock('/api/collections/groups/force-unlock', { name, admin_password: adminPassword });
 
 // --- Agent canvases (rename / hard-delete; mutate the underlying media records) ---
 export const renameCanvas = (id, name) => postLock(`/api/canvas/${encodeURIComponent(id)}/rename`, { name });

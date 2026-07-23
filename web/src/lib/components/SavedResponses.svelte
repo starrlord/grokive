@@ -1125,7 +1125,7 @@
                 Choose Natural, Suggestive, or Unfiltered to enhance this prompt.
               </div>
             {:else}
-              <textarea bind:value={enhance.text} rows="10" maxlength="2000" use:focusOnMount
+              <textarea bind:value={enhance.text} rows="10" maxlength="100000" use:focusOnMount
                 class="min-h-48 w-full resize-y rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm leading-relaxed text-ink outline-none focus:border-[var(--accent)]"></textarea>
             {/if}
           </div>
