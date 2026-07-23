@@ -25,7 +25,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fade, fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, collections, filters, activeCollectionId } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, lightboxChrome, collections, filters, activeCollectionId } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -370,6 +370,8 @@
     }
     else if (e.key === 'f' || e.key === 'F') toggleFs();
     else if (e.key === 'i' || e.key === 'I') showInfo = !showInfo;
+    // h = hide/show the top action cluster, the keyboard twin of the collapse orb.
+    else if (e.key === 'h' || e.key === 'H') { lightboxChrome.update((v) => !v); pokeCounter(); }
     else if (e.key === 'Delete') confirmingDelete = true;
   }
 </script>
@@ -402,59 +404,89 @@
     </div>
 
     <!-- Top scrim: grounds the floating chrome so it stays legible over bright
-         frames, and visually separates controls from the media on full-bleed clips. -->
-    <div class="pointer-events-none absolute inset-x-0 top-0 z-[5] h-28 bg-gradient-to-b from-[var(--lightbox-scrim-start)] via-[var(--lightbox-scrim-mid)] to-transparent"></div>
+         frames, and visually separates controls from the media on full-bleed clips.
+         It exists FOR that chrome, so it collapses with it — a 7rem veil over the top
+         of the frame is most of what you're reclaiming in landscape. The orb and Close
+         that stay behind carry their own .glass background, so they're legible without it. -->
+    {#if $lightboxChrome}
+      <div class="pointer-events-none absolute inset-x-0 top-0 z-[5] h-28 bg-gradient-to-b from-[var(--lightbox-scrim-start)] via-[var(--lightbox-scrim-mid)] to-transparent"
+           transition:fade={{ duration: reduceMotion ? 0 : 140 }}></div>
+    {/if}
 
-    <!-- Top chrome (safe-area inset so it clears notches / Dynamic Island) -->
+    <!-- Top chrome (safe-area inset so it clears notches / Dynamic Island).
+         Collapsible: the action cluster hides behind the orb, leaving orb + Close.
+         Close deliberately stays out of the collapse — iOS has no Escape key, and a
+         full-bleed landscape clip leaves no backdrop to tap, so hiding it would strand
+         you with no visible exit. The orb and Close are the right-anchored pair, so the
+         cluster grows/shrinks leftward from a fixed point instead of shifting them. -->
     <div class="absolute z-10 flex gap-2" style="top: max(0.75rem, env(safe-area-inset-top)); right: max(0.75rem, env(safe-area-inset-right));">
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
-        title="Favorite" aria-label={$favorites.has(item.id) ? 'Unfavorite' : 'Favorite'} aria-pressed={$favorites.has(item.id)} onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
-      {#if item.media_type !== 'video'}
-        <button class="glass grid h-10 w-10 place-items-center rounded-lg {showVision ? 'text-[var(--accent)]' : ''}"
-          title="Describe for Grok (AI)" aria-label="Describe image for Grok" aria-pressed={showVision}
-          onclick={() => { showVision = !showVision; if (showVision) showInfo = false; }}>
-          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+      {#if $lightboxChrome}
+      <div id="lightbox-actions" class="flex gap-2" transition:fade={{ duration: reduceMotion ? 0 : 140 }}>
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {$favorites.has(item.id) ? 'text-[var(--favorite)]' : ''}"
+          title="Favorite" aria-label={$favorites.has(item.id) ? 'Unfavorite' : 'Favorite'} aria-pressed={$favorites.has(item.id)} onclick={() => toggleFavorite(item.id)}>{$favorites.has(item.id) ? '♥' : '♡'}</button>
+        {#if item.media_type !== 'video'}
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg {showVision ? 'text-[var(--accent)]' : ''}"
+            title="Describe for Grok (AI)" aria-label="Describe image for Grok" aria-pressed={showVision}
+            onclick={() => { showVision = !showVision; if (showVision) showInfo = false; }}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+          </button>
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg"
+            title="Use as source for Grok Imagine" aria-label="Use as Imagine source"
+            onclick={() => { sendToImagine(item); close(); }}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
+          </button>
+          <!-- Add this IMAGE to the Montage queue as a Picture & Video beat (stays open so you
+               can keep browsing); adding it switches the montage into picture-video mode. -->
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg {basketMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
+            title={basketMembers.has(item.id) ? 'In montage queue — click to remove' : 'Add photo to montage queue (Picture & Video)'}
+            aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add photo to montage queue'} aria-pressed={basketMembers.has(item.id)}
+            onclick={() => queueImageForMontage(item.id)}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </button>
+        {:else if item.model !== 'Beat Montage'}
+          <!-- Add this video to the cross-library Montage queue. Stays open (no close())
+               so you can keep browsing and queueing across collections. -->
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg {basketMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
+            title={basketMembers.has(item.id) ? 'In montage queue — click to remove' : 'Add to montage queue'}
+            aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add to montage queue'} aria-pressed={basketMembers.has(item.id)}
+            onclick={() => toggleBasket(item.id)}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </button>
+        {/if}
+        {#if item.media_type === 'video' && item.subtitles}
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg text-xs font-black tracking-tight {showSubStyle ? 'text-[var(--accent)]' : ''}"
+            title="Subtitle display" aria-label="Subtitle display" aria-pressed={showSubStyle} onclick={() => (showSubStyle = true)}>CC</button>
+        {/if}
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
+          title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => { showInfo = !showInfo; if (showInfo) showVision = false; }}>ⓘ</button>
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {playing ? 'text-[var(--accent)]' : ''}"
+          title={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
+          aria-label={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
+          aria-pressed={playing}
+          disabled={isImage ? (!slideshow && !hasMoreImages) : (!autoplayVideos && !hasPlayableVideo)}
+          onclick={isImage ? toggleSlideshow : toggleAutoplayVideos}>▶</button>
+        <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
+          title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
         </button>
-        <button class="glass grid h-10 w-10 place-items-center rounded-lg"
-          title="Use as source for Grok Imagine" aria-label="Use as Imagine source"
-          onclick={() => { sendToImagine(item); close(); }}>
-          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/></svg>
-        </button>
-        <!-- Add this IMAGE to the Montage queue as a Picture & Video beat (stays open so you
-             can keep browsing); adding it switches the montage into picture-video mode. -->
-        <button class="glass grid h-10 w-10 place-items-center rounded-lg {basketMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
-          title={basketMembers.has(item.id) ? 'In montage queue — click to remove' : 'Add photo to montage queue (Picture & Video)'}
-          aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add photo to montage queue'} aria-pressed={basketMembers.has(item.id)}
-          onclick={() => queueImageForMontage(item.id)}>
-          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        </button>
-      {:else if item.model !== 'Beat Montage'}
-        <!-- Add this video to the cross-library Montage queue. Stays open (no close())
-             so you can keep browsing and queueing across collections. -->
-        <button class="glass grid h-10 w-10 place-items-center rounded-lg {basketMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
-          title={basketMembers.has(item.id) ? 'In montage queue — click to remove' : 'Add to montage queue'}
-          aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add to montage queue'} aria-pressed={basketMembers.has(item.id)}
-          onclick={() => toggleBasket(item.id)}>
-          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-        </button>
+      </div>
       {/if}
-      {#if item.media_type === 'video' && item.subtitles}
-        <button class="glass grid h-10 w-10 place-items-center rounded-lg text-xs font-black tracking-tight {showSubStyle ? 'text-[var(--accent)]' : ''}"
-          title="Subtitle display" aria-label="Subtitle display" aria-pressed={showSubStyle} onclick={() => (showSubStyle = true)}>CC</button>
-      {/if}
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-lg {showInfo ? 'text-[var(--accent)]' : ''}"
-        title="Info (i)" aria-label="Info" aria-pressed={showInfo} onclick={() => { showInfo = !showInfo; if (showInfo) showVision = false; }}>ⓘ</button>
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg text-sm font-bold {playing ? 'text-[var(--accent)]' : ''}"
-        title={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
-        aria-label={isImage ? (slideshow ? 'Stop slideshow' : 'Start photo slideshow') : (autoplayVideos ? 'Stop autoplay videos' : 'Autoplay videos from here')}
-        aria-pressed={playing}
-        disabled={isImage ? (!slideshow && !hasMoreImages) : (!autoplayVideos && !hasPlayableVideo)}
-        onclick={isImage ? toggleSlideshow : toggleAutoplayVideos}>▶</button>
-      <button class="glass grid h-10 w-10 place-items-center rounded-lg transition hover:text-[var(--danger-ink)]"
-        title="Delete (Del)" aria-label="Delete" onclick={() => (confirmingDelete = true)}>
-        <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+      <!-- Collapse orb. While collapsed it rides the same idle signal as the bottom
+           counter (pokeCounter — clip change, pointer activity, first tap) and dims to
+           40% rather than vanishing, so the frame is near-clean but the way back is
+           never hidden. Hover/focus always restores it. -->
+      <button class="glass grid h-10 w-10 place-items-center rounded-lg transition-opacity duration-300 hover:opacity-100 focus-visible:opacity-100 {$lightboxChrome || counterVisible ? 'opacity-100' : 'opacity-40'}"
+        title={$lightboxChrome ? 'Hide controls (h)' : 'Show controls (h)'}
+        aria-label={$lightboxChrome ? 'Hide controls' : 'Show controls'}
+        aria-expanded={$lightboxChrome} aria-controls="lightbox-actions"
+        onclick={() => { lightboxChrome.update((v) => !v); pokeCounter(); }}>
+        {#if $lightboxChrome}
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></svg>
+        {:else}
+          <svg viewBox="0 0 24 24" class="h-5 w-5" fill="currentColor" stroke="none" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+        {/if}
       </button>
-      <button class="glass rounded-lg px-3 py-2 font-bold" onclick={close}>Close</button>
+      <button class="glass rounded-lg px-3 py-2 font-bold transition-opacity duration-300 hover:opacity-100 focus-visible:opacity-100 {$lightboxChrome || counterVisible ? 'opacity-100' : 'opacity-40'}" onclick={close}>Close</button>
     </div>
     {#if elementFsSupported || item.media_type === 'video'}
       <button class="glass absolute z-10 grid h-10 w-10 place-items-center rounded-lg" style="top: max(0.75rem, env(safe-area-inset-top)); left: max(0.75rem, env(safe-area-inset-left));" title="Fullscreen (f)" aria-label="Fullscreen" onclick={toggleFs}>⛶</button>

@@ -702,12 +702,17 @@ def facets(
             )
         ]
         canvas_where, canvas_params = compose(tag_clause(), model_clause(), res_clause())
+        # created_at/updated_at are derived from the canvas's own media (a canvas has no
+        # row of its own): oldest item = when it started, newest = when it last grew.
+        # The Canvases landing sorts on them (Recent / Recently updated).
         canvas_rows = [
             {"id": r["canvas_id"], "name": r["canvas_name"] or r["canvas_id"],
-             "count": r["n"], "videos": r["v"], "images": r["i"], "cover": r["cover"]}
+             "count": r["n"], "videos": r["v"], "images": r["i"], "cover": r["cover"],
+             "created_at": r["first_at"], "updated_at": r["last_at"]}
             for r in conn.execute(
                 f"SELECT m.canvas_id, m.canvas_name, COUNT(*) n, "
                 f"SUM(m.media_type='video') v, SUM(m.media_type='image') i, "
+                f"MIN(m.created_at) first_at, MAX(m.created_at) last_at, "
                 f"MAX(m.thumb) cover FROM media m{joins}{canvas_where}"
                 f"{' AND' if canvas_where else ' WHERE'} m.canvas_id IS NOT NULL "
                 f"GROUP BY m.canvas_id ORDER BY n DESC",

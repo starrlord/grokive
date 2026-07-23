@@ -6,7 +6,10 @@
   // dumping you somewhere unrelated. Module scope survives the round-trip; it still
   // resets to defaults on a full page load (client-only SPA — no SSR sharing).
   let q = $state('');
-  let sortBy = $state('recent'); // recent (store/creation order) | updated (last-modified) | name | size
+  // Default is 'updated' (last-modified first): the collection you just added clips to
+  // lands on top, which is what you almost always want back. 'recent' (stored order) is
+  // still selectable and keeps Beat Montage pinned.
+  let sortBy = $state('updated'); // updated (last-modified) | recent (store/creation order) | name | size
   let showLocked = $state(false);
   let activeGroup = $state('');
   let landingScrollY = 0;
@@ -302,8 +305,8 @@
         inputClass="rounded-full border border-line bg-[var(--surface-2)] py-1.5 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
       <select bind:value={sortBy} aria-label="Sort collections" title="Sort collections"
         class="shrink-0 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm font-semibold">
-        <option value="recent">Recent</option>
         <option value="updated">Recently updated</option>
+        <option value="recent">Recent</option>
         <option value="name">Name A–Z</option>
         <option value="size">Largest</option>
       </select>

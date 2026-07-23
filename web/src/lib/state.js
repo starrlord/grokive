@@ -63,6 +63,14 @@ export const slideSeconds = writable(_clampSlide(LS('ga.slideSeconds', 5)));
 slideSeconds.subscribe((v) => persist('ga.slideSeconds', _clampSlide(v)));
 export const setSlideSeconds = (n) => slideSeconds.set(_clampSlide(n));
 
+// Is the Lightbox's top action cluster (favorite / montage / CC / info / play / delete)
+// expanded? Collapsing it leaves just the toggle orb and Close, which frees the whole top
+// band — the point being landscape phone viewing, where the buttons and their scrim eat a
+// meaningful slice of the frame. localStorage-backed (same tier as theme/slideSeconds) so
+// the choice sticks across clips, reopens and reloads: a per-device viewing preference.
+export const lightboxChrome = writable(!!LS('ga.lightboxChrome', true));
+lightboxChrome.subscribe((v) => persist('ga.lightboxChrome', !!v));
+
 // Last-set player volume (0..1), a per-device preference. localStorage-backed (same tier
 // as theme/mode/slideSeconds) so a desktop user's chosen level sticks across Lightbox opens
 // and page reloads. Read/written directly (not via a store) by the player, which applies it

@@ -24,6 +24,7 @@
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
   import LibraryView from '$lib/components/LibraryView.svelte';
   import MediaTypeTabs from '$lib/components/MediaTypeTabs.svelte';
+  import SearchField from '$lib/components/SearchField.svelte';
   import SortSelect from '$lib/components/SortSelect.svelte';
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
@@ -60,6 +61,11 @@
   let canvasName = $state('');          // bound to the drilled-in canvas rename input
   let confirmingCanvas = $state(null);  // the canvas pending delete-confirmation
   let canvasSig = '';                   // tracks the open canvas so we only reseed the input on change
+  // Canvases landing toolbar (name filter + ordering) — mirrors the Collections grid.
+  // Plain instance state is enough here: drilling into a canvas only swaps the {#if}
+  // branch inside THIS component, so it survives the round-trip back to the landing.
+  let canvasQuery = $state('');
+  let canvasSort = $state('updated'); // updated (newest item) | recent (newest canvas) | name | size
   let showCollectionPicker = $state(false);
   let groupByBase = $state(false); // collection view: cluster items by their base image
   let showMovie = $state(false);
@@ -106,6 +112,19 @@
   const onCollectionsLanding = $derived($filters.view === 'collections' && !activeCollection);
   const activeCanvas = $derived((facets.canvases || []).find((c) => c.id === $filters.canvas) || null);
   const activeCanvasTitle = $derived(activeCanvas?.name || activeCanvasName || 'Canvas');
+  // Canvases landing: filter by name, then order. `updated_at`/`created_at` come from the
+  // canvas's own media (newest / oldest item — see db.facets), so "Recently updated" floats
+  // a canvas you just added to, while "Recent" is newest-canvas-first. ISO strings compare
+  // lexicographically; a canvas missing timestamps sorts last rather than jumping to the top.
+  const shownCanvases = $derived.by(() => {
+    const needle = canvasQuery.trim().toLowerCase();
+    const list = (facets.canvases || []).filter((c) => !needle || (c.name || '').toLowerCase().includes(needle));
+    const byTime = (key) => (a, b) => (b[key] || '').localeCompare(a[key] || '');
+    if (canvasSort === 'name') return [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    if (canvasSort === 'size') return [...list].sort((a, b) => (b.count || 0) - (a.count || 0));
+    if (canvasSort === 'recent') return [...list].sort(byTime('created_at'));
+    return [...list].sort(byTime('updated_at'));
+  });
   const hasCanvasRefinements = $derived(!!(
     $filters.query ||
     $filters.tags.length ||
@@ -451,9 +470,19 @@
     await loadCollections();
     if (open && result?.collection_id) enterCollection(result.collection_id);
   }
+  // `orderedItems` = play EXACTLY this order (the drilled-in "Play videos" button hands
+  // over the grid, so it honours whatever SortSelect is showing). The collection CARD has
+  // no visible order to honour, and c.ids is INSERTION order — oldest-added first (see
+  // server.py _collection_summaries) — so Play used to start you on whatever you added
+  // longest ago. Screen newest-first there instead: same created_at desc the card's own
+  // cover/mosaic already uses. Undated rows keep insertion order at the end.
   async function playCollection(c, orderedItems = null) {
-    const source = Array.isArray(orderedItems) ? orderedItems : await mediaByIds(c.ids);
-    const list = source.filter((v) => v.media_type === 'video');
+    const explicitOrder = Array.isArray(orderedItems);
+    const source = explicitOrder ? orderedItems : await mediaByIds(c.ids);
+    const videos = source.filter((v) => v.media_type === 'video');
+    const list = explicitOrder
+      ? videos
+      : [...videos].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: true, title: c.name };
   }
@@ -862,8 +891,28 @@
       <div bind:this={sentinel} class="h-10"></div>
       {#if loading}<p class="py-6 text-center text-sm text-muted">Loading…</p>{/if}
     {:else if $filters.view === 'canvases'}
+      <!-- Toolbar: count, name filter, ordering — same shape as the Collections landing. -->
+      <div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span class="text-sm text-muted">{shownCanvases.length} canvas{shownCanvases.length === 1 ? '' : 'es'}</span>
+        <div class="ml-auto flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+          <SearchField bind:value={canvasQuery} placeholder="Search canvases…" ariaLabel="canvas search"
+            wrapperClass="order-last w-full min-w-0 sm:order-none sm:w-60 sm:flex-none"
+            inputClass="rounded-full border border-line bg-[var(--surface-2)] py-1.5 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+          <select bind:value={canvasSort} aria-label="Sort canvases" title="Sort canvases"
+            class="shrink-0 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1.5 text-sm font-semibold">
+            <option value="updated">Recently updated</option>
+            <option value="recent">Recent</option>
+            <option value="name">Name A–Z</option>
+            <option value="size">Largest</option>
+          </select>
+        </div>
+      </div>
+
+      {#if !shownCanvases.length && canvasQuery.trim()}
+        <p class="py-16 text-center text-sm text-muted">No canvases match “{canvasQuery.trim()}”.</p>
+      {/if}
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-        {#each facets.canvases || [] as c (c.id)}
+        {#each shownCanvases as c (c.id)}
           <article class="group relative overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
             <button type="button" class="relative block aspect-square w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => openCanvas(c)}>
               {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-105" />{/if}
