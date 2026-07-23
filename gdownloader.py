@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
 from curl_cffi import requests as cffi_requests
@@ -38,6 +38,17 @@ GROK_FAVORITES_FILTER = "MEDIA_POST_SOURCE_LIKED"
 GROK_CANVAS_LIST_ENDPOINT = "https://grok.com/rest/media/canvas/list"
 GROK_CANVAS_GET_ENDPOINT = "https://grok.com/rest/media/canvas/get"
 GROK_POST_GET_ENDPOINT = "https://grok.com/rest/media/post/get"
+# Imagine v2 keeps a generation chain in a CHAT conversation, not under a parent post:
+# post/get now answers with childPosts: [] for anything made in the new UI, and
+# post/list has lost the "list my media" sources (OWNED 400s with "MongoDB-backed media
+# post listing has been removed"; LIKED answers empty for v2 accounts). The conversation
+# endpoints below are what's left, and only their GET forms are reachable — POSTing to
+# /responses is refused by Grok's anti-bot rules.
+GROK_CHAT_CONVERSATIONS_ENDPOINT = "https://grok.com/rest/app-chat/conversations"
+# Imagine conversations are hidden from the default (chat) listing — the kind filter is
+# required to see them at all.
+GROK_IMAGINE_CONVERSATION_KIND = "CONVERSATION_KIND_IMAGINE"
+GROK_ASSETS_BASE = "https://assets.grok.com/"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".mpeg", ".mpg"}
 KNOWN_MEDIA_HOSTS = {"assets.grok.com", "imagine-public.x.ai"}
@@ -59,6 +70,7 @@ NEXT_KEYS = {"next", "next_cursor", "nextCursor", "cursor", "pagination_token", 
 MODEL_KEYS = {"model", "modelName", "modelId"}
 MIME_KEYS = {"mime_type", "mimeType", "contentType", "content_type"}
 MEDIA_TYPE_KEYS = {"media_type", "mediaType", "type"}
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 
 
 @dataclass
@@ -221,6 +233,209 @@ def grok_post_get_spec(auth_spec: RequestSpec, post_id: str) -> RequestSpec:
         cookies=auth_spec.cookies,
         body=json.dumps({"id": post_id}, separators=(",", ":")),
     )
+
+
+def _grok_get_spec(auth_spec: RequestSpec, url: str) -> RequestSpec:
+    """A GET against grok.com carrying the captured session's headers/cookies.
+
+    Content-Type is dropped: these are bodyless reads, and the chat endpoints are picky
+    enough already (their POST forms answer "Request rejected by anti-bot rules")."""
+    headers = {k: v for k, v in auth_spec.headers.items() if k.lower() != "content-type"}
+    return RequestSpec(method="GET", url=url, headers=headers, cookies=auth_spec.cookies, body=None)
+
+
+def grok_conversation_list_spec(auth_spec: RequestSpec, page_size: int, page_token: str | None = None) -> RequestSpec:
+    query = {"pageSize": str(page_size), "kind": GROK_IMAGINE_CONVERSATION_KIND}
+    if page_token:
+        query["pageToken"] = page_token
+    return _grok_get_spec(auth_spec, f"{GROK_CHAT_CONVERSATIONS_ENDPOINT}?{urlencode(query)}")
+
+
+def grok_conversation_responses_spec(auth_spec: RequestSpec, conversation_id: str) -> RequestSpec:
+    """Every turn of one Imagine conversation, each generation attached as a file asset."""
+    return _grok_get_spec(
+        auth_spec,
+        f"{GROK_CHAT_CONVERSATIONS_ENDPOINT}/{quote(conversation_id, safe='')}/responses",
+    )
+
+
+def list_grok_conversations(
+    client: httpx.Client, auth_spec: RequestSpec, max_pages: int | None = None
+) -> list[tuple[str, str]]:
+    """Return (id, title) for every Imagine conversation on the account, newest first."""
+    out: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    token: str | None = None
+    pages = 0
+    while True:
+        data = request_json_with_backoff(client, grok_conversation_list_spec(auth_spec, 100, token))
+        conversations = data.get("conversations") if isinstance(data, dict) else None
+        for conversation in conversations or []:
+            if not isinstance(conversation, dict):
+                continue
+            conv_id = str(conversation.get("conversationId") or conversation.get("id") or "")
+            if conv_id and conv_id not in seen_ids:
+                seen_ids.add(conv_id)
+                out.append((conv_id, str(conversation.get("title") or conv_id)))
+        pages += 1
+        token = data.get("nextPageToken") if isinstance(data, dict) else None
+        if not token or token in seen_tokens or (max_pages is not None and pages >= max_pages):
+            return out
+        seen_tokens.add(token)
+        time.sleep(1)
+
+
+def _media_gen_input(response: dict[str, Any]) -> dict[str, Any]:
+    """The generation request behind a chat turn, unwrapped from its kind.
+
+    ``mediaGenInput`` holds exactly one keyed payload — imageToImage, imageToVideo,
+    textToImage, … — all with the same prompt/inputAssets/modelName shape, so the kind
+    itself carries no information we need."""
+    media_gen_input = response.get("mediaGenInput")
+    if isinstance(media_gen_input, dict):
+        for value in media_gen_input.values():
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _aux_id_list(aux: dict[str, Any], key: str) -> list[str]:
+    """auxKeys values are JSON encoded as strings (``'["<id>"]'``)."""
+    raw = aux.get(key)
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, str):
+        return [parsed]
+    if isinstance(parsed, list):
+        return [str(value) for value in parsed if isinstance(value, (str, int))]
+    return []
+
+
+def _asset_id_in_url(value: str) -> str | None:
+    """The asset id embedded in an asset URL/key — .../generated/<id>/image.jpg or
+    .../<id>/content.
+
+    The LAST id wins: every key starts ``users/<user id>/…``, so reading the first one
+    would label every asset with the account's user id."""
+    path = urlparse(value or "").path or value or ""
+    ids = [segment for segment in path.split("/") if UUID_RE.match(segment)]
+    return ids[-1] if ids else None
+
+
+def _conversation_parent_id(asset: dict[str, Any], gen: dict[str, Any], is_producer: bool) -> str | None:
+    """What this asset was generated FROM, preferring the asset's own lineage.
+
+    ``auxKeys.input_assets`` is stamped per asset, so it stays correct on a turn that
+    emitted several images at once; the turn-level mediaGenInput only speaks for the
+    asset that turn produced. Older/edit-mode assets carry the source as a URL instead."""
+    aux = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    candidates = _aux_id_list(aux, "input_assets")
+    if not candidates and is_producer:
+        inputs = gen.get("inputAssets")
+        if isinstance(inputs, list):
+            candidates = [str(value) for value in inputs if isinstance(value, (str, int))]
+    if not candidates:
+        references = _aux_id_list(aux, "image_references")
+        reference = aux.get("image_reference")
+        if isinstance(reference, str) and reference:
+            references.append(reference)
+        candidates = [found for found in (_asset_id_in_url(url) for url in references) if found]
+    item_id = str(asset.get("assetId") or "")
+    return next((str(value) for value in candidates if value and str(value) != item_id), None)
+
+
+def extract_conversation_items(responses_json: Any) -> list[dict[str, Any]]:
+    """One media record per asset in an Imagine conversation's chat responses.
+
+    An asset is attached to the turn that PRODUCED it (``asset.responseId`` matches the
+    response) and again to every later turn that merely feeds it back in as input, so the
+    producing turn wins — it's the one carrying the prompt, model and inputs. Assets that
+    only ever appear as input are still archived (that's how an uploaded reference image,
+    which no turn produced, gets in) just without a prompt of their own."""
+    responses = responses_json.get("responses") if isinstance(responses_json, dict) else None
+    if not isinstance(responses, list):
+        return []
+    out: dict[str, dict[str, Any]] = {}
+    produced: set[str] = set()
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        gen = _media_gen_input(response)
+        produced_here = False
+        assets = response.get("fileAttachmentAssetMetadata")
+        for asset in assets or []:
+            if not isinstance(asset, dict) or asset.get("isDeleted"):
+                continue
+            item_id = str(asset.get("assetId") or "")
+            key = asset.get("key")
+            if not item_id or not isinstance(key, str) or not key:
+                continue
+            response_id = response.get("responseId")
+            is_producer = bool(response_id) and asset.get("responseId") == response_id
+            if item_id in produced or (item_id in out and not is_producer):
+                continue
+            # Agent mode leaves mediaGenInput empty and puts the prompt on the asset's
+            # summary instead; the conversational edit flow does the reverse.
+            prompt = (gen.get("prompt") if is_producer else None) or asset.get("summary") or ""
+            model = (gen.get("modelName") or response.get("model")) if is_producer else None
+            out[item_id] = {
+                "id": item_id,
+                "prompt": prompt,
+                "created_at": asset.get("createTime"),
+                "createdAt": asset.get("createTime"),
+                "mime_type": asset.get("mimeType"),
+                "model": model,
+                "parent_id": _conversation_parent_id(asset, gen, is_producer),
+                "source_url": GROK_ASSETS_BASE + key.lstrip("/"),
+                "width": asset.get("width"),
+                "height": asset.get("height"),
+            }
+            if is_producer:
+                produced.add(item_id)
+                produced_here = True
+        # Turns from before Grok attached asset metadata name their output as a bare
+        # storage key in generatedImageUrls instead. Only consulted when the turn
+        # attached nothing itself, so a modern turn can't be counted twice.
+        if not produced_here:
+            # A turn whose generation was moderated away still reports a
+            # generatedImageUrls path, but Grok never stored the file (that URL 404s) and
+            # never listed it as an attachment. Requiring the id to also appear in
+            # fileAttachments keeps those dead links out of the archive — otherwise every
+            # sync would retry them forever.
+            attached = {
+                str(value)
+                for key in ("fileAttachments", "fileUris")
+                for value in (response.get(key) or [])
+                if isinstance(value, (str, int))
+            }
+            for value in response.get("generatedImageUrls") or []:
+                if not isinstance(value, str) or not value:
+                    continue
+                url = value if value.startswith("http") else GROK_ASSETS_BASE + value.lstrip("/")
+                item_id = _asset_id_in_url(url)
+                if not item_id or item_id not in attached or item_id in produced:
+                    continue
+                inputs = gen.get("inputAssets")
+                parents = [str(v) for v in inputs if isinstance(v, (str, int))] if isinstance(inputs, list) else []
+                out[item_id] = {
+                    "id": item_id,
+                    "prompt": gen.get("prompt") or "",
+                    "created_at": response.get("createTime"),
+                    "createdAt": response.get("createTime"),
+                    "mime_type": None,
+                    "model": gen.get("modelName") or response.get("model"),
+                    "parent_id": next((p for p in parents if p and p != item_id), None),
+                    "source_url": url,
+                    "width": response.get("generatedImageWidth"),
+                    "height": response.get("generatedImageHeight"),
+                }
+                produced.add(item_id)
+    return list(out.values())
 
 
 def list_grok_canvases(client: httpx.Client, auth_spec: RequestSpec) -> list[tuple[str, str]]:
@@ -962,6 +1177,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--grok-conversations",
+        nargs="*",
+        metavar="CONVERSATION_ID",
+        default=None,
+        help=(
+            "Download media from Grok Imagine conversations (the v2 chain: /imagine/post/<id>"
+            "?conversation=<id>). With no IDs, archives every Imagine conversation on the account."
+        ),
+    )
+    parser.add_argument(
         "--grok-posts",
         nargs="+",
         metavar="POST_ID",
@@ -1005,6 +1230,8 @@ def main() -> None:
 
         if args.grok_posts is not None:
             saved_count = archive_posts(client, auth_spec, media_spec, by_id, args)
+        elif args.grok_conversations is not None:
+            saved_count = archive_conversations(client, auth_spec, media_spec, by_id, args)
         elif args.grok_agents is not None:
             saved_count = archive_agent_canvases(client, auth_spec, media_spec, by_id, args)
         else:
@@ -1069,6 +1296,62 @@ def archive_posts(
             continue
         items = extract_grok_media_items({"posts": [post]})
         print(f"post {post_id}: {len(items)} media item(s)")
+        for raw in items:
+            if args.refresh_metadata:
+                saved_count += patch_existing_record(raw, by_id)
+                continue
+            if process_item(client, media_spec, raw, by_id, args):
+                saved_count += 1
+                if args.quiet and saved_count % 100 == 0:
+                    print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
+    return saved_count
+
+
+def normalize_conversation_id(value: str) -> str:
+    """Accept a bare conversation id or any /imagine URL that names one.
+
+    Grok's share links point at a post and carry the conversation in the query
+    (``/imagine/post/<post id>?conversation=<conversation id>``), so the query wins over
+    the path — the last path segment there is the post, not the conversation."""
+    value = value.strip()
+    if "/" not in value and "?" not in value:
+        return value
+    parsed = urlparse(value)
+    query = dict(parse_qsl(parsed.query))
+    conversation = query.get("conversation") or query.get("conversationId")
+    if conversation:
+        return conversation
+    return (parsed.path or value).rstrip("/").rsplit("/", 1)[-1]
+
+
+def archive_conversations(
+    client: httpx.Client,
+    auth_spec: RequestSpec,
+    media_spec: RequestSpec,
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> int:
+    """Walk Imagine conversations — the v2 generation chain — and archive every asset.
+
+    This is the only route left to media made in the new Imagine UI: it never lands in
+    the favorites list the ``download`` step reads, and post/get reports no children for
+    it (see GROK_CHAT_CONVERSATIONS_ENDPOINT)."""
+    if args.grok_conversations:
+        requested = [normalize_conversation_id(value) for value in args.grok_conversations]
+        conversations = [(conv_id, conv_id) for conv_id in requested]
+    else:
+        conversations = list_grok_conversations(client, auth_spec, args.max_pages)
+
+    print(f"found {len(conversations)} imagine conversation(s)")
+    saved_count = 0
+    for conv_id, title in conversations:
+        try:
+            data = request_json_with_backoff(client, grok_conversation_responses_spec(auth_spec, conv_id))
+            items = extract_conversation_items(data)
+        except Exception as exc:  # noqa: BLE001 - one unreadable conversation must not end the sync
+            print(f"conversation {conv_id}: failed ({exc})")
+            continue
+        print(f"conversation {conv_id} '{title}': {len(items)} media items")
         for raw in items:
             if args.refresh_metadata:
                 saved_count += patch_existing_record(raw, by_id)

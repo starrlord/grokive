@@ -867,6 +867,7 @@ python grokive.py check                      # verify dependencies
 # create grok_auth.txt (see "Capture Your Grok Auth Request" above)
 python grokive.py download                   # favorites
 python grokive.py agents                     # optional: Agent canvases
+python grokive.py conversations              # Imagine conversations (v2 chains)
 python grokive.py index                      # thumbnails + index.db
 cd web; npm install; npm run build; cd ..    # build the SPA (one-time / after UI changes)
 python server.py                             # then open http://localhost:8080
@@ -882,6 +883,7 @@ python grokive.py check
 # create grok_auth.txt (see above)
 python grokive.py download
 python grokive.py agents
+python grokive.py conversations
 python grokive.py index
 ( cd web && npm install && npm run build )
 python server.py
@@ -894,10 +896,19 @@ or `AUTH_DISABLED=true`, before starting if you prefer.
 ### Downloading
 
 `python grokive.py download` fetches favorites; `python grokive.py agents` fetches Agent
-canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs). Both write into the
+canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs);
+`python grokive.py conversations` fetches Imagine conversations. All write into the
 sharded `media/images/` and `media/videos/` layout (files bucketed by a hash of their id) plus
 `metadata.json`, and skip anything already downloaded. Shortcut: `python grokive.py all` runs
 download → index in one go.
+
+**Imagine v2 media only arrives via `conversations`.** Grok's newer Imagine UI keeps each
+generation chain in a conversation: nothing lands in the favorites list `download` reads, and
+the posts report no children of their own. `conversations` walks every Imagine conversation on
+the account (or just the ones you name — a bare id, or the `/imagine/post/<id>?conversation=<id>`
+URL straight from the address bar) and archives every image and video in the chain, wiring each
+one's `parent_id` to the asset it was generated from so the lineage survives. Sync runs this
+step automatically after `agents`.
 
 To grab a single post rather than your whole library, `python grokive.py post <id-or-url> [...]`
 downloads one or more posts by id or `/imagine/post/<id>` link (the root media plus its
@@ -910,7 +921,7 @@ If you just want your media as local files — no browsing interface — you onl
 downloader:
 
 ```powershell
-python grokive.py download      # add `python grokive.py agents` for canvases
+python grokive.py download      # add `agents` for canvases, `conversations` for v2 chains
 ```
 
 That leaves your images/videos under `media/` and a `metadata.json` describing them, and

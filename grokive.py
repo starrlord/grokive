@@ -97,6 +97,18 @@ def main() -> int:
     agents.add_argument("canvas_ids", nargs="*", help="Specific canvas IDs/URLs; omit to archive all canvases.")
     agents.add_argument("--verbose", action="store_true")
 
+    conversations = sub.add_parser(
+        "conversations",
+        help="Download media from Grok Imagine conversations (the v2 generation chain).",
+    )
+    conversations.add_argument("--curl", default=default_curl())
+    conversations.add_argument(
+        "conversation_ids",
+        nargs="*",
+        help="Specific conversation IDs or /imagine/post/<id>?conversation=<id> URLs; omit for all.",
+    )
+    conversations.add_argument("--verbose", action="store_true")
+
     post = sub.add_parser("post", help="Download specific Grok Imagine posts, including original/base and child media.")
     post.add_argument("--curl", default=default_curl())
     post.add_argument("post_ids", nargs="+", help="Post IDs or /imagine/post/<id> URLs.")
@@ -130,6 +142,15 @@ def main() -> int:
             sys.executable, script("gdownloader.py"),
             "--curl", args.curl,
             "--grok-agents", *args.canvas_ids,
+        ]
+        if not args.verbose:
+            cmd.append("--quiet")
+        return run(cmd)
+    if args.command == "conversations":
+        cmd = [
+            sys.executable, script("gdownloader.py"),
+            "--curl", args.curl,
+            "--grok-conversations", *args.conversation_ids,
         ]
         if not args.verbose:
             cmd.append("--quiet")

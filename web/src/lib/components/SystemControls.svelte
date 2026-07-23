@@ -138,6 +138,7 @@
         return [n && `${n} items`, up && `${up} HD`].filter(Boolean).join(' · ');
       }
       case 'agents': { const c = grab(/found (\d+) agent canvas/); return c ? `${c} canvas` : ''; }
+      case 'conversations': { const c = grab(/found (\d+) imagine conversation/); return c ? `${c} chats` : ''; }
       case 'index': {
         const rows = grab(/index\.db: (\d[\d,]*) media rows/);
         // New thumbnails == new media items (each fresh download arrives without a

@@ -3,8 +3,9 @@
 Serves the incremental gallery and exposes two actions used by the toolbar that is
 injected into the page:
 
-* **Sync**   -> runs ``grokive.py reindex`` -> ``download`` -> ``agents`` -> ``index``
-               in a background thread, streaming output to a rolling log.
+* **Sync**   -> runs ``grokive.py reindex`` -> ``download`` -> ``agents`` ->
+               ``conversations`` -> ``index`` in a background thread, streaming output
+               to a rolling log.
 * **Config** -> stores one or more named Grok accounts, each a captured browser
                cURL (``grok_accounts.json`` registry + per-account session files),
                on the persistent data volume.
@@ -474,6 +475,10 @@ def _sync_worker() -> None:
             acct_rc = _run_step(f"download{tag}", [py, cli, "download", "--curl", curl_rel])
             if acct_rc == 0:
                 acct_rc = _run_step(f"agents{tag}", [py, cli, "agents", "--curl", curl_rel])
+            if acct_rc == 0:
+                # Imagine v2 media never reaches the favorites list "download" reads, and
+                # its chain isn't on the post — it only exists in the conversation.
+                acct_rc = _run_step(f"conversations{tag}", [py, cli, "conversations", "--curl", curl_rel])
             if acct_rc != 0:
                 failures += 1
                 rc = acct_rc
