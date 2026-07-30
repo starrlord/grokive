@@ -1121,34 +1121,38 @@
     return panel;
   }
 
-  // Anchor the panel to the toolbar: open upward when there's room above (the
-  // default bottom-right home), else downward. Right edges align.
-  function positionRefsPanel() {
-    if (!refsPanelEl || !toolbarEl) return;
+  // Anchor a floating panel to the toolbar: open upward when there's room above (the
+  // default bottom-right home), else downward. Right edges align. Shared by the
+  // References and Find panels — they're anchored identically.
+  function positionPanel(panel) {
+    if (!panel || !toolbarEl) return;
     const r = toolbarEl.getBoundingClientRect();
     const margin = 8;
     const panelW = Math.min(380, window.innerWidth - margin * 2);
     let left = Math.round(r.right - panelW);            // align right edges with the bar
     if (left + panelW > window.innerWidth - margin) left = window.innerWidth - margin - panelW;
     if (left < margin) left = margin;                   // never clip off either edge
-    refsPanelEl.style.width = panelW + 'px';
-    refsPanelEl.style.left = left + 'px';
-    refsPanelEl.style.right = 'auto';
+    panel.style.width = panelW + 'px';
+    panel.style.left = left + 'px';
+    panel.style.right = 'auto';
     const spaceAbove = r.top - margin * 2;
     const spaceBelow = window.innerHeight - r.bottom - margin * 2;
     if (spaceAbove >= 260 || spaceAbove >= spaceBelow) {
-      refsPanelEl.style.bottom = (window.innerHeight - r.top + margin) + 'px';
-      refsPanelEl.style.top = 'auto';
-      refsPanelEl.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceAbove) + 'px';
+      panel.style.bottom = (window.innerHeight - r.top + margin) + 'px';
+      panel.style.top = 'auto';
+      panel.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceAbove) + 'px';
     } else {
-      refsPanelEl.style.top = (r.bottom + margin) + 'px';
-      refsPanelEl.style.bottom = 'auto';
-      refsPanelEl.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceBelow) + 'px';
+      panel.style.top = (r.bottom + margin) + 'px';
+      panel.style.bottom = 'auto';
+      panel.style.maxHeight = Math.min(window.innerHeight * 0.8, spaceBelow) + 'px';
     }
   }
 
+  function positionRefsPanel() { positionPanel(refsPanelEl); }
+
   function openRefsPanel() {
     if (!refsPanelEl) buildRefsPanel();
+    closeFindPanel();   // both anchor to the same spot — only one at a time
     positionRefsPanel();
     refsPanelEl.classList.add('gks-refs-open');
     loadRefCollectionsView();
@@ -1176,6 +1180,339 @@
     try { if (refsPreviewEl && refsPreviewEl.parentNode) refsPreviewEl.parentNode.removeChild(refsPreviewEl); } catch (e) { /* noop */ }
     refsPreviewEl = refsPreviewImg = null;
     refsPreviewActive = false;
+  }
+
+  // ---- Find panel (search every saved prompt → insert or copy) ----------------
+  // Searches your WHOLE Grokive prompt library (all folders) from grok.com. The
+  // background holds the cached library and does the matching, so typing costs one
+  // small message per keystroke instead of re-shipping the library. Click a result
+  // to drop the full prompt into the page's input; 📋 copies it instead.
+  let findPanelEl = null;
+  let findBodyEl = null;
+  let findInputEl = null;
+  let findStatusEl = null;
+  let findMoreEl = null;
+  let findTimer = null;
+  let findSeq = 0;             // guards against an older reply overwriting a newer one
+  let findOffset = 0;
+  let findTotal = 0;
+  let findTerms = [];
+  const FIND_PAGE = 20;
+  const FIND_DEBOUNCE_MS = 180;
+
+  function findIsOpen() {
+    return !!(findPanelEl && findPanelEl.classList.contains('gks-find-open'));
+  }
+
+  function setFindStatus(message, kind) {
+    if (!findStatusEl) return;
+    findStatusEl.textContent = message || '';
+    findStatusEl.classList.toggle('gks-refs-status-err', kind === 'error');
+    findStatusEl.style.display = message ? '' : 'none';
+  }
+
+  // Wrap matched terms in <mark>, built from DOM nodes so prompt text can never
+  // inject markup into the page.
+  function findHighlightInto(node, text, terms) {
+    node.textContent = '';
+    if (!terms || !terms.length) { node.textContent = text; return; }
+    const lower = text.toLowerCase();
+    const ranges = [];
+    for (const t of terms) {
+      let i = lower.indexOf(t);
+      while (i >= 0 && ranges.length < 300) {
+        ranges.push([i, i + t.length]);
+        i = lower.indexOf(t, i + t.length);
+      }
+    }
+    if (!ranges.length) { node.textContent = text; return; }
+    ranges.sort((a, b) => a[0] - b[0]);
+    const merged = [];
+    for (const r of ranges) {
+      const last = merged[merged.length - 1];
+      if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+      else merged.push([r[0], r[1]]);
+    }
+    const frag = document.createDocumentFragment();
+    let pos = 0;
+    for (const pair of merged) {
+      if (pair[0] > pos) frag.appendChild(document.createTextNode(text.slice(pos, pair[0])));
+      const m = document.createElement('mark');
+      m.textContent = text.slice(pair[0], pair[1]);
+      frag.appendChild(m);
+      pos = pair[1];
+    }
+    if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+    node.appendChild(frag);
+  }
+
+  // Rows come back preview-capped (a saved prompt may be up to 100K chars), so
+  // resolve the real text by id before inserting or copying.
+  async function findFullText(r) {
+    if (!r.truncated) return r.text;
+    const got = await send({ type: 'getPrompt', id: r.id });
+    if (got.ok && got.data && got.data.prompt) return got.data.prompt.text;
+    return r.text;
+  }
+
+  async function insertFindResult(r, row) {
+    setBusy(row, true);
+    const text = await findFullText(r);
+    setBusy(row, false);
+    if (!text) { toast('That prompt is empty.', 'error'); return; }
+    const field = findPromptField();
+    if (field && setFieldText(field, text)) {
+      try { field.focus(); } catch (e) { /* noop */ }
+      closeFindPanel();
+      toast('Prompt inserted', 'ok');
+      return;
+    }
+    const copy = await send({ type: 'copyToClipboard', text: text });
+    if (copy.ok) toast('No input found — copied to clipboard', 'ok');
+    else toast('No input found and copy failed.', 'error');
+  }
+
+  async function copyFindResult(r, btn) {
+    setBusy(btn, true);
+    const res = await send({ type: 'copyPrompt', id: r.id, text: r.text });
+    setBusy(btn, false);
+    if (res.ok) toast('Prompt copied ✓', 'ok');
+    else toast(res.error || 'Copy failed.', 'error');
+  }
+
+  // One toggle for both entry points (the text and the ⌄), so the caret's state
+  // can never drift from the row's.
+  function toggleFindRow(row) {
+    const open = row.classList.toggle('gks-find-open-row');
+    const caret = row.querySelector('.gks-find-mini-expand');
+    if (caret) {
+      caret.setAttribute('aria-expanded', open ? 'true' : 'false');
+      caret.title = open ? 'Collapse' : 'Expand / collapse the full prompt';
+    }
+  }
+
+  function buildFindRow(r) {
+    const row = document.createElement('div');
+    row.className = 'gks-find-row';
+
+    // Clicking the text READS it (the row is clamped to 3 lines) — inserting is the
+    // explicit Insert button, so skimming a long prompt can't fire off a page edit.
+    const body = document.createElement('div');
+    body.className = 'gks-find-text';
+    body.title = 'Click to expand / collapse · Insert puts it in the prompt field';
+    findHighlightInto(body, r.text + (r.truncated ? '…' : ''), findTerms);
+    body.addEventListener('click', () => toggleFindRow(row));
+
+    const foot = document.createElement('div');
+    foot.className = 'gks-find-foot';
+
+    const meta = document.createElement('span');
+    meta.className = 'gks-find-meta';
+    const bits = [r.folder || 'Unfiled'];
+    if (r.starred) bits.push('★');
+    if (r.truncated) bits.push(r.length.toLocaleString() + ' chars');
+    meta.textContent = bits.join(' · ');
+    if (r.tags && r.tags.length) meta.title = 'Tags: ' + r.tags.join(', ');
+
+    const expand = document.createElement('button');
+    expand.type = 'button';
+    expand.className = 'gks-find-mini gks-find-mini-expand';
+    expand.textContent = '⌄';
+    expand.title = 'Expand / collapse the full prompt';
+    expand.setAttribute('aria-expanded', 'false');
+    expand.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleFindRow(row);
+    });
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'gks-find-mini';
+    copy.textContent = '📋';
+    copy.title = 'Copy the full prompt to the clipboard';
+    copy.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      copyFindResult(r, copy);
+    });
+
+    const insert = document.createElement('button');
+    insert.type = 'button';
+    insert.className = 'gks-find-mini gks-find-mini-go';
+    insert.textContent = 'Insert';
+    insert.title = 'Put this prompt into the Grok input field';
+    insert.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      insertFindResult(r, row);
+    });
+
+    foot.appendChild(meta);
+    foot.appendChild(expand);
+    foot.appendChild(copy);
+    foot.appendChild(insert);
+
+    row.appendChild(body);
+    row.appendChild(foot);
+    return row;
+  }
+
+  function clearFindResults() {
+    if (findBodyEl) findBodyEl.innerHTML = '';
+    if (findMoreEl) findMoreEl.style.display = 'none';
+    findOffset = 0;
+    findTotal = 0;
+    findTerms = [];
+  }
+
+  async function runFind(append) {
+    if (!findPanelEl) return;
+    const query = (findInputEl.value || '').trim();
+    if (!query) {
+      clearFindResults();
+      setFindStatus('Type to search every saved prompt.');
+      return;
+    }
+
+    const seq = ++findSeq;
+    const offset = append ? findOffset : 0;
+    if (!append) setFindStatus('Searching…');
+    if (append && findMoreEl) findMoreEl.disabled = true;
+
+    const res = await send({
+      type: 'searchPrompts',
+      query: query,
+      folder: '__all',          // the whole library, every folder
+      offset: offset,
+      limit: FIND_PAGE
+    });
+
+    // Re-enable BEFORE the staleness guard, or a keystroke landing mid-request
+    // would leave "Show more" stuck disabled.
+    if (findMoreEl) findMoreEl.disabled = false;
+    if (seq !== findSeq || !findPanelEl) return;   // superseded, or the panel is gone
+
+    if (!res.ok) {
+      clearFindResults();
+      setFindStatus(res.error || 'Search failed.', 'error');
+      return;
+    }
+
+    const data = res.data || {};
+    const rows = Array.isArray(data.results) ? data.results : [];
+    findTerms = Array.isArray(data.terms) ? data.terms : [];
+    findTotal = (typeof data.total === 'number') ? data.total : rows.length;
+
+    if (!append) findBodyEl.innerHTML = '';
+    for (const r of rows) findBodyEl.appendChild(buildFindRow(r));
+    findOffset = offset + rows.length;
+
+    if (!findTotal) setFindStatus('No matches.');
+    else setFindStatus(findOffset + ' of ' + findTotal);
+    if (findMoreEl) findMoreEl.style.display = (findOffset < findTotal) ? '' : 'none';
+    if (!append) findBodyEl.scrollTop = 0;
+  }
+
+  function scheduleFind() {
+    if (findTimer) clearTimeout(findTimer);
+    findTimer = setTimeout(() => { findTimer = null; runFind(false); }, FIND_DEBOUNCE_MS);
+  }
+
+  function buildFindPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'gks-refs gks-find';   // reuse the References panel chrome
+
+    const head = document.createElement('div');
+    head.className = 'gks-refs-head';
+
+    const title = document.createElement('span');
+    title.className = 'gks-refs-title';
+    title.textContent = 'Find a prompt';
+
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'gks-refs-x';
+    x.title = 'Close';
+    x.textContent = '×';
+    x.addEventListener('click', closeFindPanel);
+
+    head.appendChild(title);
+    head.appendChild(x);
+
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'gks-find-search';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'gks-find-input';
+    input.placeholder = 'Search all prompts…';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('spellcheck', 'false');
+    input.addEventListener('input', scheduleFind);
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();                      // keep grok.com's own hotkeys out of it
+      if (ev.key === 'Escape') { ev.preventDefault(); closeFindPanel(); }
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (findTimer) { clearTimeout(findTimer); findTimer = null; }
+        runFind(false);
+      }
+    });
+    searchWrap.appendChild(input);
+
+    const body = document.createElement('div');
+    body.className = 'gks-refs-body gks-find-body';
+
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'gks-find-more';
+    more.textContent = 'Show more';
+    more.style.display = 'none';
+    more.addEventListener('click', () => runFind(true));
+
+    const status = document.createElement('div');
+    status.className = 'gks-refs-status';
+    status.style.display = 'none';
+
+    panel.appendChild(head);
+    panel.appendChild(searchWrap);
+    panel.appendChild(body);
+    panel.appendChild(more);
+    panel.appendChild(status);
+
+    findPanelEl = panel;
+    findBodyEl = body;
+    findInputEl = input;
+    findStatusEl = status;
+    findMoreEl = more;
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function openFindPanel() {
+    if (!findPanelEl) buildFindPanel();
+    closeRefsPanel();   // both anchor to the same spot — only one at a time
+    positionPanel(findPanelEl);
+    findPanelEl.classList.add('gks-find-open');
+    if (!(findInputEl.value || '').trim()) setFindStatus('Type to search every saved prompt.');
+    try { findInputEl.focus(); findInputEl.select(); } catch (e) { /* noop */ }
+  }
+
+  function closeFindPanel() {
+    if (findPanelEl) findPanelEl.classList.remove('gks-find-open');
+    if (findTimer) { clearTimeout(findTimer); findTimer = null; }
+    findSeq++;   // abandon any in-flight reply
+  }
+
+  function toggleFindPanel() {
+    if (findIsOpen()) closeFindPanel();
+    else openFindPanel();
+  }
+
+  function destroyFindPanel() {
+    if (findTimer) { clearTimeout(findTimer); findTimer = null; }
+    try { if (findPanelEl && findPanelEl.parentNode) findPanelEl.parentNode.removeChild(findPanelEl); } catch (e) { /* noop */ }
+    findPanelEl = findBodyEl = findInputEl = findStatusEl = findMoreEl = null;
+    findOffset = 0;
+    findTotal = 0;
+    findTerms = [];
   }
 
   // Saved position lives under its OWN storage key (not `settings`, which the
@@ -1262,10 +1599,13 @@
     const btnSave = mkBtn('💾', 'Save the current prompt to your saveFolder', doSave);
     const btnStar = mkBtn('⭐', 'Save & star the current prompt (Grokive favorites)', doStar);
     btnStar.classList.add('gks-btn-star');
+    const btnFind = mkBtn('🔎', 'Search all your saved prompts — insert or copy one', () => toggleFindPanel());
+    btnFind.classList.add('gks-btn-find');
     const btnRefs = mkBtn('📎', 'Reference images — browse collections & copy one to paste into Grok', () => toggleRefsPanel());
     btnRefs.classList.add('gks-btn-refs');
 
     group.appendChild(btnRandom);
+    group.appendChild(btnFind);
     group.appendChild(btnEnhance);
     group.appendChild(btnSave);
     group.appendChild(btnStar);
@@ -1282,6 +1622,7 @@
       ev.stopPropagation();
       bar.classList.add('gks-hidden');
       closeRefsPanel();
+      closeFindPanel();
     });
 
     // --- Drag-to-move (the handle is the grip) -------------------------------
@@ -1301,7 +1642,8 @@
         bar.classList.add('gks-dragging');
         bar.style.right = 'auto';
         bar.style.bottom = 'auto';
-        closeRefsPanel();   // the panel is anchored to the bar; don't leave it stranded
+        closeRefsPanel();   // the panels are anchored to the bar; don't leave one stranded
+        closeFindPanel();
       }
       bar.style.left = (startLeft + dx) + 'px';
       bar.style.top = (startTop + dy) + 'px';
@@ -1338,7 +1680,8 @@
       ev.stopPropagation();
       if (justDragged) return;           // this "click" was just the end of a drag
       bar.classList.toggle('gks-collapsed');
-      closeRefsPanel();                  // the 📎 button is hidden while collapsed
+      closeRefsPanel();                  // the 📎/🔎 buttons are hidden while collapsed
+      closeFindPanel();
       // Width changes on collapse/expand — re-clamp a custom-positioned bar so it
       // can't overflow off-screen after growing.
       if (bar.style.left && bar.style.left !== 'auto') {
@@ -1365,6 +1708,7 @@
   function removeToolbar() {
     stopQuota();
     destroyRefsPanel();
+    destroyFindPanel();
     try {
       if (toolbarEl && toolbarEl.parentNode) toolbarEl.parentNode.removeChild(toolbarEl);
     } catch (e) { /* noop */ }
@@ -1403,6 +1747,7 @@
         clampToViewport(toolbarEl);
       }
       if (refsIsOpen()) positionRefsPanel();
+      if (findIsOpen()) positionPanel(findPanelEl);
     });
   } catch (e) { /* noop */ }
 
@@ -1416,8 +1761,15 @@
       if (toolbarEl && toolbarEl.contains(ev.target)) return;
       closeRefsPanel();
     }, true);
+    document.addEventListener('pointerdown', (ev) => {
+      if (!findIsOpen()) return;
+      if (findPanelEl.contains(ev.target)) return;
+      if (toolbarEl && toolbarEl.contains(ev.target)) return;
+      closeFindPanel();
+    }, true);
     document.addEventListener('keydown', (ev) => {
       if (ev.key === 'Escape' && refsIsOpen()) closeRefsPanel();
+      if (ev.key === 'Escape' && findIsOpen()) closeFindPanel();
     });
     // Quota popover: close on an outside tap. Registered ONCE here (not inside
     // buildQuota) so a toolbar remount can't leak a stale, detached handler.

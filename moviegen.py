@@ -70,6 +70,13 @@ TOP_CANDIDATES_K = 3      # top-scoring clips to choose among when exploring
 STAGE_WEIGHTS = {"analyzing_audio": 0.10, "analyzing_motion": 0.45,
                  "planning": 0.05, "rendering": 0.40}
 _STAGE_ORDER = ["analyzing_audio", "analyzing_motion", "planning", "rendering"]
+# Motion Match Cut has its own stages: no audio analysis (the song is optional and
+# never sets the cut points), plus a "matching" stage that scores every ordered clip
+# pair's best seam. Kept as a SEPARATE table — _overall() takes it as an argument
+# rather than the module dicts being mutated, so the beat pipeline is untouched.
+MATCHCUT_STAGE_WEIGHTS = {"analyzing_motion": 0.45, "matching": 0.15,
+                          "planning": 0.05, "rendering": 0.35}
+MATCHCUT_STAGE_ORDER = ["analyzing_motion", "matching", "planning", "rendering"]
 
 # Presets bundle the analysis mode, cut rhythm, transition policy, framing and
 # per-shot motion. "classic" is the original v1 behaviour, byte-for-byte — it
@@ -1852,14 +1859,24 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
         else:
             vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                   f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={fps},setsar=1")
-        if playback_speed < 1.0:
-            # Real slow-mo: stretch presentation timestamps, then the fps filter in the
-            # base chain resamples the stretched stream to constant output fps (so it's
-            # smooth, not duplicate-frame stutter). MUST precede that fps= token, so
-            # prepend it to the whole chain. `-t {dur}` below caps the OUTPUT at dur, so
-            # ffmpeg reads only dur*speed of source (always available — slow-mo pulls
-            # LESS source than a normal cut) and emits exactly dur seconds. The timeline
-            # slot length is therefore unchanged; only the footage inside it slows.
+        if playback_speed != 1.0:
+            # Real retime: stretch/compress presentation timestamps, then the fps filter
+            # in the base chain resamples to constant output fps. MUST precede that fps=
+            # token, so prepend it to the whole chain. `-t {dur}` below caps the OUTPUT
+            # at dur, so ffmpeg reads dur*speed of source and emits exactly dur seconds.
+            # The timeline slot length is therefore unchanged; only the footage inside
+            # it retimes.
+            #
+            # NOTE the fps filter DUPLICATES/DROPS frames — it does not interpolate. At
+            # 24fps source into 30fps output the pulldown already holds 1 frame in 5;
+            # measured duplicate fraction is exactly max(0, 1 - src_fps*speed/out_fps),
+            # so 0.80 is the practical judder floor and out_fps/src_fps (1.25 here) is a
+            # clean 1:1. Motion Match Cut's speed solve clamps to that measured band.
+            #
+            # speed > 1.0 reads MORE source than the slot length (slow-mo reads less, so
+            # the original slow-mo path never needed a headroom check). Callers emitting
+            # speed > 1.0 MUST ensure in_point + duration*speed <= clip duration —
+            # matchcut.solve_speeds does this explicitly.
             vf = f"setpts=PTS/{playback_speed:.4f}," + vf
         if zf:
             vf += "," + zf
@@ -1886,9 +1903,11 @@ def _render_segment(entry: EDLEntry, out: Path, *, width: int, height: int,
 
     # zoompan is CPU-only, cover-framing needs a CPU centre-crop, and a grade/flash
     # is a CPU-only filter too — any of them rules out the GPU path. Only a plain fit
-    # hard-cut shot with no extra filters can stay on the GPU.
+    # hard-cut shot with no extra filters can stay on the GPU. ANY retime must stay on
+    # the CPU: _gpu_cmd has no setpts clause, so admitting speed >= 1.0 here used to
+    # make a speed-up silently render at real time with no error at all.
     if (gpu and not zf and fill != "cover" and not grade and flash <= 0
-            and shake <= 0 and rgb_split <= 0 and playback_speed >= 1.0):
+            and shake <= 0 and rgb_split <= 0 and playback_speed == 1.0):
         try:
             _run(_gpu_cmd(), f"render segment @ {entry.place_at:.2f}s (gpu)")
             return
@@ -2038,6 +2057,63 @@ def assemble_transitions(segments: list[Path], durations: list[float],
              "mux song over transitions")
 
 
+# Motion Match Cut with NO song: keep the source clips' own audio rather than
+# rendering silent. Every shot contributes its own audio, in cut order.
+AUDIO_EDGE_FADE = 0.04     # s; tiny fade each end so a hard cut doesn't click
+
+
+def _clip_audio_track(entries: list[EDLEntry], work_dir: Path, out_path: Path,
+                      *, ar: int = 48000) -> int:
+    """Build one audio track exactly as long as the timeline, from each shot's OWN
+    audio. Returns how many shots contributed real audio — 0 means nothing had any,
+    so the caller should ship the video silent rather than mux a dead track.
+
+    Each piece is forced to EXACTLY ``entry.duration`` via apad + an output ``-t``, so
+    the track tiles the timeline with no drift. A retimed shot gets ``atempo`` at the
+    same factor its video got from setpts, keeping picture and sound locked; the free
+    speed band [0.80, 1.25] sits well inside atempo's [0.5, 2.0] range, so a single
+    filter always suffices. A clip with no audio stream (or an undecodable one)
+    silently contributes silence for its slot."""
+    parts: list[Path] = []
+    kept = 0
+    for i, e in enumerate(entries):
+        piece = work_dir / f"aud_{i:04d}.wav"
+        af = []
+        if abs(e.playback_speed - 1.0) > 1e-3:
+            af.append(f"atempo={e.playback_speed:.4f}")
+        af += [f"aresample={ar}", "apad",
+               f"afade=t=in:st=0:d={AUDIO_EDGE_FADE}",
+               f"afade=t=out:st={max(0.0, e.duration - AUDIO_EDGE_FADE):.4f}"
+               f":d={AUDIO_EDGE_FADE}"]
+        made = False
+        try:
+            _run(["ffmpeg", "-y", "-v", "error",
+                  "-ss", f"{e.head_offset + e.in_point:.4f}", "-i", e.src_path,
+                  "-vn", "-map", "0:a:0", "-af", ",".join(af),
+                  "-t", f"{e.duration:.4f}", "-ac", "2", "-ar", str(ar),
+                  "-c:a", "pcm_s16le", str(piece)], f"clip audio {i}")
+            made = True
+            kept += 1
+        except RuntimeError:
+            pass                      # no audio stream / undecodable -> silence below
+        if not made:
+            _run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                  "-i", f"anullsrc=channel_layout=stereo:sample_rate={ar}",
+                  "-t", f"{e.duration:.4f}", "-c:a", "pcm_s16le", str(piece)],
+                 f"silence {i}")
+        parts.append(piece)
+
+    if not kept:
+        return 0
+    listfile = work_dir / "audio_concat.txt"
+    listfile.write_text("".join(
+        f"file '{str(p.resolve()).replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n"
+        for p in parts), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+          "-i", str(listfile), "-c:a", "pcm_s16le", str(out_path)], "clip audio concat")
+    return kept
+
+
 def _duck_expr(a: float, p: float, b: float, c: float, gain: float) -> str:
     """A piecewise ``volume`` gain expression (eval=frame) for one spoken window:
     full → fade DOWN over [a,p] → hold ``gain`` over [p,b] → fade UP over [b,c] →
@@ -2099,17 +2175,42 @@ def _duck_and_mux(video_path: Path, song_path: Path, windows: list[dict],
 # Orchestrator
 # --------------------------------------------------------------------------- #
 
-def _overall(stage: str, stage_progress: float) -> float:
-    """Weighted overall progress so the bar advances smoothly across stages."""
-    done = sum(STAGE_WEIGHTS[s] for s in _STAGE_ORDER[:_STAGE_ORDER.index(stage)])
-    return round(done + STAGE_WEIGHTS[stage] * _clamp(stage_progress, 0, 1), 4)
+def _overall(stage: str, stage_progress: float, order: list[str] | None = None,
+             weights: dict[str, float] | None = None) -> float:
+    """Weighted overall progress so the bar advances smoothly across stages.
+
+    ``order``/``weights`` are per-MODE so a pipeline with different stages (Motion
+    Match Cut skips audio analysis and adds a matching stage) can report honest
+    progress. They default to the beat-montage tables. NEVER mutate the module-level
+    dicts to add a stage — that silently reweights every existing preset's bar."""
+    order = order or _STAGE_ORDER
+    weights = weights or STAGE_WEIGHTS
+    done = sum(weights[s] for s in order[:order.index(stage)])
+    return round(done + weights[stage] * _clamp(stage_progress, 0, 1), 4)
 
 
-def generate(*, video_paths: list[Path], song_path: Path, options: dict,
+def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
              work_dir: Path, out_path: Path, video_encode_args: list[str],
-             hwaccel_decode: bool, progress: ProgressFn) -> dict:
+             hwaccel_decode: bool, progress: ProgressFn,
+             cache_dir: Path | None = None) -> dict:
     """Run the full pipeline. ``progress(status, overall, stage_progress, detail)``
-    is called throughout. Returns result metadata for the finished file."""
+    is called throughout. Returns result metadata for the finished file.
+
+    Two modes, selected by ``options['mode']``:
+
+      "beat" (default)  the beat-synced montage — analyse the song, plan cuts against
+                        its grid. ``song_path`` is REQUIRED.
+      "matchcut"        Motion Match Cut — splice where motion aligns across clips.
+                        ``song_path`` is OPTIONAL (None renders silent); when present
+                        it is muxed as a bed but never sets the cut points.
+
+    Both modes share the render and assembly stages verbatim — those are EDL-driven
+    and already audio-free."""
+    mode = (options.get("mode") or "beat").strip().lower()
+    if mode not in ("beat", "matchcut"):
+        mode = "beat"
+    if mode == "beat" and song_path is None:
+        raise RuntimeError("a beat montage needs a song")
     width = int(options.get("width", 1920))
     height = int(options.get("height", 1080))
     fps = int(options.get("fps", 30))
@@ -2143,39 +2244,92 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
     let_speak = bool(options.get("let_clips_speak"))
     speak_moments = options.get("speak_moments", "auto")
 
+    if mode == "matchcut":
+        # Motion Match Cut owns its own look: the seam is the effect, so every beat
+        # preset's decoration is off. Cover framing is mandatory — mixed aspect ratios
+        # destroy a match cut. Stills have no motion to match, so they never enter.
+        fill = "cover"
+        push_in = punch = flash = rgb_split = shake = 0.0
+        grade = ""
+        allow_stills = False
+        let_speak = False
+        transitions = "none"
+        stage_order, stage_weights = MATCHCUT_STAGE_ORDER, MATCHCUT_STAGE_WEIGHTS
+    else:
+        stage_order, stage_weights = _STAGE_ORDER, STAGE_WEIGHTS
+
+    def _ov(stage: str, sp: float) -> float:
+        return _overall(stage, sp, stage_order, stage_weights)
+
     # 1. audio --------------------------------------------------------------- #
-    progress("analyzing_audio", _overall("analyzing_audio", 0.0), 0.0, "Analyzing audio…")
-    grid = analyze_audio(song_path, enhanced=enhanced, beat_engine=beat_engine)
-    eng = grid.engine + (f"/{grid.device}" if grid.engine != "librosa" else "")
-    if grid.engine_note:
-        eng += f" ({grid.engine_note})"   # e.g. "librosa (madmom error: …)" — never a silent drop
-    progress("analyzing_audio", _overall("analyzing_audio", 1.0), 1.0,
-             f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM · {eng}")
+    # Match-cut mode has no beat grid at all: the song is optional and, when present,
+    # is a bed muxed at assembly — it never sets the cut points (a seam forced onto a
+    # beat loses the match; measured direction coherence lasts only ~350ms).
+    grid = None
+    if mode == "beat":
+        progress("analyzing_audio", _ov("analyzing_audio", 0.0), 0.0, "Analyzing audio…")
+        grid = analyze_audio(song_path, enhanced=enhanced, beat_engine=beat_engine)
+        eng = grid.engine + (f"/{grid.device}" if grid.engine != "librosa" else "")
+        if grid.engine_note:
+            eng += f" ({grid.engine_note})"   # e.g. "librosa (madmom error: …)" — never a silent drop
+        progress("analyzing_audio", _ov("analyzing_audio", 1.0), 1.0,
+                 f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM · {eng}")
 
     # 2. motion (the slow stage — surface per-clip progress) ----------------- #
     curves: list[MotionCurve] = []
+    descs: list = []                 # matchcut.ClipDesc, match-cut mode only
     total = len(video_paths)
-    for idx, src in enumerate(video_paths):
-        sp = (idx) / total
-        progress("analyzing_motion", _overall("analyzing_motion", sp), sp,
-                 f"Analyzing motion: clip {idx + 1} of {total}")
+    if mode == "matchcut":
+        import matchcut
+        # The server names the cache dir (it owns the data layout); fall back to a
+        # sibling of the scratch dir so a direct library call still caches.
+        if cache_dir is None and work_dir.parent.exists():
+            cache_dir = work_dir.parent / "motion_cache"
+        for idx, src in enumerate(video_paths):
+            sp = idx / total
+            progress("analyzing_motion", _ov("analyzing_motion", sp), sp,
+                     f"Analyzing motion: clip {idx + 1} of {total}")
+            try:
+                d = matchcut.load_or_analyze(str(idx), Path(src), cache_dir=cache_dir,
+                                             hwaccel_decode=hwaccel_decode)
+                if d is not None:
+                    descs.append(d)
+            except Exception:
+                pass  # skip undecodable clips; fail below only if <2 remain
+        if len(descs) < 2:
+            raise RuntimeError("fewer than 2 usable clips after motion analysis")
+        # Bound the descriptor cache now that this run's entries are freshly touched,
+        # so they're the LAST things evicted. Best-effort — never breaks a render.
         try:
-            # A still image (Picture & Video mode only) can't be decoded for motion —
-            # substitute a synthetic flat curve so the planner can place it like a clip.
-            if allow_stills and _is_image(src):
-                curve = _still_curve(str(idx), Path(src))
-            else:
-                curve = analyze_motion(str(idx), Path(src), hwaccel_decode)
-            if curve.duration > 0 and curve.samples:
-                curves.append(curve)
+            matchcut.prune_cache(cache_dir)
         except Exception:
-            pass  # skip undecodable clips; fail later only if <2 remain
-    if len(curves) < 2:
-        raise RuntimeError("fewer than 2 usable clips after motion analysis")
-    n_trimmed = sum(1 for c in curves if c.head_offset > 0)
-    progress("analyzing_motion", _overall("analyzing_motion", 1.0), 1.0,
-             f"Analyzed {len(curves)} clips"
-             + (f" · trimmed {n_trimmed} intro card(s)" if n_trimmed else ""))
+            pass
+        n_trimmed = sum(1 for d in descs if d.head_offset > 0)
+        progress("analyzing_motion", _ov("analyzing_motion", 1.0), 1.0,
+                 f"Analyzed {len(descs)} clips"
+                 + (f" · trimmed {n_trimmed} intro card(s)" if n_trimmed else ""))
+    else:
+        for idx, src in enumerate(video_paths):
+            sp = (idx) / total
+            progress("analyzing_motion", _ov("analyzing_motion", sp), sp,
+                     f"Analyzing motion: clip {idx + 1} of {total}")
+            try:
+                # A still image (Picture & Video mode only) can't be decoded for motion —
+                # substitute a synthetic flat curve so the planner can place it like a clip.
+                if allow_stills and _is_image(src):
+                    curve = _still_curve(str(idx), Path(src))
+                else:
+                    curve = analyze_motion(str(idx), Path(src), hwaccel_decode)
+                if curve.duration > 0 and curve.samples:
+                    curves.append(curve)
+            except Exception:
+                pass  # skip undecodable clips; fail later only if <2 remain
+        if len(curves) < 2:
+            raise RuntimeError("fewer than 2 usable clips after motion analysis")
+        n_trimmed = sum(1 for c in curves if c.head_offset > 0)
+        progress("analyzing_motion", _ov("analyzing_motion", 1.0), 1.0,
+                 f"Analyzed {len(curves)} clips"
+                 + (f" · trimmed {n_trimmed} intro card(s)" if n_trimmed else ""))
 
     # 2b. speech moments (optional, preset-independent) ---------------------- #
     # Read dialogue timings from each usable clip's subtitle sidecar, then pick a
@@ -2200,49 +2354,75 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         forced_speech = _pick_speech_moments(grid, utterances, T, want)
 
     # 3. plan ---------------------------------------------------------------- #
-    progress("planning", _overall("planning", 0.0), 0.0, "Planning cuts…")
-    edl = plan_cuts(grid, curves, tightness=tightness, target_duration=target,
-                    seed=seed, transitions=transitions, rhythm=rhythm,
-                    motion_weight=motion_weight, machine_gun=machine_gun,
-                    scene_aware=scene_aware,
-                    overuse_w=float(cfg.get("overuse_w", W_OVERUSE)),
-                    overuse_p=float(cfg.get("overuse_p", 1.0)),
-                    forced_speech=forced_speech,
-                    hero_shot=bool(cfg.get("hero_shot", False)),
-                    breakdown_slowmo=float(cfg.get("breakdown_slowmo", 0.0)))
+    match_stats: dict = {}
+    if mode == "matchcut":
+        progress("matching", _ov("matching", 0.0), 0.0, "Matching motion across clips…")
+        edl, match_stats = matchcut.plan_match_cuts(
+            descs, target_duration=target, seed=seed,
+            match_speed=bool(options.get("match_speed", True)),
+            transition_frames=(3 if options.get("match_dissolve") else 0),
+            fps=fps,
+            progress=lambda f: progress("matching", _ov("matching", f), f,
+                                        "Matching motion across clips…"))
+        progress("planning", _ov("planning", 1.0), 1.0,
+                 f"{match_stats['clips_used']} shots from "
+                 f"{match_stats['clips_gated']} of {match_stats['clips_in']} clips"
+                 + (f" · {match_stats['clips_in'] - match_stats['clips_gated']} too static"
+                    if match_stats['clips_in'] > match_stats['clips_gated'] else "")
+                 + f" · seam {match_stats['seam_mean_chain']}/{match_stats['seam_max_possible']}")
+    else:
+        progress("planning", _ov("planning", 0.0), 0.0, "Planning cuts…")
+        edl = plan_cuts(grid, curves, tightness=tightness, target_duration=target,
+                        seed=seed, transitions=transitions, rhythm=rhythm,
+                        motion_weight=motion_weight, machine_gun=machine_gun,
+                        scene_aware=scene_aware,
+                        overuse_w=float(cfg.get("overuse_w", W_OVERUSE)),
+                        overuse_p=float(cfg.get("overuse_p", 1.0)),
+                        forced_speech=forced_speech,
+                        hero_shot=bool(cfg.get("hero_shot", False)),
+                        breakdown_slowmo=float(cfg.get("breakdown_slowmo", 0.0)))
+    # Match Cut with NO song: the clips' own audio becomes the soundtrack. With a song
+    # the music is the track instead (mixing both is a future call).
+    keep_audio = (mode == "matchcut" and song_path is None
+                  and bool(options.get("keep_audio", True)))
+    n_audio = 0
+
     (work_dir / "edl.json").write_text(edl.to_json(), encoding="utf-8")
     n_trans = sum(1 for e in edl.entries if e.transition_dur > 0)
     n_speak = sum(1 for e in edl.entries if e.speak)
-    speak_note = ""
-    if let_speak:
-        speak_note = (f", {n_speak} spoken line(s)" if n_speak
-                      else ", no spoken lines found")
-    progress("planning", _overall("planning", 1.0), 1.0,
-             f"{len(edl.entries)} cuts"
-             + (f", {n_trans} transitions" if n_trans else "") + speak_note)
+    if mode == "beat":
+        speak_note = ""
+        if let_speak:
+            speak_note = (f", {n_speak} spoken line(s)" if n_speak
+                          else ", no spoken lines found")
+        progress("planning", _ov("planning", 1.0), 1.0,
+                 f"{len(edl.entries)} cuts"
+                 + (f", {n_trans} transitions" if n_trans else "") + speak_note)
 
     # 4. render + assemble --------------------------------------------------- #
     # Handles: each transition borrows transition_dur/2 of source from the clip on
     # either side of the join, so the overlaps net out to the planned timeline.
     # Drop beats (energy hits) get a centred zoom punch; resolve them once so the
     # render loop can match each shot's place_at against them.
+    # Every beat-grid read below is guarded: match-cut mode has no grid, and all of
+    # these are FX timing that mode switches off anyway (punch/flash/split/shake = 0).
     want_drop_fx = punch > 0 or rgb_split > 0 or shake > 0
     drop_times = ([t for t, is_drop in _accent_times(grid, edl.timeline_duration) if is_drop]
-                  if want_drop_fx else [])
-    beat_period = 60.0 / grid.tempo if grid.tempo and grid.tempo > 0 else 0.5
+                  if (want_drop_fx and grid) else [])
+    beat_period = 60.0 / grid.tempo if (grid and grid.tempo and grid.tempo > 0) else 0.5
     drop_tol = max(0.5 * beat_period, 0.15)
     # White flash on loud downbeat cuts (Music Video). Sparse by construction — only
     # every 4th beat, and only where that beat is loud — so it reads as an on-beat
     # strobe through the drops, not a seizure-inducing every-cut flicker.
     flash_times = ([b.time for b in grid.beats if b.is_downbeat and b.energy >= FLASH_ENERGY]
-                   if flash > 0 else [])
+                   if (flash > 0 and grid) else [])
     n = len(edl.entries)
     segments: list[Path] = []
     durations: list[float] = []
     joins: list[tuple[str, float]] = []
     for i, entry in enumerate(edl.entries):
         sp = i / max(1, n)
-        progress("rendering", _overall("rendering", sp * 0.9), sp,
+        progress("rendering", _ov("rendering", sp * 0.9), sp,
                  f"Rendering segment {i + 1} of {n}")
         lead = entry.transition_dur / 2.0           # incoming transition (this join)
         nxt = edl.entries[i + 1] if i + 1 < n else None
@@ -2279,10 +2459,10 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         durations.append(probe_duration(seg) if n_trans else entry.duration + lead + tail)
         joins.append((entry.transition, entry.transition_dur))
 
-    progress("rendering", _overall("rendering", 0.95), 0.95, "Assembling final cut…")
+    progress("rendering", _ov("rendering", 0.95), 0.95, "Assembling final cut…")
     # Build the duck envelope for each spoken shot: fade the music DOWN just before
     # the line, hold, then fade it back UP to land on the next beat ("into the beat").
-    beat_times = [b.time for b in grid.beats]
+    beat_times = [b.time for b in grid.beats] if grid else []
     duck_windows: list[dict] = []
     for e in edl.entries:
         if not e.speak:
@@ -2309,11 +2489,32 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
         else:
             assemble(segments, song_path, tmp_video, mux_audio=False)
         _duck_and_mux(tmp_video, song_path, duck_windows, out_path)
+    elif keep_audio:
+        # Songless match cut: assemble the video, build a timeline-length track from
+        # the shots' own audio, then mux the two.
+        tmp_video = work_dir / "video_only.mp4"
+        if n_trans:
+            assemble_transitions(segments, durations, joins, song_path, tmp_video,
+                                 video_encode_args=video_encode_args, fps=fps, mux_audio=False)
+        else:
+            assemble(segments, song_path, tmp_video, mux_audio=False)
+        track = work_dir / "clip_audio.wav"
+        n_audio = _clip_audio_track(edl.entries, work_dir, track)
+        if n_audio:
+            _run(["ffmpeg", "-y", "-v", "error", "-i", str(tmp_video), "-i", str(track),
+                  "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                  "-c:a", "aac", "-b:a", "192k", "-shortest",
+                  "-movflags", "+faststart", str(out_path)], "mux clip audio")
+        else:
+            tmp_video.replace(out_path)   # no clip had audio — ship it silent
     elif n_trans:
+        # song_path is None in match-cut mode with no song — the assemblers ignore it
+        # entirely when mux_audio is False, yielding a valid silent MP4.
         assemble_transitions(segments, durations, joins, song_path, out_path,
-                             video_encode_args=video_encode_args, fps=fps)
+                             video_encode_args=video_encode_args, fps=fps,
+                             mux_audio=song_path is not None)
     else:
-        assemble(segments, song_path, out_path)
+        assemble(segments, song_path, out_path, mux_audio=song_path is not None)
 
     # Safety net + honest duration: a silent xfade overshoot used to ship a stub
     # (e.g. 12s of a 240s plan). Probe the real file; fail loudly if it came out wildly
@@ -2324,15 +2525,26 @@ def generate(*, video_paths: list[Path], song_path: Path, options: dict,
             f"assembled montage is {actual:.0f}s but the plan was "
             f"{edl.timeline_duration:.0f}s — transition assembly dropped clips")
     size = out_path.stat().st_size
-    return {
+    result = {
         "width": width, "height": height, "fps": fps,
         "duration": round(actual if actual > 0 else edl.timeline_duration, 3),
         "size_bytes": size, "cuts": len(edl.entries), "seed": seed,
         "preset": preset, "transitions": n_trans, "spoken": len(duck_windows),
-        "intro_cards_trimmed": n_trimmed,
-        "beat_engine": grid.engine, "beat_device": grid.device,
-        "beat_engine_note": grid.engine_note,
+        "intro_cards_trimmed": n_trimmed, "mode": mode,
     }
+    if mode == "matchcut":
+        # How many shots contributed their own audio (songless match cut only).
+        result["audio_shots"] = n_audio
+    if grid is not None:
+        # Beat-engine provenance only exists when a grid was built. The panel guards
+        # this behind an #if, so omitting it in match-cut mode is safe.
+        result.update(beat_engine=grid.engine, beat_device=grid.device,
+                      beat_engine_note=grid.engine_note)
+    if match_stats:
+        # Surface what the matcher actually found — a weak run must be diagnosable
+        # rather than reading as a success that merely looks like an ordinary montage.
+        result["match"] = match_stats
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -2363,13 +2575,15 @@ def _worker_main() -> int:
     try:
         result = generate(
             video_paths=[Path(p) for p in spec["video_paths"]],
-            song_path=Path(spec["song_path"]),
+            # Optional: Motion Match Cut renders with no song at all.
+            song_path=(Path(spec["song_path"]) if spec.get("song_path") else None),
             options=spec["options"],
             work_dir=Path(spec["work_dir"]),
             out_path=Path(spec["out_path"]),
             video_encode_args=list(spec["video_encode_args"]),
             hwaccel_decode=bool(spec["hwaccel_decode"]),
             progress=progress,
+            cache_dir=(Path(spec["motion_cache_dir"]) if spec.get("motion_cache_dir") else None),
         )
         emit({"t": "result", "result": result})
         return 0

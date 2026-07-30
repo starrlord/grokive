@@ -18,6 +18,9 @@
   const tVideos = new Tween(0, { duration: 750, easing: cubicOut });
   const tImages = new Tween(0, { duration: 750, easing: cubicOut });
   const tBytes = new Tween(0, { duration: 950, easing: cubicOut });
+  const tDayVideos = new Tween(0, { duration: 750, easing: cubicOut });
+  const tDayImages = new Tween(0, { duration: 750, easing: cubicOut });
+  const tDayBytes = new Tween(0, { duration: 950, easing: cubicOut });
 
   onMount(async () => {
     try {
@@ -25,11 +28,30 @@
       tVideos.target = data.videos;
       tImages.target = data.images;
       tBytes.target = data.bytes;
+      if (data.today) {
+        tDayVideos.target = data.today.videos;
+        tDayImages.target = data.today.images;
+        tDayBytes.target = data.today.bytes;
+      }
     } catch {
       error = "Couldn't load library stats.";
     } finally {
       loading = false;
     }
+  });
+
+  // Today's haul against the month's running average, as a signed multiplier —
+  // context for whether a number is a big day or a quiet one. Needs both windows
+  // and a non-zero baseline; null otherwise so the chip is simply omitted.
+  const dayPace = $derived.by(() => {
+    const t = data.today, m = data.month;
+    if (!t || !m?.days) return null;
+    const avg = (m.videos + m.images) / m.days;
+    if (avg < 0.5) return null;
+    const ratio = (t.videos + t.images) / avg;
+    if (ratio >= 1.15) return { label: `${(ratio).toFixed(1).replace(/\.0$/, '')}× the daily average`, up: true };
+    if (ratio <= 0.85) return { label: `${Math.round(ratio * 100)}% of the daily average`, up: false };
+    return { label: 'about average for this month', up: null };
   });
 
   // Current-month per-day average, formatted like fmtSize's numbers: one decimal
@@ -96,6 +118,34 @@
           {/if}
         </div>
       </div>
+
+      <!-- Today: what landed since local midnight (the server cuts the window on the
+           viewer's clock — see api.js getStats). Omitted on an older backend. -->
+      {#if data.today}
+        <div class="mt-3 rounded-2xl border border-line p-4">
+          <div class="mb-3 flex items-center gap-2 text-muted">
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+            <span class="text-xs font-bold uppercase tracking-wider">Today</span>
+            {#if dayPace}
+              <span class="ml-auto truncate rounded-full border px-2 py-0.5 text-[0.6875rem] font-semibold {dayPace.up === true ? 'border-[color-mix(in_srgb,var(--accent)_50%,var(--line))] text-[var(--accent)]' : 'border-line'}">{dayPace.label}</span>
+            {/if}
+          </div>
+          <div class="grid grid-cols-3 gap-3">
+            <div class="min-w-0">
+              <div class="text-2xl font-black leading-none tabular-nums">{fmtCount(Math.round(tDayVideos.current))}</div>
+              <div class="mt-1 truncate text-xs text-muted">video{data.today.videos === 1 ? '' : 's'}</div>
+            </div>
+            <div class="min-w-0">
+              <div class="text-2xl font-black leading-none tabular-nums">{fmtCount(Math.round(tDayImages.current))}</div>
+              <div class="mt-1 truncate text-xs text-muted">image{data.today.images === 1 ? '' : 's'}</div>
+            </div>
+            <div class="min-w-0">
+              <div class="truncate text-2xl font-black leading-none tabular-nums">{fmtSize(Math.round(tDayBytes.current)) || '0 B'}</div>
+              <div class="mt-1 truncate text-xs text-muted">added</div>
+            </div>
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 </Modal>

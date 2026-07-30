@@ -253,15 +253,42 @@
     }
   }
 
+  // --- Saved-prompt library cache -----------------------------------------
+  // /api/prompts/responses hands back the WHOLE library in one shot (there is no
+  // server-side search for saved prompts — the web UI filters client-side too).
+  // Search therefore runs HERE, over a short-lived cache, so a keystroke never
+  // refetches the library and only the matched page crosses the sendMessage
+  // channel. Every write path refreshes the cache from its own response (those
+  // endpoints return the full updated list), so a save is visible immediately.
+  const RESPONSES_TTL_MS = 60 * 1000;
+  let responsesCache = null;   // { at: <epoch ms>, list: [...] }
+
+  function cacheResponses(list) {
+    responsesCache = { at: Date.now(), list: Array.isArray(list) ? list : [] };
+  }
+
+  // Refresh the cache from a write endpoint's echoed list, or drop it if absent.
+  function syncResponsesCache(json) {
+    if (json && Array.isArray(json.responses)) cacheResponses(json.responses);
+    else responsesCache = null;
+  }
+
+  async function loadResponses(s) {
+    if (responsesCache && (Date.now() - responsesCache.at) < RESPONSES_TTL_MS) {
+      return responsesCache.list;
+    }
+    const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/prompts/responses'));
+    if (!res.ok || !json) throw new Error(extractError(res, json, 'Could not load prompts'));
+    const list = Array.isArray(json.responses) ? json.responses : [];
+    cacheResponses(list);
+    return list;
+  }
+
   // { type:'getResponses' } -> responses + folder summary (A-Z), unfiled, total
   async function getResponses() {
     try {
       const s = await getSettingsRaw();
-      const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/prompts/responses'));
-      if (!res.ok || !json) {
-        return { ok: false, error: extractError(res, json, 'Could not load prompts') };
-      }
-      const responses = Array.isArray(json.responses) ? json.responses : [];
+      const responses = await loadResponses(s);
 
       const counts = new Map();
       let unfiled = 0;
@@ -281,6 +308,137 @@
         starred: responses.filter((r) => r && r.starred).length,
         total: responses.length
       });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // --- Search --------------------------------------------------------------
+  // Multi-token AND match, order-independent: every whitespace-separated term must
+  // appear somewhere in the prompt's text, its folder name, or one of its tags. So
+  // "beach sunset" finds "sunset on the beach", and "poses tall" finds a tall-subject
+  // prompt filed under Poses.
+  const SEARCH_TERM_MAX = 8;        // ignore silly-long queries rather than scanning 50x
+  const SEARCH_PAGE_MAX = 50;       // hard cap on rows per page (payload guard)
+  const SEARCH_TEXT_PREVIEW = 4000; // per-row text cap; the server allows 100K per prompt
+
+  function searchTerms(q) {
+    return String(q == null ? '' : q).toLowerCase().split(/\s+/).filter(Boolean).slice(0, SEARCH_TERM_MAX);
+  }
+
+  // One flat string per record. Terms are whitespace-split, so none can contain a
+  // space — the joining spaces are enough to stop a match spanning two fields.
+  function searchHaystack(r) {
+    const tags = Array.isArray(r.tags) ? r.tags.join(' ') : '';
+    return ((r.text || '') + ' ' + (r.folder || '') + ' ' + tags).toLowerCase();
+  }
+
+  function inFolderSelection(r, sel) {
+    const folder = (r && typeof r.folder === 'string') ? r.folder.trim() : '';
+    if (sel === '__all') return true;
+    if (sel === '__unfiled') return !folder;
+    if (sel === '__starred') return !!(r && r.starred);
+    return folder === sel;
+  }
+
+  // A row as the UI sees it: full text unless it's enormous, in which case it comes
+  // back preview-capped with `truncated` set (getPrompt/copyPrompt resolve the rest).
+  function searchRow(r) {
+    const text = String(r.text || '');
+    const capped = text.length > SEARCH_TEXT_PREVIEW;
+    return {
+      id: String(r.id == null ? '' : r.id),
+      text: capped ? text.slice(0, SEARCH_TEXT_PREVIEW) : text,
+      truncated: capped,
+      length: text.length,
+      folder: (r.folder || '').trim(),
+      tags: Array.isArray(r.tags) ? r.tags : [],
+      starred: !!r.starred
+    };
+  }
+
+  // { type:'searchPrompts', query, folder, offset, limit }
+  // -> { results, total, offset, limit, terms, library }
+  // Library order is preserved (newest-first, same as the web UI's list).
+  async function searchPrompts(query, opts) {
+    try {
+      const s = await getSettingsRaw();
+      const o = opts || {};
+      const list = await loadResponses(s);
+      const sel = o.folder || '__all';
+      const terms = searchTerms(query);
+
+      const matches = [];
+      for (const r of list) {
+        if (!r || typeof r !== 'object') continue;
+        if (!inFolderSelection(r, sel)) continue;
+        if (terms.length) {
+          const hay = searchHaystack(r);
+          let all = true;
+          for (const t of terms) {
+            if (hay.indexOf(t) < 0) { all = false; break; }
+          }
+          if (!all) continue;
+        }
+        matches.push(r);
+      }
+
+      let offset = parseInt(o.offset, 10);
+      if (isNaN(offset) || offset < 0) offset = 0;
+      let limit = parseInt(o.limit, 10);
+      if (isNaN(limit) || limit <= 0) limit = 25;
+      limit = Math.min(limit, SEARCH_PAGE_MAX);
+
+      return ok({
+        results: matches.slice(offset, offset + limit).map(searchRow),
+        total: matches.length,
+        offset: offset,
+        limit: limit,
+        terms: terms,
+        library: list.length
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // { type:'getPrompt', id } -> the FULL record (search rows are preview-capped).
+  async function getPrompt(id) {
+    try {
+      const s = await getSettingsRaw();
+      const pid = (id == null) ? '' : String(id).trim();
+      if (!pid) return { ok: false, error: 'Missing prompt id.' };
+      const list = await loadResponses(s);
+      const r = list.find((x) => x && String(x.id) === pid);
+      if (!r) return { ok: false, error: 'That prompt is no longer in your library.' };
+      // Deliberately NOT searchRow(): this is the uncapped-text escape hatch.
+      return ok({
+        prompt: {
+          id: pid,
+          text: String(r.text || ''),
+          folder: (r.folder || '').trim(),
+          tags: Array.isArray(r.tags) ? r.tags : [],
+          starred: !!r.starred
+        }
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  }
+
+  // { type:'copyPrompt', id, text } — copy ONE saved prompt's full text in a single
+  // round trip: resolve the untruncated text by id, falling back to the row text the
+  // caller already holds if the lookup fails (e.g. deleted since the search ran).
+  async function copyPrompt(id, text) {
+    try {
+      let full = (text == null) ? '' : String(text);
+      const pid = (id == null) ? '' : String(id).trim();
+      if (pid) {
+        const got = await getPrompt(pid);
+        if (got.ok && got.data && got.data.prompt) full = got.data.prompt.text;
+      }
+      if (!full.trim()) return { ok: false, error: 'Nothing to copy.' };
+      return copyToClipboard(full);
     } catch (e) {
       return fail(e);
     }
@@ -384,6 +542,7 @@
       if (!res.ok || !json || json.ok === false) {
         return { ok: false, error: extractError(res, json, 'Save failed') };
       }
+      syncResponsesCache(json);   // the endpoint echoes the full list — keep search current
       return ok({ added: !!json.added, folder: target, starred: !!json.starred });
     } catch (e) {
       return fail(e);
@@ -402,6 +561,7 @@
       if (!res.ok || !json || json.ok === false) {
         return { ok: false, error: extractError(res, json, 'Star failed') };
       }
+      syncResponsesCache(json);   // ★ flips must show up in the next search
       return ok({ starred: !!starred });
     } catch (e) {
       return fail(e);
@@ -584,6 +744,9 @@
     setSettings: setSettings,
     status: status,
     getResponses: getResponses,
+    searchPrompts: searchPrompts,
+    getPrompt: getPrompt,
+    copyPrompt: copyPrompt,
     randomPrompt: randomPrompt,
     enhance: enhance,
     generate: generate,

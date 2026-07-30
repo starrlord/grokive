@@ -6,7 +6,7 @@
   import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
   import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
-  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode } from '$lib/state.js';
+  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode, montageRender } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   // videoIds: ordered ids of the currently-selected videos (selection order).
@@ -23,8 +23,18 @@
   ];
   const STAGE_LABEL = {
     queued: 'Queued', analyzing_audio: 'Analyzing audio', analyzing_motion: 'Analyzing motion',
+    // Match Cut's own stage: scoring every ordered clip pair's best seam.
+    matching: 'Matching motion',
     planning: 'Planning cuts', rendering: 'Rendering', done: 'Done', error: 'Error'
   };
+
+  // Render mode. 'beat' = the beat-synced montage (song required); 'match' = Motion
+  // Match Cut, which splices where motion aligns and needs no song. Kept in a store
+  // so the choice survives the panel being destroyed on close.
+  const MODES = [
+    { id: 'beat', label: 'Beat Montage', help: 'Cuts land on the song’s beats. Pick a style below; the song sets the pace.' },
+    { id: 'match', label: 'Match Cut', help: 'Finds frames where motion lines up across different clips — direction, speed, push-in, rotation — and splices there, so movement appears to continue through the cut. Shots are gently retimed so the speed matches too. No song needed; add one and it plays underneath.' }
+  ];
 
   const PRESETS = [
     { id: 'classic', label: 'Classic', help: 'Punchy hard cuts on the beat — the original style.' },
@@ -63,6 +73,11 @@
   // inline version used to push the panel into scrolling once Music Video landed.
   let showStyleInfo = $state(false);
   let showTightInfo = $state(false);
+  let showModeInfo = $state(false);
+  // Match Cut extras.
+  let matchSpeed = $state(true);
+  let matchDissolve = $state(false);
+  let keepClipAudio = $state(true);
 
   let starting = $state(false);
   let startError = $state(''); // error from the kickoff POST (shown in-panel)
@@ -81,6 +96,14 @@
   let sessionIds = $state([]);
   const activeIds = $derived(sessionIds.length ? sessionIds : videoIds);
 
+  // A LIVE job's own mode always wins over the local toggle — the panel is destroyed
+  // on close, so on reopen the server snapshot is the only truthful signal.
+  const jobMode = $derived(job?.mode ?? $montageRender);
+  const matchCut = $derived(jobMode === 'match' || jobMode === 'matchcut');
+  // Picture & Video is about which media may enter the basket; Match Cut is video-only
+  // (a still has no motion to match), so the two never combine.
+  const picVideoEffective = $derived(picVideo && !matchCut);
+
   const res = $derived(RES.find((r) => r.id === resId) || RES[0]);
   const tightnessLabel = $derived(tightness < 0.34 ? 'Relaxed' : tightness > 0.66 ? 'Tight' : 'Balanced');
   const tightnessHelp = $derived(
@@ -94,7 +117,9 @@
   const running = $derived(!!job && job.running);
   const done = $derived(!!job && job.status === 'done' && !!job.result);
   const errored = $derived(!!job && job.status === 'error');
-  const canGenerate = $derived(activeIds.length >= 2 && !!song && !starting && !running);
+  // The song is OPTIONAL in Match Cut — the edit is driven by motion continuity, and
+  // with no song the render is silent.
+  const canGenerate = $derived(activeIds.length >= 2 && (matchCut || !!song) && !starting && !running);
   // Prefer the JOB's source count + preset (from server provenance) whenever a job
   // is owned — the live selection is only meaningful on the fresh setup form and is
   // empty when the panel is reopened from the status chip.
@@ -148,6 +173,9 @@
         song,
         options: {
           name: name.trim() || 'movie',
+          mode: matchCut ? 'matchcut' : 'beat',
+          ...(matchCut ? { match_speed: matchSpeed ? 1 : 0, match_dissolve: matchDissolve ? 1 : 0,
+                           keep_audio: keepClipAudio ? 1 : 0 } : {}),
           preset: effectivePreset,
           tightness,
           // Auto (res.w/h null) lets the server match the largest clip; otherwise pin the picked size.
@@ -162,7 +190,7 @@
       });
       // Surface this render in the panel and light up the button + chip instantly.
       owned = true;
-      markMovieStarted(data.job_id);
+      markMovieStarted(data.job_id, matchCut ? 'match' : 'beat');
     } catch (e) {
       startError = e.message || 'Could not start generation.';
       toast(startError, { type: 'error' });
@@ -223,8 +251,11 @@
        use:trapFocus transition:fly={{ y: 18, duration: 180 }}>
     <header class="flex items-center justify-between border-b border-line px-5 py-4">
       <div>
-        <h2 class="text-lg font-extrabold tracking-tight">Create Montage</h2>
-        <p class="text-sm text-muted">Beat-synced montage from {sourceCount} selected {picVideo ? 'item' : 'video'}{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.</p>
+        <h2 class="text-lg font-extrabold tracking-tight">{matchCut ? 'Create Match Cut' : 'Create Montage'}</h2>
+        <p class="text-sm text-muted">
+          {#if matchCut}Motion match cut from {sourceCount} selected video{sourceCount === 1 ? '' : 's'}.
+          {:else}Beat-synced montage from {sourceCount} selected {picVideoEffective ? 'item' : 'video'}{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.{/if}
+        </p>
       </div>
       <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-line"
         aria-label="Close" onclick={close}>✕</button>
@@ -241,6 +272,14 @@
             {job.result.cuts} cuts · {job.result.width}×{job.result.height} · {job.result.fps} fps · {job.result.duration}s
             · {(job.result.size_bytes / 1048576).toFixed(1)} MB{#if job.result.beat_engine} · {job.result.beat_engine === 'madmom' ? `madmom beats (${job.result.beat_device})` : `librosa beats${job.result.beat_engine_note ? ` — ${job.result.beat_engine_note}` : ''}`}{/if}
           </p>
+          {#if job.result.match}
+            <!-- Report what the matcher actually found. A weak run must be legible as
+                 "no strong matches available" rather than reading as a plain montage. -->
+            <p class="text-xs text-muted">
+              Matched {job.result.match.clips_gated} of {job.result.match.clips_in} clips{#if job.result.match.clips_in > job.result.match.clips_gated} · {job.result.match.clips_in - job.result.match.clips_gated} had too little motion to match{/if}
+              · seam quality {job.result.match.seam_mean_chain} of {job.result.match.seam_max_possible}{#if job.result.match.speed_ramped} · {job.result.match.speed_ramped} shot{job.result.match.speed_ramped === 1 ? '' : 's'} speed-matched{/if}
+            </p>
+          {/if}
           <div class="flex flex-wrap gap-2">
             <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-[var(--on-accent)]" href={movieResultUrl(true, job.job_id)} download={job.result.filename}>⇩ Download MP4</a>
             <button type="button" class="rounded-lg border border-line px-4 py-2.5 font-semibold disabled:opacity-60"
@@ -279,9 +318,32 @@
             <p class="rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger-ink-soft)]">{job.error || 'Generation failed.'}</p>
           {/if}
 
+          <!-- Mode: Beat Montage | Match Cut. Lives INSIDE the scroll body (the panel
+               has one flexible scroll region; anything added to the fixed header or
+               footer permanently shrinks it — see the notes above). The beat-only
+               Cut-tightness block is hidden in match mode, so net height is neutral. -->
+          <div>
+            <div class="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-muted">
+              <span>Mode</span>
+              <span class="group relative inline-flex">
+                <button type="button" aria-label="About this mode" aria-expanded={showModeInfo}
+                  onclick={() => (showModeInfo = !showModeInfo)}
+                  class="grid h-4 w-4 place-items-center rounded-full border border-current text-[10px] font-bold opacity-70 transition hover:opacity-100 pointer-coarse:h-5 pointer-coarse:w-5">i</button>
+                <span class="pointer-events-none absolute left-0 top-full z-20 mt-1.5 w-64 max-w-[80vw] rounded-lg border border-line bg-[var(--surface-solid)] p-2.5 text-[11px] font-normal normal-case leading-relaxed text-muted shadow-lg transition {showModeInfo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}">{MODES.find((m) => m.id === (matchCut ? 'match' : 'beat'))?.help}</span>
+              </span>
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
+              {#each MODES as m (m.id)}
+                <button type="button" title={m.help}
+                  class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {(matchCut ? 'match' : 'beat') === m.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                  onclick={() => montageRender.set(m.id)}>{m.label}</button>
+              {/each}
+            </div>
+          </div>
+
           <!-- Song -->
           <div>
-            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Song</div>
+            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Song {#if matchCut}<span class="normal-case opacity-70">— optional</span>{/if}</div>
             <label class="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-3.5 text-sm transition {dragging ? 'border-[var(--accent)] bg-[var(--accent)]/5' : 'border-line'}"
               ondragover={(e) => { e.preventDefault(); dragging = true; }}
               ondragleave={() => (dragging = false)}
@@ -293,13 +355,16 @@
                   <span class="text-xs text-muted">{(song.size / 1048576).toFixed(1)} MB · click or drop to replace</span>
                 {:else}
                   <span class="block font-semibold text-ink">Drop an audio file or click to choose</span>
-                  <span class="text-xs text-muted">mp3 · wav · flac · m4a · aac · ogg · opus</span>
+                  <span class="text-xs text-muted">{matchCut ? 'Optional — leave empty for a silent cut' : 'mp3 · wav · flac · m4a · aac · ogg · opus'}</span>
                 {/if}
               </span>
               <input type="file" accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus" class="hidden" onchange={pickFile} />
             </label>
           </div>
 
+          <!-- Style, tightness and "let clips speak" are all BEAT-only: they read the
+               song's grid. Match Cut replaces them with its own two options. -->
+          {#if !matchCut}
           <!-- Style preset -->
           <div>
             <div class="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-muted">
@@ -364,6 +429,41 @@
               </div>
             {/if}
           </div>
+          {:else}
+          <!-- Match Cut options -->
+          <div class="space-y-2 rounded-lg border border-line p-3">
+            <label class="flex cursor-pointer items-start gap-3">
+              <input type="checkbox" bind:checked={matchSpeed} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
+              <span>
+                <span class="block text-sm font-semibold">Match speed across cuts</span>
+                <span class="mt-0.5 block text-[11px] leading-snug text-muted">
+                  Gently retime each shot so the movement carries the same speed through the cut, not just the same direction. Kept within a range that stays smooth.
+                </span>
+              </span>
+            </label>
+            <label class="flex cursor-pointer items-start gap-3">
+              <input type="checkbox" bind:checked={matchDissolve} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
+              <span>
+                <span class="block text-sm font-semibold">Blend the seam</span>
+                <span class="mt-0.5 block text-[11px] leading-snug text-muted">
+                  Cross-fade three frames at each cut. On motion that already lines up this reads as a morph rather than a fade.
+                </span>
+              </span>
+            </label>
+            <!-- Only meaningful with no song — with one, the music is the track. -->
+            {#if !song}
+              <label class="flex cursor-pointer items-start gap-3">
+                <input type="checkbox" bind:checked={keepClipAudio} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
+                <span>
+                  <span class="block text-sm font-semibold">Keep the clips’ audio</span>
+                  <span class="mt-0.5 block text-[11px] leading-snug text-muted">
+                    With no song, each shot plays its own sound, retimed to match the picture. Clips without audio stay silent for their turn. Untick for a silent cut.
+                  </span>
+                </span>
+              </label>
+            {/if}
+          </div>
+          {/if}
 
           <!-- Resolution + fps -->
           <div class="grid gap-4 sm:grid-cols-2">
@@ -392,7 +492,7 @@
                 </div>
               </div>
               <div>
-                <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Length (s) <span class="normal-case opacity-70">— blank = song length</span></div>
+                <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Length (s) <span class="normal-case opacity-70">— blank = {matchCut ? 'as long as the matches run' : 'song length'}</span></div>
                 <input type="number" min="1" placeholder="auto" bind:value={targetDuration}
                   class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none" />
               </div>
@@ -411,11 +511,11 @@
     {#if !done && !running}
       <footer class="flex items-center justify-between gap-3 border-t border-line px-5 py-4">
         <p class="text-xs text-muted">
-          {#if activeIds.length < 2}Select at least 2 {picVideo ? 'photos or videos' : 'videos'}.{:else if !song}Choose a song to continue.{:else}Ready to generate.{/if}
+          {#if activeIds.length < 2}Select at least 2 {picVideoEffective ? 'photos or videos' : 'videos'}.{:else if !song && !matchCut}Choose a song to continue.{:else if matchCut && !song}Ready — no song, so the cut will be silent.{:else}Ready to generate.{/if}
         </p>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>
-          {starting ? 'Starting…' : 'Generate Montage'}
+          {starting ? 'Starting…' : matchCut ? 'Generate Match Cut' : 'Generate Montage'}
         </button>
       </footer>
     {/if}

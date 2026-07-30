@@ -103,6 +103,11 @@ DB_FILE = DATA_DIR / "index.db"
 # reindex never discards the embedding work and only new prompts get embedded.
 PROMPT_DB_FILE = DATA_DIR / "prompt_studio.db"
 MOVIE_DIR = DATA_DIR / "movie_tmp"  # working dir + last "Generate Movie" output
+# Motion Match Cut's per-clip descriptor cache. DELIBERATELY a sibling of MOVIE_DIR,
+# not inside it: every render wipes MOVIE_DIR, and this must survive so a second
+# render over the same clips skips analysis (measured ~150x faster on a hit). Purely
+# derived data — safe to delete at any time; bounded by matchcut.prune_cache.
+MOTION_CACHE_DIR = DATA_DIR / "motion_cache"
 # Built SvelteKit SPA (produced by `web/` -> adapter-static), served at "/".
 SPA_DIR = Path(os.environ.get("SPA_DIR", ROOT / "web" / "build")).resolve()
 
@@ -3333,7 +3338,7 @@ def _purge_movie_scratch(keep: Path) -> None:
         pass
 
 
-def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict) -> None:
+def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, options: dict) -> None:
     """Drive one montage render in a separate process and mirror its streamed
     progress into the shared job state. The child reads a JSON spec on stdin and
     emits newline-delimited JSON (progress / result / error) on stdout; its stderr
@@ -3341,12 +3346,17 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict
     out_path = MOVIE_DIR / f"movie_{job_id}.mp4"
     spec = {
         "video_paths": [str(p) for p in paths],
-        "song_path": str(song_path),
+        # None in match-cut mode with no song. MUST stay None rather than str(None),
+        # which would reach the child as the literal path "None".
+        "song_path": (str(song_path) if song_path else None),
         "options": options,
         "work_dir": str(MOVIE_DIR),
         "out_path": str(out_path),
         "video_encode_args": _video_encode_args(CRF),
         "hwaccel_decode": _use_nvenc(),
+        # The server owns the data layout, so it names the cache dir rather than
+        # letting the child infer one relative to its scratch dir.
+        "motion_cache_dir": str(MOTION_CACHE_DIR),
     }
     stderr_log = MOVIE_DIR / "worker_stderr.log"
     result = None
@@ -3407,6 +3417,12 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path, options: dict
                     except OSError:
                         tail = ""
                     error = tail or f"montage worker exited with code {returncode}"
+            # Also write it to the SERVER log. The job dict is the only other place
+            # this lives, and it's in-memory — so a failure the user reports after a
+            # restart is otherwise undiagnosable (the scratch dir keeps stderr, but a
+            # clean RuntimeError from the planner never reaches stderr at all).
+            _log(f"montage render failed ({options.get('mode') or 'beat'}, "
+                 f"{len(paths)} clips): {str(error)[:300]}")
             with _movie_lock:
                 _movie["status"] = "error"
                 _movie["error"] = str(error)[:400]
@@ -3466,12 +3482,19 @@ def api_movie_generate() -> Response:
         ids = []
     if not isinstance(ids, list):
         ids = []
+    # Render mode. "beat" is the beat-synced montage (song REQUIRED); "matchcut" is
+    # Motion Match Cut, which cuts on motion continuity and takes an OPTIONAL song.
+    mode = (request.form.get("mode") or "beat").strip().lower()
+    if mode not in ("beat", "matchcut"):
+        mode = "beat"
     # Resolve the preset first: a preset flagged allow_stills (Picture & Video) admits
-    # still images as sources; every other preset stays strictly video-only.
+    # still images as sources; every other preset stays strictly video-only. Match-cut
+    # is always video-only — a still has no motion to match.
     preset = (request.form.get("preset") or moviegen.DEFAULT_PRESET).strip()
     if preset not in moviegen.PRESETS:
         preset = moviegen.DEFAULT_PRESET
-    allow_stills = bool(moviegen.PRESETS.get(preset, {}).get("allow_stills"))
+    allow_stills = (bool(moviegen.PRESETS.get(preset, {}).get("allow_stills"))
+                    and mode != "matchcut")
     # A montage is built from source clips, never from other montages — exclude
     # them so a beat-montage can't be fed back into a new one.
     paths = (_montage_source_paths_for_ids(ids) if allow_stills
@@ -3482,12 +3505,18 @@ def api_movie_generate() -> Response:
                "Select at least 2 non-montage videos that exist on the server.")
         return jsonify(ok=False, error=err), 400
 
+    # The song sets the beat grid, so it is mandatory for a beat montage and merely a
+    # bed for a match cut (which renders silent without one).
     song = request.files.get("song")
-    if not song or not song.filename:
+    ext = ""
+    if song and song.filename:
+        ext = (song.filename.rsplit(".", 1)[-1] if "." in song.filename else "").lower()
+        if ext not in _SONG_EXTS:
+            return jsonify(ok=False, error=f"Unsupported audio format '.{ext}'."), 400
+    elif mode == "beat":
         return jsonify(ok=False, error="Choose a song to set the beat."), 400
-    ext = (song.filename.rsplit(".", 1)[-1] if "." in song.filename else "").lower()
-    if ext not in _SONG_EXTS:
-        return jsonify(ok=False, error=f"Unsupported audio format '.{ext}'."), 400
+    else:
+        song = None
 
     def _num(name, default, lo, hi, cast=float):
         try:
@@ -3511,19 +3540,35 @@ def api_movie_generate() -> Response:
     else:
         canvas_w = int(_num("width", 1920, 160, 3840, int))
         canvas_h = int(_num("height", 1080, 160, 2160, int))
+    try:
+        target_duration = max(1.0, float(target)) if target else None
+    except ValueError:
+        target_duration = None   # a non-numeric length is "auto", not a 500
     options = {
         "name": (request.form.get("name") or "movie")[:80],
+        "mode": mode,
         "preset": preset,
         "tightness": _num("tightness", 0.5, 0.0, 1.0),
         "width": canvas_w,
         "height": canvas_h,
         "fps": int(_num("fps", 30, 12, 60, int)),
-        "target_duration": (max(1.0, float(target)) if target else None),
+        "target_duration": target_duration,
         # Each run sends a fresh seed so successive renders differ; absent/invalid
         # -> deterministic (strict best).
         "seed": (int(seed_raw) if seed_raw.lstrip("-").isdigit() else None),
         "let_clips_speak": let_speak,
         "speak_moments": speak_moments,
+        # Match-cut only: retime shots into the measured free speed band so apparent
+        # velocity is continuous across a seam, and optionally blend the seam over a
+        # few frames (a dissolve on already-matched motion reads as a morph).
+        "match_speed": (request.form.get("match_speed") or "1").strip().lower()
+                       in ("1", "true", "on", "yes"),
+        "match_dissolve": (request.form.get("match_dissolve") or "").strip().lower()
+                          in ("1", "true", "on", "yes"),
+        # Songless match cut: use the source clips' own audio as the soundtrack.
+        # Defaults ON — otherwise the render is silent and usable audio is thrown away.
+        "keep_audio": (request.form.get("keep_audio") or "1").strip().lower()
+                      in ("1", "true", "on", "yes"),
     }
 
     with _movie_lock:
@@ -3533,14 +3578,19 @@ def api_movie_generate() -> Response:
         # Fresh working dir so a previous render's segments/output can't leak in.
         shutil.rmtree(MOVIE_DIR, ignore_errors=True)
         MOVIE_DIR.mkdir(parents=True, exist_ok=True)
-        song_path = MOVIE_DIR / f"song.{ext}"
-        song.save(str(song_path))
+        # No song is legitimate in match-cut mode — the render is then silent.
+        song_path = None
+        if song is not None:
+            song_path = MOVIE_DIR / f"song.{ext}"
+            song.save(str(song_path))
         _movie.update(running=True, job_id=job_id, status="queued", progress=0.0,
                       stage_progress=0.0, detail="Queued…", error=None, result=None,
                       started_at=time.strftime("%Y-%m-%d %H:%M:%S"), finished_at=None,
                       committed=False, committing=False, committed_id=None, acknowledged=False,
                       commit_meta={
-                          "name": options["name"], "song": song.filename,
+                          "name": options["name"],
+                          "song": (song.filename if song is not None else None),
+                          "mode": mode,
                           "seed": options["seed"], "tightness": options["tightness"],
                           "fps": options["fps"], "preset": options["preset"],
                           "let_clips_speak": options["let_clips_speak"],
@@ -3579,6 +3629,10 @@ def api_movie_status() -> Response:
         sources=len(meta.get("source_ids") or []),
         source_ids=meta.get("source_ids") or [],
         preset=meta.get("preset"),
+        # Which pipeline produced this job. The panel is destroyed on close, so on
+        # reopen this is the ONLY signal of the job's true mode — without it a live
+        # match cut is labelled as a beat montage.
+        mode=meta.get("mode") or "beat",
         # Whether the finished result was already added to the gallery and whether
         # the user has dealt with it. These survive reloads (unlike the client's
         # in-memory ack), so the floating chip can stay dismissed across sessions.
@@ -3627,7 +3681,12 @@ def _commit_montage() -> dict:
         print(f"montage thumbnail failed: {exc}")
 
     song = str(meta.get("song") or "").replace("\\", "/").rsplit("/", 1)[-1]
-    title = ["Beat Montage"]
+    is_match = (meta.get("mode") or "beat") == "matchcut"
+    # The TITLE distinguishes the two modes, but `model` below stays "Beat Montage"
+    # for both. That exact string is the only thing stopping a rendered montage being
+    # selected as a source for another one, and it is load-bearing in 3 server sites
+    # and 5 Svelte sites — see specs/match-cut-spec.md §7.1.
+    title = ["Motion Match Cut" if is_match else "Beat Montage"]
     if meta.get("name") and meta["name"] != "movie":
         title.append(str(meta["name"]))
     if song:
@@ -3643,6 +3702,7 @@ def _commit_montage() -> dict:
         "height": r.get("height"),
         # Provenance — ignored by the index, kept in metadata.json for reference.
         "montage": True,
+        "mode": meta.get("mode") or "beat",
         "preset": meta.get("preset") or r.get("preset"),
         "fps": r.get("fps"),
         "duration": r.get("duration"),
@@ -3650,6 +3710,9 @@ def _commit_montage() -> dict:
         "tightness": meta.get("tightness"),
         "source_ids": meta.get("source_ids") or [],
         "song": song,
+        # What the matcher actually found (clips gated, seam quality) — keeps a weak
+        # render diagnosable long after the scratch dir is purged.
+        **({"match": r["match"]} if r.get("match") else {}),
     }
     # Strict load: if metadata.json exists but is unreadable, abort rather than
     # rewrite it with only this montage (which would erase the whole library).
@@ -4689,11 +4752,20 @@ def api_facets() -> Response:
 
 @app.get("/api/stats")
 def api_stats() -> Response:
-    """Library totals (video/image counts + summed size) plus current-month
-    creation counts for the Stats panel's per-day averages."""
+    """Library totals (video/image counts + summed size) plus today's and the
+    current month's creation counts for the Stats panel.
+
+    ``tz_offset`` is the viewer's minutes east of UTC (the browser sends
+    ``-getTimezoneOffset()``); the day/month windows are cut on THAT clock, since
+    the container itself runs UTC. Clamped to the real -12..+14 range, and junk
+    falls back to 0 (UTC) rather than 400ing a read-only panel."""
     if not DB_FILE.exists():
         rebuild_db(wait=True)
-    return jsonify(db.stats(DB_FILE))
+    try:
+        tz_offset = int(request.args.get("tz_offset", 0))
+    except (TypeError, ValueError):
+        tz_offset = 0
+    return jsonify(db.stats(DB_FILE, max(-12 * 60, min(14 * 60, tz_offset))))
 
 
 @app.post("/api/media/by-ids")
@@ -6421,9 +6493,26 @@ def _seed_collection_groups_once() -> None:
     _save_groups({"seeded": True, "groups": groups_state.get("groups", [])})
 
 
+def _prune_motion_cache() -> None:
+    """Bound Motion Match Cut's descriptor cache at boot. A render prunes it too, but
+    doing it here also reclaims space for someone who has stopped using the mode
+    entirely (and after a library move strands every entry). Stat-only, so it costs
+    nothing on an empty or small cache; never fatal to startup."""
+    try:
+        import matchcut
+        res = matchcut.prune_cache(MOTION_CACHE_DIR)
+        if res["removed"]:
+            _log(f"motion cache: removed {res['removed']} stale entr"
+                 f"{'y' if res['removed'] == 1 else 'ies'} "
+                 f"({res['freed'] / 1048576:.1f} MB), {res['kept']} kept")
+    except Exception as exc:  # pragma: no cover - never block startup
+        print(f"motion cache prune skipped: {exc}")
+
+
 def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _seed_collection_groups_once()
+    _prune_motion_cache()
     maybe_reindex()
     rebuild_db(wait=True)  # inline: schema + rows must exist before the first request
     mode = _auth_mode()

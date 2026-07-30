@@ -229,11 +229,14 @@ export function importCancel(importId) {
   }).catch(() => {});
 }
 
-// --- Generate Movie (beat-synced montage; own background job slot) ----------
+// --- Generate Movie (beat-synced montage / motion match cut; one job slot) ---
 export async function generateMovie({ ids, song, options }) {
   const fd = new FormData();
   fd.append('video_ids', JSON.stringify(ids || []));
-  fd.append('song', song);
+  // GUARD the append: FormData coerces null to the STRING "null", which arrives as a
+  // text field, so request.files.get('song') is None and the server rejects the job
+  // with a song error — in a mode where the song is optional. Match Cut renders silent.
+  if (song) fd.append('song', song);
   for (const [k, v] of Object.entries(options || {})) {
     if (v !== undefined && v !== null && v !== '') fd.append(k, String(v));
   }
@@ -274,7 +277,11 @@ export const syncStatus = () => getJSON('/api/sync/status');
 
 // --- Library stats ---------------------------------------------------------
 // { videos, images, total, bytes } — whole-library totals for the Stats panel.
-export const getStats = () => getJSON('/api/stats');
+// Sends the browser's UTC offset in MINUTES EAST (getTimezoneOffset is inverted:
+// it returns minutes to add to local to reach UTC). The server cuts "today" and
+// "this month" on that clock — its own is UTC, so without this the day counter
+// would roll over mid-evening for anyone west of Greenwich.
+export const getStats = () => getJSON(`/api/stats?tz_offset=${-new Date().getTimezoneOffset()}`);
 
 // --- Config + settings -----------------------------------------------------
 // Grok accounts: named cURL sessions. { accounts: [{ id, name, active, configured, mtime }] }

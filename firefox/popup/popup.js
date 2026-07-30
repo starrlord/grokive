@@ -11,6 +11,9 @@
  *   - setSettings
  *   - status
  *   - getResponses
+ *   - searchPrompts  { query, folder, offset, limit }
+ *   - getPrompt      { id }
+ *   - copyPrompt     { id, text }
  *   - randomPrompt   { folder }
  *   - enhance        { prompt, dialogueLevel, dialogueOnly }
  *   - generate       { prompt, mode, n }
@@ -38,6 +41,7 @@ function bindElements() {
   const ids = [
     'statusWrap', 'statusDot', 'statusLabel', 'gearBtn', 'toast',
     'sourceFolder', 'randomBtn', 'anotherBtn',
+    'searchQuery', 'searchClear', 'searchInfo', 'searchScoped', 'resultsList', 'searchMoreBtn',
     'promptText', 'charCount', 'poolInfo',
     'copyBtn', 'undoBtn', 'dialogueSeg', 'dialogueOnly',
     'enhanceBtn', 'variationsBtn', 'saveBtn', 'saveBtnFolder', 'starBtn', 'variationsList',
@@ -51,6 +55,17 @@ let settings = { ...DEFAULT_SETTINGS };
 let llmReady = false;
 let preEnhanceText = null;   // for Undo
 let toastTimer = null;
+
+/* Search state. `searchSeq` guards against out-of-order replies: a slow response
+   for an older keystroke must never overwrite a newer one's results. */
+const SEARCH_PAGE = 25;      // rows per request; "Show more" appends the next page
+const SEARCH_DEBOUNCE_MS = 160;
+let searchTimer = null;
+let searchSeq = 0;
+let searchOffset = 0;
+let searchTotal = 0;
+let searchTerms = [];
+let libraryCount = 0;
 
 /* ---------- Messaging helper ---------- */
 async function send(type, args = {}) {
@@ -214,6 +229,244 @@ function populateFolders(data) {
 function setPrompt(text) {
   el.promptText.value = text || '';
   updateCharCount();
+}
+
+/* ---------- Library search ---------- */
+/* The background owns the cached library and does the matching, so a keystroke
+   never refetches it and only ONE page of rows crosses the message channel. */
+
+// '__all' unless the user ticked "This folder only", in which case the search is
+// scoped to whatever the Source folder select is on (including ★ Starred/Unfiled).
+function searchScope() {
+  if (el.searchScoped && el.searchScoped.checked) {
+    return el.sourceFolder.value || settings.sourceFolder || '__all';
+  }
+  return '__all';
+}
+
+// Paint `text` into `node`, wrapping matched terms in <mark>. Assembled from DOM
+// nodes — never innerHTML — so prompt text can't inject markup into the popup.
+function highlightInto(node, text, terms) {
+  node.textContent = '';
+  if (!terms || !terms.length) { node.textContent = text; return; }
+
+  const lower = text.toLowerCase();
+  const ranges = [];
+  for (const t of terms) {
+    let i = lower.indexOf(t);
+    while (i >= 0 && ranges.length < 300) {   // cap: a 1-char term in a long prompt
+      ranges.push([i, i + t.length]);
+      i = lower.indexOf(t, i + t.length);
+    }
+  }
+  if (!ranges.length) { node.textContent = text; return; }
+
+  // Merge overlapping hits so two terms matching the same span emit one <mark>.
+  ranges.sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+
+  const frag = document.createDocumentFragment();
+  let pos = 0;
+  for (const [a, b] of merged) {
+    if (a > pos) frag.appendChild(document.createTextNode(text.slice(pos, a)));
+    const m = document.createElement('mark');
+    m.textContent = text.slice(a, b);
+    frag.appendChild(m);
+    pos = b;
+  }
+  if (pos < text.length) frag.appendChild(document.createTextNode(text.slice(pos)));
+  node.appendChild(frag);
+}
+
+// Rows are preview-capped by the background (prompts may be up to 100K chars), so
+// anything that needs the real thing resolves it by id first.
+async function fullTextOf(r) {
+  if (!r.truncated) return r.text;
+  const got = await send('getPrompt', { id: r.id });
+  if (got.ok && got.data && got.data.prompt) return got.data.prompt.text;
+  return r.text;   // deleted since the search ran — the preview is better than nothing
+}
+
+async function loadResultIntoEditor(r) {
+  const text = await fullTextOf(r);
+  setPrompt(text);
+  preEnhanceText = null;
+  el.undoBtn.hidden = true;
+  hideVariations();
+  el.poolInfo.textContent = '';
+  toast('Loaded into the editor.', 'info');
+  try { el.promptText.scrollIntoView({ block: 'nearest' }); } catch (e) { /* nicety only */ }
+}
+
+async function copyResult(r, btn) {
+  setBusy(btn, true);
+  const res = await send('copyPrompt', { id: r.id, text: r.text });
+  setBusy(btn, false);
+  if (res.ok) toast('Copied to clipboard ✓', 'ok');
+  else toast(res.error || 'Copy failed.', 'error');
+}
+
+async function toggleResultStar(r, btn) {
+  const next = !r.starred;
+  setBusy(btn, true);
+  const res = await send('starPrompt', { id: r.id, starred: next });
+  setBusy(btn, false);
+  if (!res.ok) { toast(res.error || 'Star failed.', 'error'); return; }
+  r.starred = next;
+  btn.classList.toggle('is-on', next);
+  btn.title = next ? 'Starred — click to unstar' : 'Star this prompt';
+  toast(next ? 'Starred ★' : 'Unstarred', 'ok');
+}
+
+function buildResultRow(r) {
+  const li = document.createElement('li');
+  li.className = 'gks-result';
+
+  // The full prompt, clamped to a few lines; click anywhere in the text to expand.
+  const body = document.createElement('div');
+  body.className = 'gks-result-text';
+  body.title = 'Click to expand / collapse';
+  highlightInto(body, r.text + (r.truncated ? '…' : ''), searchTerms);
+  body.addEventListener('click', () => li.classList.toggle('is-open'));
+
+  const foot = document.createElement('div');
+  foot.className = 'gks-result-foot';
+
+  const meta = document.createElement('span');
+  meta.className = 'gks-result-meta';
+  const bits = [r.folder || 'Unfiled'];
+  if (r.truncated) bits.push(r.length.toLocaleString() + ' chars');
+  meta.textContent = bits.join(' · ');
+  if (r.tags && r.tags.length) meta.title = 'Tags: ' + r.tags.join(', ');
+
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'gks-mini';
+  copyBtn.textContent = '📋 Copy';
+  copyBtn.title = 'Copy the full prompt to the clipboard';
+  copyBtn.addEventListener('click', () => copyResult(r, copyBtn));
+
+  const loadBtn = document.createElement('button');
+  loadBtn.type = 'button';
+  loadBtn.className = 'gks-mini';
+  loadBtn.textContent = 'Load';
+  loadBtn.title = 'Load into the editor above';
+  loadBtn.addEventListener('click', () => loadResultIntoEditor(r));
+
+  const starBtn = document.createElement('button');
+  starBtn.type = 'button';
+  starBtn.className = 'gks-mini gks-mini--star' + (r.starred ? ' is-on' : '');
+  starBtn.textContent = '★';
+  starBtn.title = r.starred ? 'Starred — click to unstar' : 'Star this prompt';
+  starBtn.addEventListener('click', () => toggleResultStar(r, starBtn));
+
+  foot.appendChild(meta);
+  foot.appendChild(copyBtn);
+  foot.appendChild(loadBtn);
+  foot.appendChild(starBtn);
+
+  li.appendChild(body);
+  li.appendChild(foot);
+  return li;
+}
+
+function clearResults() {
+  if (!el.resultsList) return;
+  el.resultsList.innerHTML = '';
+  el.resultsList.hidden = true;
+  el.searchMoreBtn.hidden = true;
+  searchOffset = 0;
+  searchTotal = 0;
+  searchTerms = [];
+}
+
+function setSearchInfo(text) {
+  if (el.searchInfo) el.searchInfo.textContent = text || '';
+}
+
+// Idle line: how big the library is, so an empty box still tells you something.
+function idleSearchInfo() {
+  setSearchInfo(libraryCount ? (libraryCount.toLocaleString() + ' prompts — type to search') : '');
+}
+
+async function runSearch(append) {
+  const query = (el.searchQuery.value || '').trim();
+  if (el.searchClear) el.searchClear.hidden = !query;
+
+  if (!query) {
+    clearResults();
+    idleSearchInfo();
+    return;
+  }
+
+  const seq = ++searchSeq;
+  const offset = append ? searchOffset : 0;
+  if (!append) setSearchInfo('Searching…');
+  if (append) setBusy(el.searchMoreBtn, true, 'Loading…');
+
+  const res = await send('searchPrompts', {
+    query: query,
+    folder: searchScope(),
+    offset: offset,
+    limit: SEARCH_PAGE,
+  });
+
+  // Clear the busy state BEFORE the staleness guard, or a keystroke landing mid-
+  // request would leave "Show more" stuck as a disabled spinner.
+  if (append) setBusy(el.searchMoreBtn, false);
+  if (seq !== searchSeq) return;   // a newer keystroke already owns the list
+
+  if (!res.ok) {
+    clearResults();
+    setSearchInfo('');
+    toast(res.error || 'Search failed.', 'error');
+    return;
+  }
+
+  const data = res.data || {};
+  const rows = Array.isArray(data.results) ? data.results : [];
+  searchTerms = Array.isArray(data.terms) ? data.terms : [];
+  searchTotal = typeof data.total === 'number' ? data.total : rows.length;
+  if (typeof data.library === 'number') libraryCount = data.library;
+
+  if (!append) el.resultsList.innerHTML = '';
+  for (const r of rows) el.resultsList.appendChild(buildResultRow(r));
+  searchOffset = offset + rows.length;
+
+  el.resultsList.hidden = searchOffset === 0;
+  el.searchMoreBtn.hidden = searchOffset >= searchTotal;
+
+  if (!searchTotal) {
+    setSearchInfo('No matches');
+  } else {
+    setSearchInfo(searchOffset.toLocaleString() + ' of ' + searchTotal.toLocaleString());
+  }
+  if (!append) el.resultsList.scrollTop = 0;
+}
+
+function scheduleSearch() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { searchTimer = null; runSearch(false); }, SEARCH_DEBOUNCE_MS);
+}
+
+function onSearchInput() {
+  if (el.searchClear) el.searchClear.hidden = !(el.searchQuery.value || '').trim();
+  scheduleSearch();
+}
+
+function clearSearch() {
+  el.searchQuery.value = '';
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+  searchSeq++;                 // abandon any in-flight reply
+  clearResults();
+  idleSearchInfo();
+  if (el.searchClear) el.searchClear.hidden = true;
+  el.searchQuery.focus();
 }
 
 /* ---------- Actions ---------- */
@@ -419,12 +672,16 @@ function onSegClick(e) {
 function onSourceChange() {
   settings.sourceFolder = el.sourceFolder.value || '__all';
   send('setSettings', { settings: { ...settings } });
+  // A scoped search follows the select, so re-run it against the new folder.
+  if (el.searchScoped && el.searchScoped.checked && el.searchQuery.value.trim()) runSearch(false);
 }
 
 async function refreshFolders() {
   const res = await send('getResponses');
   if (res.ok && res.data) {
     populateFolders(res.data);
+    if (typeof res.data.total === 'number') libraryCount = res.data.total;
+    if (!(el.searchQuery && el.searchQuery.value.trim())) idleSearchInfo();
   }
   // Soft-fail: keep whatever is already in the select.
 }
@@ -461,6 +718,22 @@ async function init() {
   el.saveNewBtn?.addEventListener('click', doSaveNew);
   el.dialogueSeg?.addEventListener('click', onSegClick);
   el.sourceFolder?.addEventListener('change', onSourceChange);
+
+  el.searchQuery?.addEventListener('input', onSearchInput);
+  el.searchQuery?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); clearSearch(); }
+    // Enter searches immediately instead of waiting out the debounce.
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (searchTimer) { clearTimeout(searchTimer); searchTimer = null; }
+      runSearch(false);
+    }
+  });
+  el.searchClear?.addEventListener('click', clearSearch);
+  el.searchScoped?.addEventListener('change', () => {
+    if (el.searchQuery.value.trim()) runSearch(false);
+  });
+  el.searchMoreBtn?.addEventListener('click', () => runSearch(true));
 
   updateCharCount();
 

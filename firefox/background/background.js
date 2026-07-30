@@ -41,6 +41,15 @@
       case 'getResponses':
         return API.getResponses();
 
+      case 'searchPrompts':
+        return API.searchPrompts(msg.query, msg);
+
+      case 'getPrompt':
+        return API.getPrompt(msg.id);
+
+      case 'copyPrompt':
+        return API.copyPrompt(msg.id, msg.text);
+
       case 'randomPrompt':
         return API.randomPrompt(msg.folder);
 

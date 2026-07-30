@@ -11,7 +11,7 @@
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
     collections, collectionGroups, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
     galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
-    playQueue, enqueuePlayQueue
+    playQueue, enqueuePlayQueue, shuffled
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
@@ -29,6 +29,7 @@
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
+  import PlaySplitButton from '$lib/components/PlaySplitButton.svelte';
   import MontageStatusChip from '$lib/components/MontageStatusChip.svelte';
   import MontageBasketChip from '$lib/components/MontageBasketChip.svelte';
   import PlayQueueChip from '$lib/components/PlayQueueChip.svelte';
@@ -476,15 +477,21 @@
   // server.py _collection_summaries) — so Play used to start you on whatever you added
   // longest ago. Screen newest-first there instead: same created_at desc the card's own
   // cover/mosaic already uses. Undated rows keep insertion order at the end.
-  async function playCollection(c, orderedItems = null) {
-    const explicitOrder = Array.isArray(orderedItems);
+  // `shuffle` ignores orderedItems on purpose and resolves the FULL id list: the drilled-in
+  // grid is paginated (<=500 a page, see loadCollectionItems), so shuffling what's loaded
+  // would silently randomize a slice of a big collection while claiming to span it. Ordered
+  // play keeps honouring the grid — there the visible order IS the promise.
+  async function playCollection(c, orderedItems = null, { shuffle = false } = {}) {
+    const explicitOrder = !shuffle && Array.isArray(orderedItems);
     const source = explicitOrder ? orderedItems : await mediaByIds(c.ids);
     const videos = source.filter((v) => v.media_type === 'video');
     const list = explicitOrder
       ? videos
-      : [...videos].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      : shuffle
+        ? shuffled(videos)
+        : [...videos].sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     if (!list.length) { toast('No playable videos in this collection.', { type: 'error' }); return; }
-    lb = { list, index: 0, autoAdvance: true, title: c.name };
+    lb = { list, index: 0, autoAdvance: true, title: `${c.name}${shuffle ? ' · Random' : ''}` };
   }
   // Photo slideshow of a collection's images (videos skipped). Resolves the full id list
   // — not just the loaded grid — so the slideshow spans every photo, not only what's
@@ -676,19 +683,17 @@
     if (!list.length) { toast('No photos in this canvas to show.', { type: 'error' }); return; }
     lb = { list, index: 0, autoAdvance: false, autoSlideshow: true, title: c.name || 'Canvas' };
   }
-  async function playCurrentView() {
-    // Play every video in the CURRENT media view (Recent / All Media / Favorites /
-    // Archive), honoring the active search + filters, in the current sort order — so a
-    // search's results play as a queue. Same bounded-pagination shape as playCanvas;
-    // scoped by $filters.view server-side (favorites/archive stay within their set).
-    // Unlike the top-bar Play this is NOT shuffled — it plays what you're looking at.
-    const viewFilters = { ...$filters, canvas: null, mediaType: 'video' };
+  // Gather EVERY video matching a filter set, page by page. Same bounded-pagination shape
+  // as playCanvas: stop at `total`, bail on a short page, and hard-cap pages so a
+  // mismatched `total` can't spin into an endless fetch. Shared by the view Play menu and
+  // the top-bar Play so their reach is identical — only the ordering differs.
+  async function gatherVideos(filterSet) {
     const PAGE = 500;
     let nextPage = 1;
     let loaded = [];
     let expected = Infinity;
     while (loaded.length < expected) {
-      const res = await fetchMedia(viewFilters, nextPage, PAGE);
+      const res = await fetchMedia(filterSet, nextPage, PAGE);
       const batch = res.items || [];
       loaded = [...loaded, ...batch];
       expected = res.total || loaded.length;
@@ -696,18 +701,34 @@
       if (batch.length < PAGE) break;
       if (nextPage > Math.ceil(expected / PAGE) + 1) break;
     }
-    const list = loaded.filter((it) => it.media_type === 'video');
+    return loaded.filter((it) => it.media_type === 'video');
+  }
+  async function playCurrentView({ shuffle = false } = {}) {
+    // Play every video in the CURRENT media view (Recent / All Media / Favorites /
+    // Archive), honoring the active search + filters; scoped by $filters.view server-side
+    // (favorites/archive stay within their set). Default order is the grid's own sort — so
+    // a search's results play as a queue. `shuffle` (the Play menu's "Play random")
+    // randomizes instead, but only AFTER the full gather: the pages come back in a stable
+    // server-side sort, and a random ORDER BY across pages would dupe and drop rows.
+    const list = await gatherVideos({ ...$filters, canvas: null, mediaType: 'video' });
     if (!list.length) { toast('No videos to play here.', { type: 'error' }); return; }
     const scope = $filters.query
       ? `“${$filters.query}”`
       : ($filters.view === 'favorites' ? 'Favorites' : $filters.view === 'archive' ? 'Archive' : $filters.view === 'all' ? 'All Media' : 'Recent');
-    lb = { list, index: 0, autoAdvance: true, title: `${scope} (${list.length})` };
+    lb = {
+      list: shuffle ? shuffled(list) : list,
+      index: 0,
+      autoAdvance: true,
+      title: `${scope}${shuffle ? ' · Random' : ''} (${list.length})`
+    };
   }
   async function playRandomLibrary() {
     // "Play" in the top bar: shuffle every video on disk into a random queue and hand
     // it to the same Lightbox we use for collections. view 'all' deliberately includes
-    // archived (db.query_media), so this spans the whole library.
-    const randomFilters = {
+    // archived (db.query_media), so this spans the whole library. Deliberately CLEARS the
+    // refinements — that's what separates it from the view toolbar's "Play random", which
+    // shuffles only what your filters/search currently match.
+    const list = await gatherVideos({
       ...$filters,
       view: 'all',
       canvas: null,
@@ -717,30 +738,9 @@
       models: [],
       resolutions: [],
       period: 'all'
-    };
-    const PAGE = 500;
-    let nextPage = 1;
-    let loaded = [];
-    let expected = Infinity;
-    // Same bounded-pagination shape as playCanvas: stop at `total`, bail on a short
-    // page, and hard-cap pages so a mismatched `total` can't spin into an endless fetch.
-    while (loaded.length < expected) {
-      const res = await fetchMedia(randomFilters, nextPage, PAGE);
-      const batch = res.items || [];
-      loaded = [...loaded, ...batch];
-      expected = res.total || loaded.length;
-      nextPage += 1;
-      if (batch.length < PAGE) break;
-      if (nextPage > Math.ceil(expected / PAGE) + 1) break;
-    }
-    const list = loaded.filter((it) => it.media_type === 'video');
+    });
     if (!list.length) { toast('No videos to play yet.', { type: 'error' }); return; }
-    // Fisher–Yates shuffle for an unbiased random order.
-    for (let i = list.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [list[i], list[j]] = [list[j], list[i]];
-    }
-    lb = { list, index: 0, autoAdvance: true, title: `Random (${list.length})` };
+    lb = { list: shuffled(list), index: 0, autoAdvance: true, title: `Random (${list.length})` };
   }
 </script>
 
@@ -813,8 +813,15 @@
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
             disabled={!currentGridItems.some((it) => it.media_type === 'image')}
             title="Play a photo slideshow of this collection's images" onclick={() => slideshowCollection(activeCollection)}>Slideshow</button>
-          <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
-            disabled={!currentGridItems.some((it) => it.media_type === 'video')} onclick={() => playCollection(activeCollection, currentGridItems)}>Play videos</button>
+          <!-- Ordered play hands over the grid (honours SortSelect); random resolves the
+               collection's full id list instead, so it spans everything, not the loaded page. -->
+          <PlaySplitButton
+            disabled={!currentGridItems.some((it) => it.media_type === 'video')}
+            title="Play this collection's videos"
+            orderHint="In the order shown"
+            randomHint="Shuffle the whole collection"
+            onorder={() => playCollection(activeCollection, currentGridItems)}
+            onrandom={() => playCollection(activeCollection, null, { shuffle: true })} />
         </div>
       </div>
 
@@ -949,9 +956,16 @@
         {/if}
         <MediaTypeTabs class="ml-auto" />
         <SortSelect />
-        <button type="button" class="rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] disabled:opacity-50"
+        <!-- Primary click plays the view in its current sort; the caret adds "Play random",
+             which shuffles the same filtered/searched set (not the whole library — that's
+             what the top-bar Play is for). -->
+        <PlaySplitButton
           disabled={!displayItems.some((it) => it.media_type === 'video')}
-          title={$filters.query ? 'Play videos matching your search' : 'Play all videos in this view'} onclick={playCurrentView}>Play videos</button>
+          title={$filters.query ? 'Play videos matching your search' : 'Play all videos in this view'}
+          orderHint={$filters.sort === 'old' ? 'Oldest first' : $filters.sort === 'new' ? 'Newest first' : 'Current sort order'}
+          randomHint="Shuffle everything this view matches"
+          onorder={() => playCurrentView()}
+          onrandom={() => playCurrentView({ shuffle: true })} />
       </div>
 
       {#if displayItems.length === 0 && !loading}

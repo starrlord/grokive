@@ -36,7 +36,25 @@
       </select>
     </section>
 
-    <!-- 3. Random prompt buttons -->
+    <!-- 3. Search the whole library -->
+    <section class="gks-section">
+      <div class="gks-searchrow">
+        <input class="gks-input" id="searchQuery" type="text" autocomplete="off" spellcheck="false"
+          placeholder="🔎 Search all prompts…" aria-label="Search saved prompts" />
+        <button class="gks-iconbtn" id="searchClear" type="button" title="Clear search" aria-label="Clear search" hidden>×</button>
+      </div>
+      <div class="gks-meta">
+        <span id="searchInfo"></span>
+        <label class="gks-check" title="Limit results to the source folder above">
+          <input type="checkbox" id="searchScoped" />
+          <span>This folder only</span>
+        </label>
+      </div>
+      <ul class="gks-results" id="resultsList" hidden></ul>
+      <button class="gks-btn gks-btn--ghost gks-btn--block gks-btn--sm" id="searchMoreBtn" type="button" hidden>Show more</button>
+    </section>
+
+    <!-- 4. Random prompt buttons -->
     <section class="gks-section gks-row gks-row--random">
       <button class="gks-btn gks-btn--primary gks-btn--grow" id="randomBtn" type="button">
         <span aria-hidden="true">🎲</span> Random prompt
@@ -46,7 +64,7 @@
       </button>
     </section>
 
-    <!-- 4. Editable prompt textarea -->
+    <!-- 5. Editable prompt textarea -->
     <section class="gks-section">
       <textarea class="gks-textarea" id="promptText" rows="5"
         placeholder="Pull a random prompt, or type your own here…" spellcheck="true"></textarea>
@@ -56,7 +74,7 @@
       </div>
     </section>
 
-    <!-- 5. Action row -->
+    <!-- 6. Action row -->
     <section class="gks-section gks-actions">
       <div class="gks-actionrow">
         <button class="gks-btn gks-btn--ghost" id="copyBtn" type="button">Copy</button>
@@ -94,7 +112,7 @@
 
     <hr class="gks-divider" />
 
-    <!-- 6. New prompt -->
+    <!-- 7. New prompt -->
     <section class="gks-section">
       <label class="gks-label" for="newPromptText">New prompt</label>
       <textarea class="gks-textarea gks-textarea--sm" id="newPromptText" rows="3"

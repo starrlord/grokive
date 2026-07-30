@@ -9,6 +9,7 @@
     align = 'right',     // which edge the panel aligns to: 'right' | 'left'
     ariaLabel = undefined,
     title = undefined,
+    disabled = false,    // greys the trigger and blocks opening (a menu with nothing to act on)
     trigger,             // snippet: trigger button contents
     children,            // snippet(close): panel contents
   } = $props();
@@ -18,6 +19,12 @@
   let panel = $state(null);
   let shift = $state(0); // horizontal nudge to keep the panel on-screen
   const close = () => (open = false);
+
+  // A trigger that goes disabled mid-open (its items filtered away) would otherwise strand
+  // the panel with no way back to it — the disabled button can't be clicked to toggle shut.
+  $effect(() => {
+    if (disabled && open) open = false;
+  });
 
   function onDocClick(e) {
     if (open && root && !root.contains(e.target)) open = false;
@@ -46,7 +53,7 @@
 
 <div bind:this={root} class="relative">
   <button type="button" class={triggerClass} aria-haspopup="true" aria-expanded={open}
-    aria-label={ariaLabel} {title} onclick={() => (open = !open)}>
+    aria-label={ariaLabel} {title} {disabled} onclick={() => (open = !open)}>
     {@render trigger()}
   </button>
   {#if open}

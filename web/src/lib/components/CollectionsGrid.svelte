@@ -404,13 +404,19 @@
           </div>
 
           <!-- Primary actions: bottom-right, only when accessible and has videos. "Add to
-               Play Queue" (compact, secondary) sits to the LEFT of the accent "Play" — queue
-               these videos onto the cross-library Play Queue vs. play this collection now. -->
+               Play Queue" and "Shuffle" (compact, secondary) sit to the LEFT of the accent
+               "Play" — queue these videos onto the cross-library Play Queue, or play this
+               collection now in order / at random. An icon rather than a caret menu: the card
+               is overflow-hidden for its mosaic, which would clip a dropdown panel. -->
           {#if !sealed && !c.is_group && c.video_count}
             <div class="absolute bottom-2 right-2 z-10 flex items-center gap-1.5">
               <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] opacity-0 shadow-lg backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                 title="Add this collection's videos to the Play Queue" aria-label="Add collection videos to play queue" onclick={() => onplayqueue(c)}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
+              </button>
+              <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] opacity-0 shadow-lg backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
+                title="Play this collection's videos in a random order" aria-label="Play collection videos at random" onclick={() => onplay(c, null, { shuffle: true })}>
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>
               </button>
               <button type="button" class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                 title="Play videos" aria-label="Play collection videos" onclick={() => onplay(c)}>

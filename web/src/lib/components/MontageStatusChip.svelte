@@ -12,6 +12,9 @@
   const chip = $derived($movieChip);
   const pct = $derived(Math.round((chip?.progress || 0) * 100));
   const RING = 2 * Math.PI * 11; // circumference for r=11
+  // The chip is global and outlives the panel, so the job's own mode (echoed by
+  // /api/movie/status) is the only thing that can label it correctly.
+  const noun = $derived(chip?.mode === 'matchcut' || chip?.mode === 'match' ? 'Match cut' : 'Montage');
 </script>
 
 {#if chip}
@@ -22,7 +25,7 @@
     {/if}
 
     <button type="button" class="chip-main" onclick={() => onopen()}
-            title={chip.running ? 'Montage rendering — open for progress' : chip.status === 'done' ? 'Montage ready — open to view & save' : 'Montage failed — open for details'}>
+            title={chip.running ? `${noun} rendering — open for progress` : chip.status === 'done' ? `${noun} ready — open to view & save` : `${noun} failed — open for details`}>
       {#if chip.running}
         <span class="chip-ring" aria-hidden="true">
           <svg viewBox="0 0 28 28">
@@ -31,13 +34,13 @@
           </svg>
           <span class="chip-pct">{pct}</span>
         </span>
-        <span class="chip-text"><strong>Rendering montage</strong><small>{chip.detail || 'Working…'}</small></span>
+        <span class="chip-text"><strong>Rendering {noun.toLowerCase()}</strong><small>{chip.detail || 'Working…'}</small></span>
       {:else if chip.status === 'done'}
         <span class="chip-icon ok" aria-hidden="true">▶</span>
-        <span class="chip-text"><strong>Montage ready</strong><small>Tap to view &amp; save</small></span>
+        <span class="chip-text"><strong>{noun} ready</strong><small>Tap to view &amp; save</small></span>
       {:else}
         <span class="chip-icon err" aria-hidden="true">!</span>
-        <span class="chip-text"><strong>Montage failed</strong><small>Tap for details</small></span>
+        <span class="chip-text"><strong>{noun} failed</strong><small>Tap for details</small></span>
       {/if}
     </button>
 

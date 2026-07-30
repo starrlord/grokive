@@ -10,6 +10,7 @@ library into Firefox so fresh prompts are one click away while you generate on G
 When you're working in Grok Imagine, the slow part is coming up with the next good prompt.
 This extension lets you, without leaving the browser:
 
+- **Search every saved prompt** across all folders and copy or insert the one you want.
 - Pull a **random prompt** from any folder in your Grokive Prompt Studio library.
 - Edit it freely, **copy** it, or push it straight into the Grok input field.
 - **Enhance** it with your Grokive server's AI (rewrite / punch up / adjust dialogue).
@@ -22,14 +23,20 @@ parties, no cloud, no telemetry.
 ## Features
 
 - **Popup workflow** — pick a source folder, roll a random prompt, edit, copy/enhance/vary, save.
+- **Prompt search** — one box searches your **whole library, across every folder**. Type any
+  words in any order (they're matched against each prompt's text, its folder, and its tags) and
+  the full prompts come back as a list: **📋 Copy** one to the clipboard, **Load** it into the
+  editor, or ★ star it. Optionally scope the search to the selected source folder.
 - **Connection status** at a glance (connected + authed / needs login / offline).
 - **Enhance** with three dialogue levels and an optional "dialogue only" mode.
 - **Variations** — generate a handful of alternates and click one to load it.
 - **Save** edited or brand-new prompts to your `Firefox` folder (server-side append +
   dedupe — it never clobbers your other prompts).
 - **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere.
-- **grok.com toolbar** — a compact floating pill with Random / Enhance / Save / Star buttons that
-  write directly into the page's prompt field (falls back to clipboard if it can't find one).
+- **grok.com toolbar** — a compact floating pill with Random / Find / Enhance / Save / Star buttons
+  that write directly into the page's prompt field (falls back to clipboard if it can't find one).
+- **Find a prompt on grok.com** — the 🔎 button opens a search panel over your whole prompt
+  library; click a result to read it in full, then **Insert** it into the Grok input or 📋 copy it.
 - **Reference images** — a 📎 button on the grok.com toolbar opens your Grokive **collections**;
   pick one to browse its image thumbnails and **copy** any image to the clipboard as PNG, ready to
   paste into Grok Imagine as a reference image. Thumbnails and full images are fetched through the
@@ -52,7 +59,7 @@ Grokive server at the configured **Server URL** using these endpoints:
 | `GET /api/auth/status` | Check whether auth is required and whether you're logged in. |
 | `POST /api/login` | Log in with stored credentials (only when the server requires auth). |
 | `GET /api/prompts/status` | Check if the AI (LLM) is configured, and which model. |
-| `GET /api/prompts/responses` | Load your prompt library and its folders. |
+| `GET /api/prompts/responses` | Load your prompt library and its folders (also backs prompt search). |
 | `POST /api/prompts/responses/add` | Save a prompt into a folder (append + dedupe). |
 | `POST /api/prompts/enhance` | Rewrite / enhance a prompt's text. |
 | `POST /api/prompts/generate` | Generate variations of a prompt. |
@@ -160,11 +167,15 @@ Click the toolbar button to open the popup, then:
    Your choice is remembered.
 2. **🎲 Random prompt** — pulls a random prompt from that folder into the editable box.
    **↻ Another** re-rolls.
-3. **Edit** the text freely (there's a live character count).
-4. **Copy** it, **✨ Enhance** it in place (with an **Undo** to restore the pre-enhance text),
+3. Or **🔎 search** the library — the box under the folder select searches **every folder** by
+   default (tick *This folder only* to scope it). Results show the full prompt text (click a
+   result to expand it), with **📋 Copy**, **Load** (into the editor) and **★** per row, and
+   **Show more** to page through the rest.
+4. **Edit** the text freely (there's a live character count).
+5. **Copy** it, **✨ Enhance** it in place (with an **Undo** to restore the pre-enhance text),
    or get **Variations** and click one to load it.
-5. **💾 Save** the current text to your `Firefox` folder.
-6. Or use the **New prompt** box at the bottom to write something from scratch and save it.
+6. **💾 Save** the current text to your `Firefox` folder.
+7. Or use the **New prompt** box at the bottom to write something from scratch and save it.
 
 ### Keyboard shortcut
 
@@ -174,14 +185,22 @@ copy it to the clipboard, and show a notification with a short preview. (You can
 
 ### grok.com toolbar
 
-On `grok.com`, a compact floating pill appears (bottom-right) with five buttons:
+On `grok.com`, a compact floating pill appears (bottom-right) with six buttons:
 
 - **🎲 Random** — inserts a random prompt into the Grok input field (or copies it to the
   clipboard if no field is found).
+- **🔎 Find** — opens a search panel over every saved prompt (see below).
 - **✨ Enhance** — enhances the current field text in place, using your default dialogue level.
 - **💾 Save** — saves the current field text to your save folder.
 - **⭐ Star** — saves *and* stars the current field text (favorites it in Grokive).
 - **📎 References** — opens the reference-image browser (see below).
+
+**Find a prompt.** Click **🔎** to open a search panel anchored to the toolbar. Type any words —
+in any order — and it matches against each prompt's text, folder, and tags across your **entire
+library**. Each result shows the prompt clamped to a few lines — **click the text** (or the **⌄**) to expand it
+and read the whole thing, click again to collapse. **Insert** writes it straight into Grok's prompt
+field (and closes the panel); **📋** copies it instead. **Show more** pages through the rest. The
+panel closes on **Esc** or an outside click.
 
 **Reference images.** Click **📎** to open a panel of your Grokive **collections** (each with a
 cover and image count; locked collections show 🔒 and need unlocking in Grokive first). Click a
@@ -231,6 +250,12 @@ already logged in with. It reads your usage percentages and sends nothing new an
   gRPC-Web unary RPC, so the content script frames the request and decodes the small proto
   response by hand (no proto codegen / dependency). It polls only on `/imagine*` pages and stays
   out of the Grokive message path entirely.
+- **Search runs in the background too.** `GET /api/prompts/responses` returns the whole library in
+  one shot (there's no server-side prompt search — the Grokive web app filters client-side as well),
+  so the background keeps a short-lived cache of it and does the matching there. A keystroke costs
+  one small message and returns a single page of rows, not the whole library; saving or starring
+  refreshes the cache immediately. Very long prompts come back preview-capped, and the full text is
+  fetched by id only when you copy/insert/expand one.
 - **Auth is handled in the background:** before a protected call (or on a `401`), it checks
   `/api/auth/status` and, if needed and credentials are configured, logs in and retries once.
 - Settings live in `ext.storage.local` under a single `settings` key, with defaults filled in so

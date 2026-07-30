@@ -16,7 +16,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
-from datetime import date
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -742,15 +742,44 @@ def facets(
         conn.close()
 
 
-def stats(db_path: str | Path) -> dict[str, Any]:
+def _created_bound(moment: datetime) -> str:
+    """A UTC instant rendered as a lexicographic lower bound for ``created_at``.
+
+    ``created_at`` is stored as ISO-8601 UTC with a ``Z`` suffix and (usually)
+    microseconds — ``2026-06-21T03:38:31.635443Z`` — so a string ``>=`` is a valid
+    time comparison. The ``Z`` is deliberately NOT emitted: ``.`` sorts before
+    ``Z``, so a bound of ``…T05:00:00Z`` would exclude a row stamped
+    ``…T05:00:00.123456Z`` — an item generated in the same second as the boundary
+    would vanish from the window.
+
+    Midnight collapses to the DATE alone, which additionally keeps a hypothetical
+    legacy date-only row (``2026-06-21``) inside its own day rather than sorting it
+    just below the padded ``…T00:00:00``. That only helps a viewer at UTC, since
+    any other offset puts the day boundary at a non-midnight UTC instant and a bare
+    date then genuinely resolves to the previous local day. No such rows exist in
+    practice (every indexed timestamp carries a time)."""
+    if (moment.hour, moment.minute, moment.second, moment.microsecond) == (0, 0, 0, 0):
+        return moment.strftime("%Y-%m-%d")
+    return moment.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def stats(db_path: str | Path, tz_offset_minutes: int = 0) -> dict[str, Any]:
     """Whole-library totals for the Stats panel: media counts by type and the
     summed on-disk size. ``size_bytes`` is captured at index time, so this is a
     single cheap aggregate query — no filesystem walk. Rows with a missing size
     (older indexes) just contribute 0 to the byte total.
 
-    ``month`` carries current-month creation counts plus the days elapsed so far,
-    from which the UI derives per-day averages. ISO ``created_at`` strings compare
-    lexicographically, so the month-start bound is a plain string comparison."""
+    ``today`` carries the counts and bytes added since local midnight; ``month``
+    the current-month creation counts plus the days elapsed so far, from which the
+    UI derives per-day averages.
+
+    ``tz_offset_minutes`` is the VIEWER's offset east of UTC (JS
+    ``-new Date().getTimezoneOffset()``), because "today" has to mean the day the
+    person reading the panel is living in. The container has no ``TZ`` set, so the
+    server's own clock is UTC — deriving the day from it would roll the counter
+    over mid-evening for anyone west of Greenwich. Both windows use the same
+    offset so the day counter and the per-day average never disagree about the
+    date. Rows with a NULL ``created_at`` (older indexes) fall out of both."""
     conn = _connect(db_path)
     try:
         row = conn.execute(
@@ -761,20 +790,39 @@ def stats(db_path: str | Path) -> dict[str, Any]:
             "COALESCE(SUM(size_bytes), 0) AS bytes "
             "FROM media"
         ).fetchone()
-        today = date.today()
+        offset = timedelta(minutes=tz_offset_minutes)
+        local_now = datetime.now(timezone.utc) + offset
+        # Local midnight / month-start, converted back to the UTC instant the stored
+        # timestamps are expressed in.
+        day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0) - offset
+        month_start = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) - offset
+        window = conn.execute(
+            "SELECT "
+            "COALESCE(SUM(media_type='video'), 0) AS videos, "
+            "COALESCE(SUM(media_type='image'), 0) AS images, "
+            "COALESCE(SUM(size_bytes), 0) AS bytes "
+            "FROM media WHERE created_at >= ?",
+            (_created_bound(day_start),),
+        ).fetchone()
         month = conn.execute(
             "SELECT "
             "COALESCE(SUM(media_type='video'), 0) AS videos, "
             "COALESCE(SUM(media_type='image'), 0) AS images "
             "FROM media WHERE created_at >= ?",
-            (today.strftime("%Y-%m-01"),),
+            (_created_bound(month_start),),
         ).fetchone()
         return {
             "videos": row["videos"],
             "images": row["images"],
             "total": row["total"],
             "bytes": row["bytes"],
-            "month": {"videos": month["videos"], "images": month["images"], "days": today.day},
+            "today": {
+                "videos": window["videos"],
+                "images": window["images"],
+                "bytes": window["bytes"],
+                "date": local_now.strftime("%Y-%m-%d"),
+            },
+            "month": {"videos": month["videos"], "images": month["images"], "days": local_now.day},
         }
     finally:
         conn.close()

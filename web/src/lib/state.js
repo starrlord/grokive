@@ -232,7 +232,7 @@ export const counts = derived([favorites, stashed], ([$f, $s]) => ({
 // button in the selection bar animate while a render is in flight (and lets the
 // panel reconnect to a live — or just-finished — job when reopened). One shared
 // poll feeds both, so the panel doesn't need its own interval.
-const IDLE_MOVIE = { running: false, status: 'idle', job_id: null, progress: 0, detail: '', error: null, result: null };
+const IDLE_MOVIE = { running: false, status: 'idle', job_id: null, progress: 0, detail: '', error: null, result: null, mode: 'beat' };
 export const movieJob = writable(IDLE_MOVIE);
 let _moviePollTimer = null;
 
@@ -258,8 +258,10 @@ export function ensureMoviePolling() {
 }
 // Optimistic local update when the panel kicks off a render, so the button lights
 // up instantly without waiting for the first poll.
-export function markMovieStarted(jobId) {
-  movieJob.set({ ...IDLE_MOVIE, running: true, status: 'queued', detail: 'Queued…', job_id: jobId });
+// `mode` is carried through so the chip and a reopened panel label the job correctly
+// in the window before the first poll returns the server's own value.
+export function markMovieStarted(jobId, mode = 'beat') {
+  movieJob.set({ ...IDLE_MOVIE, running: true, status: 'queued', detail: 'Queued…', job_id: jobId, mode });
   movieAck.set(null);
   ensureMoviePolling();
 }
@@ -467,17 +469,22 @@ export function enqueuePlayQueue(ids) {
 export function clearPlayQueue() {
   playQueue.set([]);
 }
-// One-shot Fisher–Yates shuffle of the stored order (persisted). Re-clickable — each press
-// is a fresh randomization. Plain Math.random() is fine here (browser, not a workflow script).
+// Unbiased Fisher–Yates on a COPY — the single shuffle in the app. Shared by the Play
+// Queue's Randomize, the "Play random" menu on the view/collection Play buttons, the
+// top-bar Play, and the playlist editor's Randomize. Plain Math.random() is fine here
+// (browser, not a workflow script).
+export function shuffled(arr) {
+  const a = [...(arr || [])];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+// One-shot shuffle of the stored queue order (persisted). Re-clickable — each press is a
+// fresh randomization.
 export function shufflePlayQueue() {
-  playQueue.update((q) => {
-    const a = [...q];
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
-  });
+  playQueue.update(shuffled);
 }
 
 // Montage mode — 'video' (default) or 'picture-video'. Governs whether STILL IMAGES may
@@ -511,6 +518,20 @@ export function isMontageSource(item, mode) {
 // so the queue buttons must never disable just because the mode is still 'video'.
 export const isMontageQueueable = (item) =>
   !!item && item.model !== 'Beat Montage' && (item.media_type === 'video' || item.media_type === 'image');
+
+// Montage RENDER mode — 'beat' (beat-synced montage) or 'match' (Motion Match Cut,
+// which splices where motion aligns across clips and needs no song).
+//
+// Deliberately a SEPARATE store from `montageMode`, not a third value of it. The two
+// axes are orthogonal: montageMode governs WHAT may enter the basket (media types)
+// and is auto-flipped to 'picture-video' merely by queuing an image, whereas this
+// governs HOW the render works and must never change because someone added a photo.
+// Four call sites also read montageMode as the binary `=== 'picture-video'`, so a
+// third value would silently mislabel them. Not named `mode` — that's taken by the
+// display-density store at the top of this file.
+export const montageRender = writable(LS('montageRenderMode', 'beat'));
+montageRender.subscribe((v) => persist('montageRenderMode', v));
+export const isMatchCut = () => get(montageRender) === 'match';
 
 // --- Playlists --------------------------------------------------------------
 export const playlists = writable([]);
