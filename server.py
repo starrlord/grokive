@@ -5400,16 +5400,42 @@ def api_prompts_freeform_presets_post() -> Response:
 
 @app.get("/api/prompts/responses")
 def api_prompts_responses_get() -> Response:
-    """Saved Prompt Studio responses ([] if none/unreadable). On the data volume, shared across devices."""
+    """Saved Prompt Studio responses ([] if none/unreadable). On the data volume, shared across devices.
+
+    There is no server-side search, so this ships the WHOLE library in one body — several MB once you
+    have tens of thousands of saved prompts. The Firefox extension re-reads it whenever its in-memory
+    copy has lapsed (its MV2 background page is non-persistent, so that happens often), which made a
+    single 🎲 roll cost a full download. An ETag keyed on the file's mtime+size lets the browser's own
+    HTTP cache answer those re-reads with a 304 and no body.
+
+    ``no-cache`` means "stored, but revalidate every time" — never serve blind. That keeps the client
+    correct against the writers it cannot observe (autonomous tagging, /import-library, a backup
+    restore), because every one of them goes through ``_atomic_write_json`` and so moves mtime+size.
+
+    The stat→read→stat sandwich is what makes the validator honest: ``_atomic_write_json`` publishes
+    by rename, so a read always returns one complete version, but if a write lands mid-read we cannot
+    tell WHICH version we just served — so we ship it with no validator rather than pin the wrong one.
+    """
     data: list = []
+    etag: str | None = None
     if RESPONSES_FILE.exists():
         try:
+            before = RESPONSES_FILE.stat()
             loaded = json.loads(RESPONSES_FILE.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 data = loaded
+                after = RESPONSES_FILE.stat()
+                if (before.st_mtime_ns, before.st_size) == (after.st_mtime_ns, after.st_size):
+                    etag = f"{before.st_mtime_ns:x}-{before.st_size:x}"
         except Exception:
-            data = []
-    return jsonify(responses=data)
+            data = []          # unreadable/corrupt: serve the empty fallback, never pin it
+            etag = None
+    resp = jsonify(responses=data)
+    resp.headers["Cache-Control"] = "private, no-cache"
+    if etag:
+        resp.set_etag(etag, weak=True)
+        return resp.make_conditional(request)
+    return resp
 
 
 # Serializes EVERY read-modify-write of saved_responses.json. waitress is multithreaded, so

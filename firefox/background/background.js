@@ -39,7 +39,7 @@
         return API.status();
 
       case 'getResponses':
-        return API.getResponses();
+        return API.getResponses(msg);   // { refresh } forces past the library cache
 
       case 'searchPrompts':
         return API.searchPrompts(msg.query, msg);
@@ -139,7 +139,12 @@
         notify('Grokive — Random prompt', 'Pulled a prompt, but ' + (copy.error || 'clipboard copy failed') + '.');
         return;
       }
-      notify('Grokive — Copied prompt', truncate(text, 160));
+      // Name the pool in the title: the hotkey has no UI, so this is the only place it
+      // can tell you WHICH source it drew from.
+      const label = result.data.sourceLabel || API.sourceLabel(settings.sourceFolder);
+      const count = (typeof result.data.count === 'number') ? result.data.count : 0;
+      const from = label + (count ? ' · 1 of ' + count.toLocaleString() : '');
+      notify('Grokive — Copied from ' + from, truncate(text, 160));
     } catch (e) {
       notify('Grokive — Random prompt', (e && e.message) ? e.message : String(e));
     }

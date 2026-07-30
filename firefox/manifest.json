@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Grokive Prompt Studio",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "description": "Search, pull, enhance, and save Grok prompts — and copy reference images from your Grokive collections — without leaving Grok Imagine.",
   "icons": {
     "48": "icons/icon.svg",

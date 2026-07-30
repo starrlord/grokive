@@ -261,7 +261,8 @@
   // channel. Every write path refreshes the cache from its own response (those
   // endpoints return the full updated list), so a save is visible immediately.
   const RESPONSES_TTL_MS = 60 * 1000;
-  let responsesCache = null;   // { at: <epoch ms>, list: [...] }
+  let responsesCache = null;      // { at: <epoch ms>, list: [...] }
+  let responsesInflight = null;   // single-flight guard, see loadResponses
 
   function cacheResponses(list) {
     responsesCache = { at: Date.now(), list: Array.isArray(list) ? list : [] };
@@ -273,22 +274,42 @@
     else responsesCache = null;
   }
 
-  async function loadResponses(s) {
-    if (responsesCache && (Date.now() - responsesCache.at) < RESPONSES_TTL_MS) {
+  // Load the library, from cache when it's fresh. `force` skips the TTL — the source
+  // picker's ↻ uses it to pull in changes the extension can't observe (a star or a
+  // delete made in the web UI, autonomous tagging, an import).
+  //
+  // SINGLE-FLIGHT: a miss parks every concurrent caller on ONE promise. Without it a
+  // burst — spamming 🎲, or the popup's folder refresh racing a roll — pulls the whole
+  // multi-MB library down once per caller.
+  async function loadResponses(s, force) {
+    if (!force && responsesCache && (Date.now() - responsesCache.at) < RESPONSES_TTL_MS) {
       return responsesCache.list;
     }
-    const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/prompts/responses'));
-    if (!res.ok || !json) throw new Error(extractError(res, json, 'Could not load prompts'));
-    const list = Array.isArray(json.responses) ? json.responses : [];
-    cacheResponses(list);
-    return list;
+    if (responsesInflight) return responsesInflight;   // already fetching: ride along
+    responsesInflight = (async () => {
+      const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/prompts/responses'));
+      if (!res.ok || !json) throw new Error(extractError(res, json, 'Could not load prompts'));
+      const list = Array.isArray(json.responses) ? json.responses : [];
+      cacheResponses(list);
+      return list;
+    })();
+    try {
+      return await responsesInflight;
+    } finally {
+      responsesInflight = null;   // clear on failure too, or one error wedges every reader
+    }
   }
 
-  // { type:'getResponses' } -> responses + folder summary (A-Z), unfiled, total
-  async function getResponses() {
+  // { type:'getResponses', refresh? } -> folder summary (A-Z), unfiled, starred, total
+  //
+  // Deliberately does NOT return the library itself. It used to, and nothing read it —
+  // the popup and the toolbar's source picker only ever want the folder counts, so the
+  // whole multi-MB list was being structured-cloned across sendMessage for nothing.
+  // Callers that need prompt text use searchPrompts (paged + preview-capped) or getPrompt.
+  async function getResponses(opts) {
     try {
       const s = await getSettingsRaw();
-      const responses = await loadResponses(s);
+      const responses = await loadResponses(s, !!(opts && opts.refresh));
 
       const counts = new Map();
       let unfiled = 0;
@@ -302,7 +323,6 @@
         .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
       return ok({
-        responses: responses,
         folders: folders,
         unfiled: unfiled,
         starred: responses.filter((r) => r && r.starred).length,
@@ -444,31 +464,42 @@
     }
   }
 
+  // Human name for a source sentinel. Shared with background.js's hotkey notification;
+  // content/grok.js keeps its own copy (content scripts can't reach this file).
+  function sourceLabel(sel) {
+    if (sel === '__starred') return '★ Starred';
+    if (sel === '__unfiled') return 'Unfiled';
+    if (!sel || sel === '__all') return 'All prompts';
+    return sel;
+  }
+
+  // Nothing to draw from — say WHICH pool is empty, so an empty ★ Starred doesn't
+  // read as "your library is empty".
+  function emptyPoolError(sel) {
+    if (sel === '__starred') return 'No starred prompts yet — ★ some in Grokive first.';
+    if (sel === '__unfiled') return 'No unfiled prompts — everything is in a folder.';
+    if (!sel || sel === '__all') return 'Your prompt library is empty.';
+    return 'No prompts in "' + sel + '" yet.';
+  }
+
   // { type:'randomPrompt', folder } — background does the pick.
   // folder: '__all' | '__unfiled' | '__starred' | a folder name
+  //
+  // Reads the SHARED cache rather than pulling the library per roll: rolling is the one
+  // action people repeat, and the payload is multi-MB. A roll now also warms the cache
+  // that search/getPrompt read, and vice versa. Worst case that costs a roll a snapshot
+  // up to RESPONSES_TTL_MS old — the source picker's ↻ forces a refresh when it matters.
   async function randomPrompt(folder) {
     try {
       const s = await getSettingsRaw();
       const sel = folder || s.sourceFolder || '__all';
-      const { res, json } = await withAuth(s, (ss) => getJson(ss.baseUrl, '/api/prompts/responses'));
-      if (!res.ok || !json) {
-        return { ok: false, error: extractError(res, json, 'Could not load prompts') };
-      }
-      const all = Array.isArray(json.responses) ? json.responses : [];
+      const all = await loadResponses(s);
 
-      let pool;
-      if (sel === '__all') {
-        pool = all;
-      } else if (sel === '__unfiled') {
-        pool = all.filter((r) => !(r && typeof r.folder === 'string' && r.folder.trim()));
-      } else if (sel === '__starred') {
-        pool = all.filter((r) => r && r.starred);
-      } else {
-        pool = all.filter((r) => r && typeof r.folder === 'string' && r.folder.trim() === sel);
-      }
-
+      // Always filter() — never alias loadResponses' array, which IS the cache's list.
+      // inFolderSelection is the same predicate search scopes by, so the two agree.
+      const pool = all.filter((r) => r && typeof r === 'object' && inFolderSelection(r, sel));
       if (!pool.length) {
-        return { ok: false, error: 'No prompts in that folder yet.' };
+        return { ok: false, error: emptyPoolError(sel) };
       }
 
       const picked = pool[Math.floor(Math.random() * pool.length)];
@@ -479,7 +510,9 @@
           folder: (picked.folder || '').trim(),
           tags: Array.isArray(picked.tags) ? picked.tags : []
         },
-        count: pool.length
+        count: pool.length,
+        source: sel,
+        sourceLabel: sourceLabel(sel)
       });
     } catch (e) {
       return fail(e);
@@ -540,6 +573,7 @@
       const body = { text: t, folder: target, starred: !!starred };
       const { res, json } = await withAuth(s, (ss) => postJson(ss.baseUrl, '/api/prompts/responses/add', body));
       if (!res.ok || !json || json.ok === false) {
+        syncResponsesCache(json);   // a rejection means our view is suspect — refresh it or drop it
         return { ok: false, error: extractError(res, json, 'Save failed') };
       }
       syncResponsesCache(json);   // the endpoint echoes the full list — keep search current
@@ -559,6 +593,10 @@
       const body = { id: pid, starred: !!starred };
       const { res, json } = await withAuth(s, (ss) => postJson(ss.baseUrl, '/api/prompts/responses/star', body));
       if (!res.ok || !json || json.ok === false) {
+        // The 404 "Unknown prompt id" body carries the authoritative list. Taking it here
+        // evicts the phantom row; without this the stale row survives the whole TTL and
+        // every retry of ★ reproduces the same error.
+        syncResponsesCache(json);
         return { ok: false, error: extractError(res, json, 'Star failed') };
       }
       syncResponsesCache(json);   // ★ flips must show up in the next search
@@ -756,7 +794,8 @@
     getCollectionImages: getCollectionImages,
     fetchImageData: fetchImageData,
     copyToClipboard: copyToClipboard,
-    // Internal helper reused by the 'random-prompt' command in background.js:
-    getSettingsRaw: getSettingsRaw
+    // Internal helpers reused by the 'random-prompt' command in background.js:
+    getSettingsRaw: getSettingsRaw,
+    sourceLabel: sourceLabel
   };
 })();

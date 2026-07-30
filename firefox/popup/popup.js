@@ -178,7 +178,7 @@ function reflectSaveFolder() {
 
 /* ---------- Folder <select> ---------- */
 function populateFolders(data) {
-  // data: { responses, folders:[{name,count}], unfiled, total }
+  // data: { folders:[{name,count}], unfiled, starred, total } — counts only, no prompt text
   const sel = el.sourceFolder;
   const folders = (data && Array.isArray(data.folders)) ? data.folders : [];
   const unfiled = (data && typeof data.unfiled === 'number') ? data.unfiled : 0;
@@ -491,7 +491,7 @@ async function doRandom() {
   el.anotherBtn.disabled = false;
 
   const count = res.data && typeof res.data.count === 'number' ? res.data.count : 0;
-  el.poolInfo.textContent = count ? ('1 of ' + count) : '';
+  el.poolInfo.textContent = count ? ('1 of ' + count.toLocaleString()) : '';
 }
 
 async function doCopy() {

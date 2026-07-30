@@ -32,9 +32,17 @@ parties, no cloud, no telemetry.
 - **Variations** — generate a handful of alternates and click one to load it.
 - **Save** edited or brand-new prompts to your `Firefox` folder (server-side append +
   dedupe — it never clobbers your other prompts).
-- **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere.
+- **Keyboard shortcut** `Alt+Shift+R` — copy a random prompt to the clipboard from anywhere. The
+  notification names the pool it drew from ("Copied from ★ Starred · 1 of 147").
 - **grok.com toolbar** — a compact floating pill with Random / Find / Enhance / Save / Star buttons
   that write directly into the page's prompt field (falls back to clipboard if it can't find one).
+- **Pick what 🎲 pulls from, on grok.com** — the **▾** beside the die (or right-click the die)
+  opens a source picker: **★ Starred**, **All prompts**, **Unfiled**, or any folder, each with its
+  count, filterable because a tagged library runs to hundreds of folders. Your choice is the same
+  `sourceFolder` the popup and the `Alt+Shift+R` hotkey use, so all three stay in step. Every roll
+  then says where it came from — *"Random from ★ Starred · 1 of 147"* — so an unlucky repeat out of
+  a small folder is never mistaken for a broken shuffle. **↻** re-reads your folders when you've
+  been starring or tidying in the Grokive web UI.
 - **Find a prompt on grok.com** — the 🔎 button opens a search panel over your whole prompt
   library; click a result to read it in full, then **Insert** it into the Grok input or 📋 copy it.
 - **Reference images** — a 📎 button on the grok.com toolbar opens your Grokive **collections**;
@@ -59,7 +67,7 @@ Grokive server at the configured **Server URL** using these endpoints:
 | `GET /api/auth/status` | Check whether auth is required and whether you're logged in. |
 | `POST /api/login` | Log in with stored credentials (only when the server requires auth). |
 | `GET /api/prompts/status` | Check if the AI (LLM) is configured, and which model. |
-| `GET /api/prompts/responses` | Load your prompt library and its folders (also backs prompt search). |
+| `GET /api/prompts/responses` | Load your prompt library and its folders (also backs prompt search and the 🎲 pool). Cached in the background for a minute and shared by all four surfaces, so rolling repeatedly doesn't re-download it; the server sends a `Cache-Control: no-cache` + `ETag` pair, so even a cold re-read is usually an empty `304`. |
 | `POST /api/prompts/responses/add` | Save a prompt into a folder (append + dedupe). |
 | `POST /api/prompts/enhance` | Rewrite / enhance a prompt's text. |
 | `POST /api/prompts/generate` | Generate variations of a prompt. |
@@ -163,8 +171,9 @@ counts.
 
 Click the toolbar button to open the popup, then:
 
-1. **Pick a source folder** — *All*, *Unfiled*, or a specific folder (with its prompt count).
-   Your choice is remembered.
+1. **Pick a source folder** — *All*, *★ Starred*, *Unfiled*, or a specific folder (with its prompt
+   count). Your choice is remembered, and it's the same setting the grok.com toolbar's **▾** and the
+   `Alt+Shift+R` hotkey use.
 2. **🎲 Random prompt** — pulls a random prompt from that folder into the editable box.
    **↻ Another** re-rolls.
 3. Or **🔎 search** the library — the box under the folder select searches **every folder** by
@@ -180,20 +189,31 @@ Click the toolbar button to open the popup, then:
 ### Keyboard shortcut
 
 Press **`Alt+Shift+R`** anywhere to pull a random prompt from your last-picked source folder,
-copy it to the clipboard, and show a notification with a short preview. (You can rebind this in
+copy it to the clipboard, and show a notification titled with the pool it drew from
+("Grokive — Copied from ★ Starred · 1 of 147") over a short preview. (You can rebind this in
 `about:addons` → ⚙ → **Manage Extension Shortcuts**.)
 
 ### grok.com toolbar
 
-On `grok.com`, a compact floating pill appears (bottom-right) with six buttons:
+On `grok.com`, a compact floating pill appears (bottom-right) with seven buttons:
 
 - **🎲 Random** — inserts a random prompt into the Grok input field (or copies it to the
-  clipboard if no field is found).
+  clipboard if no field is found). The toast names the pool: *"Random from ★ Starred · 1 of 147"*.
+- **▾ Source** — chooses which pool 🎲 draws from (see below). Right-clicking 🎲 does the same.
 - **🔎 Find** — opens a search panel over every saved prompt (see below).
 - **✨ Enhance** — enhances the current field text in place, using your default dialogue level.
 - **💾 Save** — saves the current field text to your save folder.
 - **⭐ Star** — saves *and* stars the current field text (favorites it in Grokive).
 - **📎 References** — opens the reference-image browser (see below).
+
+**Choose the Random source.** Click **▾** (or right-click **🎲**) to open the source picker,
+anchored to the toolbar like the other panels. It lists **★ Starred** and **All prompts** first,
+then **Unfiled** and every folder A–Z, each with its prompt count; the current one carries a ✓.
+Type in the filter box to narrow it — Enter takes the single remaining match. Picking a source
+**saves it and stops**; it deliberately doesn't roll, so a stray click can never overwrite what
+you've typed into Grok. **↻** re-reads your folders from Grokive, for when you've been starring or
+re-filing prompts in the web UI and want the counts to catch up. Because this is the same stored
+`sourceFolder` the popup and the hotkey read, changing it anywhere updates everywhere — live.
 
 **Find a prompt.** Click **🔎** to open a search panel anchored to the toolbar. Type any words —
 in any order — and it matches against each prompt's text, folder, and tags across your **entire

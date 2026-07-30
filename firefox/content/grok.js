@@ -223,14 +223,21 @@
     const text = prompt && prompt.text ? prompt.text : '';
     if (!text) { toast('No prompt text returned.', 'error'); return; }
 
+    // Name the pool every time. Without it the bar is a black box: an unlucky repeat
+    // out of a 100-prompt folder is indistinguishable from a broken shuffle.
+    srcCurrent = res.data.source || settings.sourceFolder || '__all';
+    syncRandomTitle();
+    const count = (typeof res.data.count === 'number') ? res.data.count : 0;
+    const from = sourceLabel(srcCurrent) + (count ? ' · 1 of ' + count.toLocaleString() : '');
+
     const field = findPromptField();
     if (field && setFieldText(field, text)) {
       try { field.focus(); } catch (e) { /* noop */ }
-      toast('Random prompt inserted', 'ok');
+      toast('Random from ' + from, 'ok');
     } else {
       // Degrade to clipboard via background (content scripts can't reliably copy).
       const copy = await send({ type: 'copyToClipboard', text });
-      if (copy.ok) toast('No input found — copied to clipboard', 'ok');
+      if (copy.ok) toast('No input found — copied ' + from, 'ok');
       else toast('No input found and copy failed.', 'error');
     }
   }
@@ -1152,7 +1159,8 @@
 
   function openRefsPanel() {
     if (!refsPanelEl) buildRefsPanel();
-    closeFindPanel();   // both anchor to the same spot — only one at a time
+    closeFindPanel();   // all three anchor to the same spot — only one at a time
+    closeSrcPanel();
     positionRefsPanel();
     refsPanelEl.classList.add('gks-refs-open');
     loadRefCollectionsView();
@@ -1488,7 +1496,8 @@
 
   function openFindPanel() {
     if (!findPanelEl) buildFindPanel();
-    closeRefsPanel();   // both anchor to the same spot — only one at a time
+    closeRefsPanel();   // all three anchor to the same spot — only one at a time
+    closeSrcPanel();
     positionPanel(findPanelEl);
     findPanelEl.classList.add('gks-find-open');
     if (!(findInputEl.value || '').trim()) setFindStatus('Type to search every saved prompt.');
@@ -1513,6 +1522,253 @@
     findOffset = 0;
     findTotal = 0;
     findTerms = [];
+  }
+
+  // ---- Source picker (which pool 🎲 draws from) -------------------------------
+  // `settings.sourceFolder` decides the Random pool, and it used to be reachable only
+  // from the popup — so on grok.com the 🎲 was a black box you couldn't re-aim. This is
+  // the same panel chrome as Find/References: pinned specials on top (★ Starred first,
+  // since that's the usual pick), then every folder A-Z with its count, filterable
+  // because a tagged library runs to hundreds of folders.
+  //
+  // Picking a source SAVES it and stops — it deliberately does not roll. The panel sits
+  // one click from 🎲, and an accidental row click must never overwrite what you've
+  // typed into Grok's prompt box.
+  let srcPanelEl = null;
+  let srcBodyEl = null;
+  let srcInputEl = null;
+  let srcStatusEl = null;
+  let srcSummary = null;        // last { folders, unfiled, starred, total } from the background
+  let srcCurrent = '__all';     // mirrors settings.sourceFolder, for the ✓ and the 🎲 title
+  let srcSeq = 0;               // guards against an older reply overwriting a newer one
+  let randomBtnEl = null;
+
+  // Mirrors sourceLabel() in lib/api.js — a content script can't reach the background's
+  // module, so the vocabulary is duplicated here (as DEFAULT_SETTINGS already is).
+  function sourceLabel(sel) {
+    if (sel === '__starred') return '★ Starred';
+    if (sel === '__unfiled') return 'Unfiled';
+    if (!sel || sel === '__all') return 'All prompts';
+    return sel;
+  }
+
+  function syncRandomTitle() {
+    if (!randomBtnEl) return;
+    randomBtnEl.title = 'Random prompt from ' + sourceLabel(srcCurrent)
+      + ' (Grokive) — ▾ or right-click to change';
+  }
+
+  function srcIsOpen() {
+    return !!(srcPanelEl && srcPanelEl.classList.contains('gks-src-open'));
+  }
+
+  function setSrcStatus(message, kind) {
+    if (!srcStatusEl) return;
+    srcStatusEl.textContent = message || '';
+    srcStatusEl.classList.toggle('gks-refs-status-err', kind === 'error');
+    srcStatusEl.style.display = message ? '' : 'none';
+  }
+
+  // Specials first (they're what people actually roll from), then folders A-Z exactly
+  // as the popup's <select> orders them.
+  function srcEntries() {
+    const d = srcSummary || {};
+    const out = [
+      { value: '__starred', label: '★ Starred', count: d.starred || 0 },
+      { value: '__all', label: 'All prompts', count: d.total || 0 }
+    ];
+    if (d.unfiled) out.push({ value: '__unfiled', label: 'Unfiled', count: d.unfiled });
+    for (const f of (Array.isArray(d.folders) ? d.folders : [])) {
+      if (!f || !f.name) continue;
+      out.push({ value: f.name, label: f.name, count: f.count || 0 });
+    }
+    return out;
+  }
+
+  async function pickSource(entry) {
+    const previous = srcCurrent;
+    srcCurrent = entry.value;
+    renderSrcList();                       // tick moves immediately; revert below if it fails
+    const res = await send({ type: 'setSettings', settings: { sourceFolder: entry.value } });
+    if (!res.ok) {
+      srcCurrent = previous;
+      renderSrcList();
+      toast(res.error || 'Could not save that source.', 'error');
+      return;
+    }
+    syncRandomTitle();
+    closeSrcPanel();
+    toast('🎲 now pulls from ' + entry.label + ' · ' + entry.count.toLocaleString(), 'ok');
+  }
+
+  function buildSrcRow(entry) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'gks-refs-row gks-src-row';
+    const on = entry.value === srcCurrent;
+    if (on) row.classList.add('gks-src-row-on');
+
+    const mark = document.createElement('span');
+    mark.className = 'gks-src-mark';
+    mark.textContent = on ? '✓' : '';
+
+    const name = document.createElement('span');
+    name.className = 'gks-refs-row-name';
+    name.textContent = entry.label;
+
+    const count = document.createElement('span');
+    count.className = 'gks-refs-row-count';
+    count.textContent = entry.count.toLocaleString();
+
+    row.title = on
+      ? 'Random already pulls from ' + entry.label
+      : 'Pull random prompts from ' + entry.label;
+    row.addEventListener('click', () => pickSource(entry));
+
+    row.appendChild(mark);
+    row.appendChild(name);
+    row.appendChild(count);
+    return row;
+  }
+
+  function renderSrcList() {
+    if (!srcBodyEl) return;
+    const q = (srcInputEl && srcInputEl.value ? srcInputEl.value : '').trim().toLowerCase();
+    const all = srcEntries();
+    const rows = q ? all.filter((e) => e.label.toLowerCase().indexOf(q) >= 0) : all;
+
+    srcBodyEl.innerHTML = '';
+    const list = document.createElement('div');
+    list.className = 'gks-refs-list';
+    for (const e of rows) list.appendChild(buildSrcRow(e));
+    srcBodyEl.appendChild(list);
+
+    if (!srcSummary) return;                       // still loading; keep the load status
+    if (!rows.length) { setSrcStatus('No folder matches "' + q + '".'); return; }
+    const folders = Array.isArray(srcSummary.folders) ? srcSummary.folders.length : 0;
+    setSrcStatus(q
+      ? rows.length.toLocaleString() + ' of ' + all.length.toLocaleString() + ' sources'
+      : folders.toLocaleString() + ' folders · now: ' + sourceLabel(srcCurrent));
+    if (!q) srcBodyEl.scrollTop = 0;
+  }
+
+  async function loadSrcFolders(refresh) {
+    const seq = ++srcSeq;
+    if (!srcSummary || refresh) setSrcStatus(refresh ? 'Refreshing…' : 'Loading folders…');
+    const res = await send({ type: 'getResponses', refresh: !!refresh });
+    if (seq !== srcSeq || !srcPanelEl) return;     // superseded, or the panel is gone
+    if (!res.ok) {
+      setSrcStatus(res.error || 'Could not load your folders.', 'error');
+      return;
+    }
+    srcSummary = res.data || {};
+    renderSrcList();
+  }
+
+  function buildSrcPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'gks-refs gks-src';        // reuse the References panel chrome
+
+    const head = document.createElement('div');
+    head.className = 'gks-refs-head';
+
+    const title = document.createElement('span');
+    title.className = 'gks-refs-title';
+    title.textContent = 'Random pulls from';
+
+    // The extension can't see stars/deletes/tagging done in the Grokive web UI, so give
+    // the counts an explicit way to catch up rather than waiting out the cache.
+    const refresh = document.createElement('button');
+    refresh.type = 'button';
+    refresh.className = 'gks-refs-back gks-src-refresh';
+    refresh.textContent = '↻';
+    refresh.title = 'Re-read your folders from Grokive';
+    refresh.addEventListener('click', () => loadSrcFolders(true));
+
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'gks-refs-x';
+    x.title = 'Close';
+    x.textContent = '×';
+    x.addEventListener('click', closeSrcPanel);
+
+    head.appendChild(refresh);
+    head.appendChild(title);
+    head.appendChild(x);
+
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'gks-find-search';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'gks-find-input';
+    input.placeholder = 'Filter folders…';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('spellcheck', 'false');
+    input.addEventListener('input', () => renderSrcList());
+    input.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();                      // keep grok.com's own hotkeys out of it
+      if (ev.key === 'Escape') { ev.preventDefault(); closeSrcPanel(); }
+      if (ev.key === 'Enter') {
+        // Enter takes the single remaining match — the fast path for a known folder name.
+        ev.preventDefault();
+        const only = srcBodyEl && srcBodyEl.querySelector('.gks-src-row');
+        if (only && srcBodyEl.querySelectorAll('.gks-src-row').length === 1) only.click();
+      }
+    });
+    searchWrap.appendChild(input);
+
+    const body = document.createElement('div');
+    body.className = 'gks-refs-body gks-src-body';
+
+    const status = document.createElement('div');
+    status.className = 'gks-refs-status';
+    status.style.display = 'none';
+
+    panel.appendChild(head);
+    panel.appendChild(searchWrap);
+    panel.appendChild(body);
+    panel.appendChild(status);
+
+    srcPanelEl = panel;
+    srcBodyEl = body;
+    srcInputEl = input;
+    srcStatusEl = status;
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  function openSrcPanel() {
+    if (!srcPanelEl) buildSrcPanel();
+    closeRefsPanel();   // all three anchor to the same spot — only one at a time
+    closeFindPanel();
+    positionPanel(srcPanelEl);
+    srcPanelEl.classList.add('gks-src-open');
+    // Re-read the setting on open: the popup or another tab may have changed it.
+    getSettings().then((s) => {
+      srcCurrent = s.sourceFolder || '__all';
+      syncRandomTitle();
+      if (srcIsOpen()) renderSrcList();
+    });
+    renderSrcList();      // paint the previous list instantly, then refresh it
+    loadSrcFolders(false);
+    try { srcInputEl.focus(); srcInputEl.select(); } catch (e) { /* noop */ }
+  }
+
+  function closeSrcPanel() {
+    if (srcPanelEl) srcPanelEl.classList.remove('gks-src-open');
+    srcSeq++;   // abandon any in-flight reply
+  }
+
+  function toggleSrcPanel() {
+    if (srcIsOpen()) closeSrcPanel();
+    else openSrcPanel();
+  }
+
+  function destroySrcPanel() {
+    try { if (srcPanelEl && srcPanelEl.parentNode) srcPanelEl.parentNode.removeChild(srcPanelEl); } catch (e) { /* noop */ }
+    srcPanelEl = srcBodyEl = srcInputEl = srcStatusEl = null;
+    srcSummary = null;
+    randomBtnEl = null;
   }
 
   // Saved position lives under its OWN storage key (not `settings`, which the
@@ -1595,6 +1851,16 @@
     }
 
     const btnRandom = mkBtn('🎲', 'Random prompt from your library (Grokive)', doRandom);
+    randomBtnEl = btnRandom;
+    // The caret re-aims 🎲 without a trip to the popup. Right-clicking the die does the
+    // same thing — the two live together, so the whole cluster should feel like one control.
+    const btnSrc = mkBtn('▾', 'Choose which folder 🎲 pulls from', () => toggleSrcPanel());
+    btnSrc.classList.add('gks-btn-src');
+    btnRandom.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      toggleSrcPanel();
+    });
     const btnEnhance = mkBtn('✨', 'Enhance the current prompt with AI', doEnhance);
     const btnSave = mkBtn('💾', 'Save the current prompt to your saveFolder', doSave);
     const btnStar = mkBtn('⭐', 'Save & star the current prompt (Grokive favorites)', doStar);
@@ -1605,6 +1871,7 @@
     btnRefs.classList.add('gks-btn-refs');
 
     group.appendChild(btnRandom);
+    group.appendChild(btnSrc);
     group.appendChild(btnFind);
     group.appendChild(btnEnhance);
     group.appendChild(btnSave);
@@ -1621,8 +1888,11 @@
       ev.preventDefault();
       ev.stopPropagation();
       bar.classList.add('gks-hidden');
+      // All three panels live on document.body, not inside the bar — hiding the bar
+      // would leave one painted over the page, anchored to something invisible.
       closeRefsPanel();
       closeFindPanel();
+      closeSrcPanel();
     });
 
     // --- Drag-to-move (the handle is the grip) -------------------------------
@@ -1644,6 +1914,7 @@
         bar.style.bottom = 'auto';
         closeRefsPanel();   // the panels are anchored to the bar; don't leave one stranded
         closeFindPanel();
+        closeSrcPanel();
       }
       bar.style.left = (startLeft + dx) + 'px';
       bar.style.top = (startTop + dy) + 'px';
@@ -1680,8 +1951,9 @@
       ev.stopPropagation();
       if (justDragged) return;           // this "click" was just the end of a drag
       bar.classList.toggle('gks-collapsed');
-      closeRefsPanel();                  // the 📎/🔎 buttons are hidden while collapsed
+      closeRefsPanel();                  // the 📎/🔎/▾ buttons are hidden while collapsed
       closeFindPanel();
+      closeSrcPanel();
       // Width changes on collapse/expand — re-clamp a custom-positioned bar so it
       // can't overflow off-screen after growing.
       if (bar.style.left && bar.style.left !== 'auto') {
@@ -1703,12 +1975,15 @@
     document.body.appendChild(toolbarEl);
     applySavedPos(toolbarEl);   // restore where the user last dragged it
     startQuota();               // begin polling Imagine video quota
+    // Name the current pool on the 🎲 tooltip from the first paint.
+    getSettings().then((s) => { srcCurrent = s.sourceFolder || '__all'; syncRandomTitle(); });
   }
 
   function removeToolbar() {
     stopQuota();
     destroyRefsPanel();
     destroyFindPanel();
+    destroySrcPanel();
     try {
       if (toolbarEl && toolbarEl.parentNode) toolbarEl.parentNode.removeChild(toolbarEl);
     } catch (e) { /* noop */ }
@@ -1735,8 +2010,13 @@
     ext.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local' || !changes.settings) return;
       const next = changes.settings.newValue || {};
-      if (next.injectOnGrok === false) removeToolbar();
-      else mountToolbar();
+      if (next.injectOnGrok === false) { removeToolbar(); return; }
+      mountToolbar();
+      // Changing the source in the popup (or another grok.com tab) must re-aim this
+      // toolbar too — settings is the single source of truth, not our copy of it.
+      srcCurrent = next.sourceFolder || '__all';
+      syncRandomTitle();
+      if (srcIsOpen()) renderSrcList();
     });
   } catch (e) { /* storage.onChanged not critical */ }
 
@@ -1748,6 +2028,7 @@
       }
       if (refsIsOpen()) positionRefsPanel();
       if (findIsOpen()) positionPanel(findPanelEl);
+      if (srcIsOpen()) positionPanel(srcPanelEl);
     });
   } catch (e) { /* noop */ }
 
@@ -1767,9 +2048,16 @@
       if (toolbarEl && toolbarEl.contains(ev.target)) return;
       closeFindPanel();
     }, true);
+    document.addEventListener('pointerdown', (ev) => {
+      if (!srcIsOpen()) return;
+      if (srcPanelEl.contains(ev.target)) return;
+      if (toolbarEl && toolbarEl.contains(ev.target)) return;
+      closeSrcPanel();
+    }, true);
     document.addEventListener('keydown', (ev) => {
       if (ev.key === 'Escape' && refsIsOpen()) closeRefsPanel();
       if (ev.key === 'Escape' && findIsOpen()) closeFindPanel();
+      if (ev.key === 'Escape' && srcIsOpen()) closeSrcPanel();
     });
     // Quota popover: close on an outside tap. Registered ONCE here (not inside
     // buildQuota) so a toolbar remount can't leak a stale, detached handler.

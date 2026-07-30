@@ -77,7 +77,7 @@
   align-items: center;
   gap: 6px;
   overflow: hidden;
-  max-width: 260px;
+  max-width: 300px;
   opacity: 1;
   transition: max-width 0.18s ease, opacity 0.14s ease, margin 0.18s ease;
 }
@@ -124,6 +124,20 @@
 /* Star (save & favorite) — warm amber accent to set it apart from plain Save. */
 .gks-btn-star:hover {
   border-color: #b08a2e;
+}
+
+/* Source caret — a slim satellite of 🎲, not a peer of the other actions. Negative
+   margin pulls it inside the group gap so the pair reads as one control. */
+.gks-btn.gks-btn-src {
+  width: 18px;
+  margin-left: -4px;
+  border-radius: 8px;
+  color: #8a93a0;
+  font-size: 11px;
+}
+
+.gks-btn.gks-btn-src:hover {
+  color: #e6e9ee;
 }
 
 .gks-btn:disabled,
@@ -839,6 +853,51 @@
 .gks-find-more:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Source picker — which pool 🎲 draws from. Reuses the References shell (.gks-refs
+   head/body/status) and the Find panel's filter box; adds only the ✓ column and the
+   selected-row accent. */
+.gks-src.gks-src-open {
+  display: flex;
+}
+
+.gks-src-body {
+  padding-top: 8px;
+}
+
+/* Slimmer than a collection row: no cover art, just tick + name + count. */
+.gks-src-row {
+  padding: 7px 9px;
+}
+
+.gks-src-mark {
+  flex: 0 0 auto;
+  width: 12px;
+  color: #7c6cff;
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+}
+
+.gks-src-row-on {
+  border-color: rgba(124, 108, 255, 0.55);
+  background: rgba(124, 108, 255, 0.12);
+}
+
+.gks-src-row-on:hover {
+  border-color: rgba(124, 108, 255, 0.8);
+  background: rgba(124, 108, 255, 0.2);
+}
+
+.gks-src-row-on .gks-refs-row-name {
+  color: #d6cfff;
+}
+
+/* ↻ borrows the back-button chrome; nudge it to match the × on the other side. */
+.gks-src-refresh {
+  font-size: 14px;
+  padding: 3px 5px;
 }
 
 /* Press-and-hold preview: a dim full-viewport backdrop with the image centered

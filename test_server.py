@@ -99,9 +99,49 @@ def test_saved_response_text_cap_is_100k():
     print("  save: 50k prompt round-trips, >100k prompt caps at 100k OK")
 
 
+def test_responses_get_revalidates_with_etag():
+    """GET /api/prompts/responses must be conditionally cacheable.
+
+    There is no server-side search, so this endpoint ships the WHOLE library — megabytes once
+    you have tens of thousands of prompts, and the Firefox extension re-reads it every time its
+    in-memory copy lapses. The ETag is what turns those re-reads into empty 304s. It has to
+    stop matching the instant ANY writer touches the file, including the ones no client can
+    observe (autonomous tagging, import, restore) — which is why it keys on mtime+size rather
+    than on anything a request could know.
+    """
+    _write_state(saved=[{"id": "rs-1", "text": "one", "folder": "A"}])
+    with server.app.test_client() as client:
+        r1 = client.get("/api/prompts/responses")
+        assert r1.status_code == 200, r1.status_code
+        etag = r1.headers.get("ETag")
+        assert etag and etag.startswith('W/"'), dict(r1.headers)
+        assert "no-cache" in r1.headers.get("Cache-Control", ""), dict(r1.headers)
+        assert r1.get_json()["responses"][0]["id"] == "rs-1"
+
+        # Unchanged file -> 304, empty body. This is the download we stop paying for.
+        r2 = client.get("/api/prompts/responses", headers={"If-None-Match": etag})
+        assert r2.status_code == 304, r2.status_code
+        assert r2.get_data() == b"", r2.get_data()
+
+        # A write must break the validator, or a client caches a list the server has moved past.
+        assert client.post("/api/prompts/responses/add", json={"text": "two"}).status_code == 200
+        r3 = client.get("/api/prompts/responses", headers={"If-None-Match": etag})
+        assert r3.status_code == 200, r3.status_code
+        assert len(r3.get_json()["responses"]) == 2, r3.get_json()
+        assert r3.headers.get("ETag") != etag, r3.headers.get("ETag")
+
+        # A missing file still answers (empty list) and must NOT pin a validator to it.
+        server.RESPONSES_FILE.unlink(missing_ok=True)
+        r4 = client.get("/api/prompts/responses")
+        assert r4.status_code == 200 and r4.get_json()["responses"] == []
+        assert r4.headers.get("ETag") is None, r4.headers.get("ETag")
+    print("  responses GET: 304 when unchanged, 200 after a write, no ETag when absent OK")
+
+
 if __name__ == "__main__":
     print("server prompt-import golden tests")
     test_long_prompt_imports_exactly_once()
     test_duplicate_pile_collapses_and_merges_tags()
     test_saved_response_text_cap_is_100k()
+    test_responses_get_revalidates_with_etag()
     print("all passed")
