@@ -58,6 +58,7 @@
   let collectionTotal = $state(0);
   let collectionName = $state('');
   let collectionGroupName = $state('');
+  let groupEditorOpen = $state(false); // collection-group input hides behind a chip until tapped
   let activeCanvasName = $state('');
   let canvasName = $state('');          // bound to the drilled-in canvas rename input
   let confirmingCanvas = $state(null);  // the canvas pending delete-confirmation
@@ -332,6 +333,7 @@
     collSig = next;
     collectionName = activeCollection.name;
     collectionGroupName = activeCollection.group || '';
+    groupEditorOpen = false;
     refreshFacets();
     loadCollectionItems(activeCollection, true);
   });
@@ -576,6 +578,11 @@
     const name = collectionName.trim();
     if (name && name !== activeCollection.name) updateCollection(activeCollection.id, { name });
   }
+  // The group editor mounts on demand, so it can't ride the `autofocus` attribute —
+  // browsers only honor that during the initial document parse.
+  function focusOnMount(el) {
+    el.focus();
+  }
   function canonicalCollectionGroup(value) {
     const clean = String(value || '').trim();
     if (!clean) return '';
@@ -776,30 +783,51 @@
              field-sizing which iOS Safari lacks): both stack in one grid cell whose width
              is the text's, so the pill sits right after the name and follows live renames.
              min-w-0 + overflow-hidden let it shrink and scroll for very long names. -->
-        <!-- Below sm the Group field drops to its own line (order-last, after the pill):
-             it can't shrink under 8rem, so sharing a phone-width line with the name
-             chopped the name off. Wrap is mobile-only — on sm+ the name's shrink keeps
-             everything on one line, and enabling wrap there would kick Group + pill to
-             a new line for long names instead. -->
-        <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-nowrap">
-          <label class="relative grid min-w-0 max-w-full items-center overflow-hidden">
+        <!-- The group assignment hides behind the folder chip (group name shown when
+             set, icon alone when not) — the always-open "Group: None" input was dead
+             chrome that wrecked phone layouts. Tapping the chip reveals a transient
+             editor row below; the header line itself never wraps, the name truncates. -->
+        <!-- sm:basis-72 makes this row claim 18rem during the outer row's line-breaking
+             (flex-1 alone is basis 0%, so the control cluster never wrapped — it just
+             squeezed this row to nothing and the title/pill/chip painted over the tabs).
+             18rem covers the row's minimum content (10rem title + pill + chip), so when
+             the cluster does share the line nothing can overlap; when it can't fit, it
+             wraps to its own line. Phones keep basis 0 — the cluster is w-full there. -->
+        <div class="flex min-w-0 flex-1 items-center gap-2 sm:basis-72">
+          <label class="relative grid min-w-0 max-w-full items-center overflow-hidden sm:min-w-40">
             <span aria-hidden="true" class="name-sizer invisible whitespace-pre rounded-lg border border-transparent px-1.5 py-1 text-base font-extrabold sm:text-lg">{collectionName || ' '}</span>
             <input class="absolute inset-0 h-full w-full rounded-lg border border-transparent bg-transparent px-1.5 py-1 text-base font-extrabold text-ink outline-none transition hover:border-line focus:border-[var(--accent)] focus:bg-[var(--surface-2)] sm:text-lg"
               aria-label="Collection name" title="Rename collection" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
           </label>
-          <label class="order-last flex w-full min-w-[8rem] max-w-48 shrink items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1 text-sm sm:order-none sm:w-auto">
-            <span class="text-muted">Group</span>
-            <input class="min-w-0 flex-1 bg-transparent font-semibold text-ink outline-none placeholder:text-muted"
-              aria-label="Collection group" title="Collection group" placeholder="None" list="collection-group-options"
-              bind:value={collectionGroupName} maxlength="120" onblur={saveCollectionGroup} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
-          </label>
-          <datalist id="collection-group-options">
-            {#each existingCollectionGroups as group (group)}
-              <option value={group}></option>
-            {/each}
-          </datalist>
           <span class="shrink-0 rounded-full border border-line bg-[var(--surface-2)] px-2.5 py-0.5 text-sm font-semibold text-muted tabular-nums" title={`${collectionTotal.toLocaleString()} items`}>{collectionTotal.toLocaleString()}</span>
+          <button type="button"
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-sm font-semibold transition hover:border-[var(--accent)] {collectionGroupName ? 'text-ink' : 'text-muted'}"
+            title={collectionGroupName ? `Group: ${collectionGroupName}` : 'Add this collection to a group'}
+            aria-label="Collection group" aria-expanded={groupEditorOpen} aria-controls="collection-group-editor"
+            onclick={() => (groupEditorOpen = !groupEditorOpen)}>
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+            {#if collectionGroupName}<span class="max-w-24 truncate">{collectionGroupName}</span>{/if}
+          </button>
         </div>
+        {#if groupEditorOpen}
+          <!-- Transient group editor: opens focused so the keyboard is up in one tap,
+               saves on Enter/blur, then puts itself away. -->
+          <div id="collection-group-editor" class="flex w-full items-center sm:max-w-sm">
+            <label class="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-2.5 py-2 text-sm">
+              <span class="text-muted">Group</span>
+              <input class="min-w-0 flex-1 bg-transparent font-semibold text-ink outline-none placeholder:text-muted"
+                use:focusOnMount aria-label="Collection group" placeholder="None" list="collection-group-options" maxlength="120"
+                bind:value={collectionGroupName}
+                onblur={() => { saveCollectionGroup(); groupEditorOpen = false; }}
+                onkeydown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur(); }} />
+            </label>
+            <datalist id="collection-group-options">
+              {#each existingCollectionGroups as group (group)}
+                <option value={group}></option>
+              {/each}
+            </datalist>
+          </div>
+        {/if}
         <!-- One control cluster: right-aligned on desktop, a tidy full-width wrapping strip
              on mobile — instead of ml-auto on the tabs alone (which stranded them hard-right
              with a dead gap once the row wrapped). -->
@@ -811,9 +839,9 @@
                merge-export or montage in a click. -->
           <button type="button" aria-pressed={groupByBase}
             class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition {groupByBase ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-            title="Group related videos by their base image" onclick={() => (groupByBase = !groupByBase)}>
+            title="Group related videos by their base image" aria-label="Group related videos by their base image" onclick={() => (groupByBase = !groupByBase)}>
             <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-            Group
+            <span class="hidden sm:inline">Group</span>
           </button>
           <button type="button" class="rounded-lg border border-line px-3 py-2 text-sm font-bold transition hover:border-[var(--accent)] disabled:opacity-50"
             disabled={!currentGridItems.some((it) => it.media_type === 'image')}
