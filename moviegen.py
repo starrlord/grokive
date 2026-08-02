@@ -2228,7 +2228,8 @@ def assemble(segments: list[Path], song_path: Path, out_path: Path,
 def assemble_transitions(segments: list[Path], durations: list[float],
                          joins: list[tuple[str, float]], song_path: Path,
                          out_path: Path, *, video_encode_args: list[str],
-                         fps: int, mux_audio: bool = True) -> None:
+                         fps: int, mux_audio: bool = True,
+                         on_step: Callable[[float, str], None] | None = None) -> None:
     """Assemble segments with crossfade accent transitions, muxing the song over them.
 
     ``durations[i]`` is the rendered length of segment ``i`` (including its handles).
@@ -2248,6 +2249,16 @@ def assemble_transitions(segments: list[Path], durations: list[float],
     stages ffmpeg silently drops everything after an early transition even when every
     offset is in range, which collapsed dense cinematic montages to ~12s. Isolated
     single-stage xfades don't hit that.
+
+    NOTE for future optimizers: an overhaul that stream-copied verbatim segments
+    into the final concat (skipping the body re-encodes) was SHIPPED AND ROLLED
+    BACK (Aug 2026) — in production it washed out the Music Video grade and broke
+    beat sync. What's here instead keeps every ffmpeg command byte-for-byte as the
+    proven serial design and adds only (a) ``on_step`` progress instrumentation
+    (weighted by each step's expected wall share, so the bar tracks real time) and
+    (b) a RENDER_WORKERS pool over the independent piece encodes — same commands,
+    same outputs (verified byte-identical), just concurrent. The body/xfade jobs
+    all read only the immutable run files, so they can run in any order.
     """
     n = len(segments)
     work_dir = out_path.parent
@@ -2265,6 +2276,30 @@ def assemble_transitions(segments: list[Path], durations: list[float],
         else:
             cur.append(i)
     runs.append(cur)
+    K = len(runs)
+    T = K - 1                      # transitions between consecutive runs
+
+    # --- progress bookkeeping ------------------------------------------------ #
+    # Weights approximate each step's wall share: a body re-encode costs ~its
+    # length in seconds (decode+filter+encode of real footage); a run concat is a
+    # stream copy (~fast, but scales with bytes); a transition trio is three tiny
+    # encodes dominated by process spawns; concat/mux are stream copies + an AAC
+    # encode. Rough is fine — the bar just has to MOVE in proportion to reality.
+    timeline = sum(durations)
+    W_CONCAT_S = 0.05              # per second of run stream-copied
+    W_TRIO = 2.5                   # per transition (tail+head+xfade, ~fixed)
+    W_FINAL = max(1.0, 0.08 * timeline)   # final concat + faststart rewrite
+    W_MUX = max(1.0, 0.10 * timeline)     # song AAC encode + remux
+    total_w = (sum(W_CONCAT_S * durations[i] for r in runs if len(r) > 1 for i in r)
+               + 1.0 * timeline    # bodies re-encode ~the whole timeline, minus tds
+               + W_TRIO * T + W_FINAL + W_MUX)
+    done_w = 0.0
+
+    def _tick(w: float, label: str) -> None:
+        nonlocal done_w
+        done_w += w
+        if on_step is not None:
+            on_step(min(1.0, done_w / max(1e-6, total_w)), label)
 
     # Materialise each hard-cut run to a single file (concat demuxer, stream copy —
     # lossless and near-zero memory). A length-1 run is already its own file.
@@ -2283,9 +2318,10 @@ def assemble_transitions(segments: list[Path], durations: list[float],
              f"transition run {ri} concat")
         run_files.append(rf)
         run_durs.append(probe_duration(rf))
+        _tick(W_CONCAT_S * sum(durations[i] for i in run),
+              f"joining section {ri + 1} of {K}")
 
     # td consumed from each run's head (transition into it) and tail (out of it).
-    K = len(runs)
     td_in = [0.0] * K
     for ri in range(1, K):
         td_in[ri] = joins[runs[ri][0]][1]
@@ -2296,37 +2332,64 @@ def assemble_transitions(segments: list[Path], durations: list[float],
     # Every piece is re-encoded to the same W/H/fps/SAR/pixfmt so the final concat is a
     # lossless stream copy. xfade needs CFR inputs, so the trims force fps explicitly.
     norm = f"fps={fps},format=yuv420p,setsar=1"
+
+    # Plan the pieces in final order; each job produces one file, reads only the
+    # (now immutable) run files, and is byte-for-byte the command the serial
+    # design ran — the pool changes wall-clock and nothing else.
     pieces: list[Path] = []
+    jobs: list[tuple[Callable[[], None], float, str]] = []   # (job, weight, label)
     for ri in range(K):
         src, d = run_files[ri], run_durs[ri]
         body_len = max(0.0, d - td_in[ri] - td_out[ri])
         if body_len > 1e-3:
             body = work_dir / f"body_{ri:04d}.mp4"
-            _run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
-                  "-ss", f"{td_in[ri]:.4f}", "-t", f"{body_len:.4f}",
-                  "-vf", norm, "-an", *video_encode_args, "-movflags", "+faststart", str(body)],
-                 f"transition body {ri}")
+            body_cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                        "-ss", f"{td_in[ri]:.4f}", "-t", f"{body_len:.4f}",
+                        "-vf", norm, "-an", *video_encode_args,
+                        "-movflags", "+faststart", str(body)]
+            jobs.append((lambda c=body_cmd, i=ri: _run(c, f"transition body {i}"),
+                         body_len, f"encoding section {ri + 1} of {K}"))
             pieces.append(body)
         if ri < K - 1:
             ttype, td = joins[runs[ri + 1][0]]
             tail = work_dir / f"tail_{ri:04d}.mp4"
             head = work_dir / f"head_{ri:04d}.mp4"
-            _run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
-                  "-ss", f"{max(0.0, d - td):.4f}", "-t", f"{td:.4f}",
-                  "-vf", norm, "-an", *video_encode_args, "-movflags", "+faststart", str(tail)],
-                 f"transition tail {ri}")
-            _run(["ffmpeg", "-y", "-v", "error", "-i", str(run_files[ri + 1]),
-                  "-t", f"{td:.4f}", "-vf", norm, "-an", *video_encode_args,
-                  "-movflags", "+faststart", str(head)],
-                 f"transition head {ri}")
             xc = work_dir / f"xfade_{ri:04d}.mp4"
-            _run(["ffmpeg", "-y", "-v", "error", "-i", str(tail), "-i", str(head),
-                  "-filter_complex",
-                  f"[0:v]{norm}[a];[1:v]{norm}[b];"
-                  f"[a][b]xfade=transition={ttype}:duration={td:.4f}:offset=0[v]",
-                  "-map", "[v]", *video_encode_args, "-movflags", "+faststart", str(xc)],
-                 f"transition xfade {ri}")
+
+            def _trio(src=src, d=d, nxt=run_files[ri + 1], ttype=ttype, td=td,
+                      tail=tail, head=head, xc=xc, ri=ri) -> None:
+                _run(["ffmpeg", "-y", "-v", "error", "-i", str(src),
+                      "-ss", f"{max(0.0, d - td):.4f}", "-t", f"{td:.4f}",
+                      "-vf", norm, "-an", *video_encode_args,
+                      "-movflags", "+faststart", str(tail)],
+                     f"transition tail {ri}")
+                _run(["ffmpeg", "-y", "-v", "error", "-i", str(nxt),
+                      "-t", f"{td:.4f}", "-vf", norm, "-an", *video_encode_args,
+                      "-movflags", "+faststart", str(head)],
+                     f"transition head {ri}")
+                _run(["ffmpeg", "-y", "-v", "error", "-i", str(tail), "-i", str(head),
+                      "-filter_complex",
+                      f"[0:v]{norm}[a];[1:v]{norm}[b];"
+                      f"[a][b]xfade=transition={ttype}:duration={td:.4f}:offset=0[v]",
+                      "-map", "[v]", *video_encode_args, "-movflags", "+faststart", str(xc)],
+                     f"transition xfade {ri}")
+
+            jobs.append((_trio, W_TRIO, f"transition {ri + 1} of {T}"))
             pieces.append(xc)
+
+    # Run the piece encodes concurrently; ticks are emitted from THIS thread only
+    # (the caller's progress protocol is one JSON line per write on stdout).
+    with ThreadPoolExecutor(max_workers=max(1, min(RENDER_WORKERS, len(jobs)))) as pool:
+        futures = {pool.submit(fn): (w, label) for fn, w, label in jobs}
+        try:
+            for fut in as_completed(futures):
+                fut.result()                # re-raise the first failed piece
+                w, label = futures[fut]
+                _tick(w, label)
+        except BaseException:
+            for f in futures:
+                f.cancel()                  # in-flight ffmpeg jobs still drain
+            raise
 
     # Concat all bodies + transition clips (uniform encode params -> lossless copy).
     catlist = work_dir / "pieces.txt"
@@ -2334,12 +2397,14 @@ def assemble_transitions(segments: list[Path], durations: list[float],
     joined = work_dir / "video_joined.mp4" if mux_audio else out_path
     _run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(catlist),
           "-c", "copy", "-movflags", "+faststart", str(joined)], "concat transition pieces")
+    _tick(W_FINAL, "joining the cut")
 
     if mux_audio:
         _run(["ffmpeg", "-y", "-v", "error", "-i", str(joined), "-i", str(song_path),
               "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
               "-shortest", "-movflags", "+faststart", str(out_path)],
              "mux song over transitions")
+    _tick(W_MUX, "adding the song")
 
 
 # Motion Match Cut with NO song: keep the source clips' own audio rather than
@@ -2821,7 +2886,15 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
                 f.cancel()                      # in-flight ffmpeg jobs still drain
             raise
 
-    progress("rendering", _ov("rendering", 0.95), 0.95, "Assembling final cut…")
+    progress("rendering", _ov("rendering", 0.9), 0.9, "Assembling final cut…")
+
+    def _astep(f: float, label: str) -> None:
+        # Assembly owns the last 10% of the rendering stage. assemble_transitions
+        # calls this from the main thread with a wall-share-weighted fraction, so
+        # the bar keeps moving through the body re-encodes instead of parking.
+        sp = 0.9 + 0.1 * _clamp(f, 0.0, 1.0)
+        progress("rendering", _ov("rendering", sp), sp,
+                 f"Assembling final cut… {label}")
     # Build the duck envelope for each spoken shot: fade the music DOWN just before
     # the line, hold, then fade it back UP to land on the next beat ("into the beat").
     beat_times = [b.time for b in grid.beats] if grid else []
@@ -2847,7 +2920,8 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
         tmp_video = work_dir / "video_only.mp4"
         if n_trans:
             assemble_transitions(segments, durations, joins, song_path, tmp_video,
-                                 video_encode_args=video_encode_args, fps=fps, mux_audio=False)
+                                 video_encode_args=video_encode_args, fps=fps,
+                                 mux_audio=False, on_step=_astep)
         else:
             assemble(segments, song_path, tmp_video, mux_audio=False)
         _duck_and_mux(tmp_video, song_path, duck_windows, out_path)
@@ -2857,7 +2931,8 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
         tmp_video = work_dir / "video_only.mp4"
         if n_trans:
             assemble_transitions(segments, durations, joins, song_path, tmp_video,
-                                 video_encode_args=video_encode_args, fps=fps, mux_audio=False)
+                                 video_encode_args=video_encode_args, fps=fps,
+                                 mux_audio=False, on_step=_astep)
         else:
             assemble(segments, song_path, tmp_video, mux_audio=False)
         track = work_dir / "clip_audio.wav"
@@ -2874,7 +2949,7 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
         # entirely when mux_audio is False, yielding a valid silent MP4.
         assemble_transitions(segments, durations, joins, song_path, out_path,
                              video_encode_args=video_encode_args, fps=fps,
-                             mux_audio=song_path is not None)
+                             mux_audio=song_path is not None, on_step=_astep)
     else:
         assemble(segments, song_path, out_path, mux_audio=song_path is not None)
 
