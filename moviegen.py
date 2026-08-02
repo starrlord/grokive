@@ -26,6 +26,8 @@ v1 simplifications vs. the spec (all documented there as acceptable fallbacks):
 from __future__ import annotations
 
 import bisect
+import gzip
+import hashlib
 import json
 import os
 import random
@@ -34,6 +36,7 @@ import signal
 import subprocess
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -53,6 +56,17 @@ os.environ.setdefault("NUMBA_CACHE_DIR", str(Path(tempfile.gettempdir()) / "grok
 ANALYSIS_FPS = 8          # motion sampling rate; full fps is unnecessary
 ANALYSIS_W = 320          # downscaled frame size for motion analysis
 ANALYSIS_H = 180
+
+# Segment renders are independent single-input ffmpeg jobs, so they run in a small
+# worker pool. Sub-second Music Video segments are dominated by per-process spawn +
+# input-open + seek overhead, not encode time, so parallelism is near-linear. 4 stays
+# inside every consumer NVENC concurrent-session cap (5 on older drivers, 8 on newer)
+# while still soaking that overhead; MOVIE_RENDER_WORKERS overrides (1 = the old
+# strictly-serial behaviour).
+try:
+    RENDER_WORKERS = max(1, min(16, int(os.environ.get("MOVIE_RENDER_WORKERS", "") or 4)))
+except ValueError:
+    RENDER_WORKERS = 4
 
 # Planner weights (see spec §5.3). Lower-is-better penalties are subtracted.
 W_MOTION = 1.0
@@ -725,6 +739,116 @@ def _sections_structural(y, sr, beat_frames, times: list[float],
     # section still owns everything before it, so anchor it at t=0.
     sections[0].start = 0.0
     return sections
+
+
+# --------------------------------------------------------------------------- #
+# Beat-grid cache — analyze_audio is deterministic per (song bytes, engine, mode),
+# so a re-used track skips the whole madmom/librosa stage on later renders.
+# --------------------------------------------------------------------------- #
+
+BEAT_CACHE_VERSION = 1
+BEAT_CACHE_MAX_ENTRIES = 200   # entries are a few KB each; LRU by mtime past this
+
+
+def _madmom_available() -> bool:
+    """Whether madmom is importable HERE — part of the cache key, so the local
+    venv (no madmom) and the container (madmom) never share entries, and
+    installing madmom later invalidates any librosa-fallback grids."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("madmom") is not None
+    except Exception:
+        return False
+
+
+def _beat_cache_key(song_path: Path, *, enhanced: bool, beat_engine: str) -> str:
+    """Key for one analysis of one song. CONTENT-hashed, never path/mtime: the
+    server re-saves the uploaded song into the render scratch dir (which every
+    render wipes), so the same track arrives at the same path with a fresh mtime
+    each time. Everything that changes the resulting grid is in the key."""
+    h = hashlib.sha1()
+    with open(song_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    neural = beat_engine in ("neural", "madmom")
+    parts = [f"v{BEAT_CACHE_VERSION}", h.hexdigest(),
+             f"enh{int(bool(enhanced))}", "engneural" if neural else "englibrosa"]
+    if neural:
+        parts.append(f"madmom{int(_madmom_available())}")
+    return ":".join(parts)
+
+
+def _beat_cache_path(cache_dir: Path, key: str) -> Path:
+    return cache_dir / f"{hashlib.sha1(key.encode()).hexdigest()}.json.gz"
+
+
+def _grid_to_payload(grid: BeatGrid) -> dict:
+    return {
+        "duration": grid.duration, "tempo": grid.tempo,
+        "beats": [[b.time, int(b.is_downbeat), b.energy, b.section_id]
+                  for b in grid.beats],
+        "sections": [[s.id, s.start, s.end, s.intensity] for s in grid.sections],
+        "onsets": grid.onsets, "engine": grid.engine, "device": grid.device,
+        "engine_note": grid.engine_note,
+    }
+
+
+def _grid_from_payload(d: dict) -> BeatGrid:
+    return BeatGrid(
+        duration=float(d["duration"]), tempo=float(d["tempo"]),
+        beats=[Beat(time=float(t), is_downbeat=bool(db), energy=float(e),
+                    section_id=int(sid)) for t, db, e, sid in d["beats"]],
+        sections=[Section(id=int(i), start=float(s), end=float(e),
+                          intensity=float(x)) for i, s, e, x in d["sections"]],
+        onsets=[float(t) for t in d.get("onsets", [])],
+        engine=d.get("engine", "librosa"), device=d.get("device", "cpu"),
+        engine_note=d.get("engine_note", ""),
+    )
+
+
+def _prune_beat_cache(cache_dir: Path) -> None:
+    """Drop the oldest entries past BEAT_CACHE_MAX_ENTRIES (LRU — a cache hit
+    re-touches its file's mtime). Best-effort; never breaks a render."""
+    try:
+        entries = sorted(cache_dir.glob("*.json.gz"),
+                         key=lambda f: f.stat().st_mtime, reverse=True)
+        for f in entries[BEAT_CACHE_MAX_ENTRIES:]:
+            f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def load_or_analyze_audio(song_path: Path, *, enhanced: bool, beat_engine: str,
+                          cache_dir: Path | None) -> tuple[BeatGrid, bool]:
+    """``analyze_audio`` with a content-keyed cache in front; returns
+    ``(grid, hit)``. JSON round-trips Python floats exactly (repr-based), so a
+    cached grid is identical to a fresh analysis. Any cache trouble — unreadable
+    entry, unwritable dir — silently falls back to analyzing."""
+    key = None
+    if cache_dir is not None:
+        try:
+            key = _beat_cache_key(song_path, enhanced=enhanced, beat_engine=beat_engine)
+            p = _beat_cache_path(cache_dir, key)
+            if p.is_file():
+                with gzip.open(p, "rt", encoding="utf-8") as fh:
+                    grid = _grid_from_payload(json.load(fh))
+                os.utime(p)                      # LRU touch
+                return grid, True
+        except Exception:
+            key = None                           # bad entry/unhashable song -> analyze
+    grid = analyze_audio(song_path, enhanced=enhanced, beat_engine=beat_engine)
+    if cache_dir is not None and key is not None:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            p = _beat_cache_path(cache_dir, key)
+            tmp = p.with_suffix(".tmp")
+            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                json.dump(_grid_to_payload(grid), fh)
+            tmp.replace(p)
+            _prune_beat_cache(cache_dir)
+        except Exception:
+            pass                                 # cache write is best-effort
+    return grid, False
 
 
 # --------------------------------------------------------------------------- #
@@ -2192,7 +2316,8 @@ def _overall(stage: str, stage_progress: float, order: list[str] | None = None,
 def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
              work_dir: Path, out_path: Path, video_encode_args: list[str],
              hwaccel_decode: bool, progress: ProgressFn,
-             cache_dir: Path | None = None) -> dict:
+             cache_dir: Path | None = None,
+             beat_cache_dir: Path | None = None) -> dict:
     """Run the full pipeline. ``progress(status, overall, stage_progress, detail)``
     is called throughout. Returns result metadata for the finished file.
 
@@ -2268,10 +2393,14 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
     grid = None
     if mode == "beat":
         progress("analyzing_audio", _ov("analyzing_audio", 0.0), 0.0, "Analyzing audio…")
-        grid = analyze_audio(song_path, enhanced=enhanced, beat_engine=beat_engine)
+        grid, grid_cached = load_or_analyze_audio(song_path, enhanced=enhanced,
+                                                  beat_engine=beat_engine,
+                                                  cache_dir=beat_cache_dir)
         eng = grid.engine + (f"/{grid.device}" if grid.engine != "librosa" else "")
         if grid.engine_note:
             eng += f" ({grid.engine_note})"   # e.g. "librosa (madmom error: …)" — never a silent drop
+        if grid_cached:
+            eng += " · cached"
         progress("analyzing_audio", _ov("analyzing_audio", 1.0), 1.0,
                  f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM · {eng}")
 
@@ -2417,13 +2546,16 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
     flash_times = ([b.time for b in grid.beats if b.is_downbeat and b.energy >= FLASH_ENERGY]
                    if (flash > 0 and grid) else [])
     n = len(edl.entries)
-    segments: list[Path] = []
-    durations: list[float] = []
+    # Per-segment parameters are resolved SEQUENTIALLY first (cheap, deterministic),
+    # then the renders — independent single-input ffmpeg jobs writing distinct files
+    # with everything they need precomputed — run in a small worker pool. The pool
+    # changes wall-clock only: same commands, same outputs, same failure semantics
+    # (first error cancels the queue and fails the job). Machine-gun Music Video
+    # plans hundreds of sub-second segments whose cost is process spawn + input
+    # open + seek, so the pool is near-linear there.
+    specs: list[tuple] = []
     joins: list[tuple[str, float]] = []
     for i, entry in enumerate(edl.entries):
-        sp = i / max(1, n)
-        progress("rendering", _ov("rendering", sp * 0.9), sp,
-                 f"Rendering segment {i + 1} of {n}")
         lead = entry.transition_dur / 2.0           # incoming transition (this join)
         nxt = edl.entries[i + 1] if i + 1 < n else None
         tail = (nxt.transition_dur / 2.0) if nxt else 0.0   # outgoing transition
@@ -2445,19 +2577,45 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
         # the hit (the signature combo); held/quiet shots stay clean.
         seg_rgb = rgb_split if big_drop else 0.0
         seg_shake = shake if big_drop else 0.0
-        seg = work_dir / f"seg_{i:04d}.mp4"
+        specs.append((entry, work_dir / f"seg_{i:04d}.mp4", lead, tail, zoom,
+                      seg_flash, seg_rgb, seg_shake))
+        joins.append((entry.transition, entry.transition_dur))
+
+    segments: list[Path] = [s[1] for s in specs]
+    durations: list[float] = [0.0] * n
+
+    def _render_one(i: int) -> None:
+        entry, seg, lead, tail, zoom, seg_flash, seg_rgb, seg_shake = specs[i]
         _render_segment(entry, seg, width=width, height=height, fps=fps,
                         video_encode_args=video_encode_args, gpu=hwaccel_decode,
                         lead=lead, tail=tail, fill=fill, zoom=zoom,
                         grade=grade, flash=seg_flash, rgb_split=seg_rgb, shake=seg_shake,
                         playback_speed=entry.playback_speed)
-        segments.append(seg)
         # Use the segment's *actual* rendered length, not the nominal target:
         # frame-rounding makes each clip a few ms short, and across a run that
         # accumulates enough to push an xfade offset past the real end of its
         # first input, which silently drops everything after the transition.
-        durations.append(probe_duration(seg) if n_trans else entry.duration + lead + tail)
-        joins.append((entry.transition, entry.transition_dur))
+        durations[i] = probe_duration(seg) if n_trans else entry.duration + lead + tail
+
+    # progress() must stay on this thread — the worker protocol is one JSON line
+    # per write on stdout, and interleaved writes from pool threads could shear a
+    # line — so completions are counted here as futures resolve.
+    progress("rendering", _ov("rendering", 0.0), 0.0,
+             f"Rendering {n} segments…")
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(RENDER_WORKERS, n))) as pool:
+        futures = [pool.submit(_render_one, i) for i in range(n)]
+        try:
+            for fut in as_completed(futures):
+                fut.result()                    # re-raise the first failed segment
+                done += 1
+                sp = done / max(1, n)
+                progress("rendering", _ov("rendering", sp * 0.9), sp,
+                         f"Rendering segment {done} of {n}")
+        except BaseException:
+            for f in futures:
+                f.cancel()                      # in-flight ffmpeg jobs still drain
+            raise
 
     progress("rendering", _ov("rendering", 0.95), 0.95, "Assembling final cut…")
     # Build the duck envelope for each spoken shot: fade the music DOWN just before
@@ -2584,6 +2742,7 @@ def _worker_main() -> int:
             hwaccel_decode=bool(spec["hwaccel_decode"]),
             progress=progress,
             cache_dir=(Path(spec["motion_cache_dir"]) if spec.get("motion_cache_dir") else None),
+            beat_cache_dir=(Path(spec["beat_cache_dir"]) if spec.get("beat_cache_dir") else None),
         )
         emit({"t": "result", "result": result})
         return 0

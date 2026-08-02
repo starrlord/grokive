@@ -108,6 +108,11 @@ MOVIE_DIR = DATA_DIR / "movie_tmp"  # working dir + last "Generate Movie" output
 # render over the same clips skips analysis (measured ~150x faster on a hit). Purely
 # derived data — safe to delete at any time; bounded by matchcut.prune_cache.
 MOTION_CACHE_DIR = DATA_DIR / "motion_cache"
+# Beat-montage song-analysis cache (madmom/librosa beat grids). Same rationale as
+# the motion cache: MOVIE_DIR is wiped per render and the uploaded song re-saved,
+# so entries are keyed by song CONTENT hash (see moviegen.load_or_analyze_audio).
+# Purely derived, safe to delete; bounded by moviegen._prune_beat_cache.
+BEAT_CACHE_DIR = DATA_DIR / "beat_cache"
 # Built SvelteKit SPA (produced by `web/` -> adapter-static), served at "/".
 SPA_DIR = Path(os.environ.get("SPA_DIR", ROOT / "web" / "build")).resolve()
 
@@ -3354,9 +3359,10 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, option
         "out_path": str(out_path),
         "video_encode_args": _video_encode_args(CRF),
         "hwaccel_decode": _use_nvenc(),
-        # The server owns the data layout, so it names the cache dir rather than
-        # letting the child infer one relative to its scratch dir.
+        # The server owns the data layout, so it names the cache dirs rather than
+        # letting the child infer them relative to its scratch dir.
         "motion_cache_dir": str(MOTION_CACHE_DIR),
+        "beat_cache_dir": str(BEAT_CACHE_DIR),
     }
     stderr_log = MOVIE_DIR / "worker_stderr.log"
     result = None

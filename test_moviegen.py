@@ -523,6 +523,75 @@ def test_utterance_head_offset_shift():
     print("  head-offset: card-time line dropped, survivor shifted into trimmed time OK")
 
 
+def test_beat_cache_key_content_hashed():
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    a = d / "a.mp3"; a.write_bytes(b"fake-song-bytes-AAAA")
+    b = d / "sub"; b.mkdir(); b = b / "other-name.mp3"
+    b.write_bytes(b"fake-song-bytes-AAAA")     # same content, different path+mtime
+    c = d / "c.mp3"; c.write_bytes(b"totally-different-bytes")
+    ka = m._beat_cache_key(a, enhanced=True, beat_engine="neural")
+    kb = m._beat_cache_key(b, enhanced=True, beat_engine="neural")
+    kc = m._beat_cache_key(c, enhanced=True, beat_engine="neural")
+    kd = m._beat_cache_key(a, enhanced=False, beat_engine="librosa")
+    ke = m._beat_cache_key(a, enhanced=True, beat_engine="librosa")
+    assert ka == kb, "same song content must share a key regardless of path/mtime"
+    assert len({ka, kc, kd, ke}) == 4, "content/engine/enhanced must all split the key"
+    print("  beat-cache key: content-hashed (path/mtime-proof), params split OK")
+
+
+def test_beat_cache_hit_roundtrips_grid_exactly():
+    import gzip, json, tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    song = d / "song.mp3"; song.write_bytes(b"pretend-this-is-audio")
+    grid = _grid(16, 0.5)
+    grid.onsets = [0.123456789012345, 1.5, 2.25]
+    grid.engine, grid.device, grid.engine_note = "madmom", "cpu", ""
+    cache = d / "beat_cache"; cache.mkdir()
+    key = m._beat_cache_key(song, enhanced=True, beat_engine="neural")
+    with gzip.open(m._beat_cache_path(cache, key), "wt", encoding="utf-8") as fh:
+        json.dump(m._grid_to_payload(grid), fh)
+    # The pre-seeded entry must HIT (so analyze_audio/librosa is never touched)
+    # and come back field-identical — floats round-trip JSON exactly.
+    g2, hit = m.load_or_analyze_audio(song, enhanced=True, beat_engine="neural",
+                                      cache_dir=cache)
+    assert hit is True, "expected a cache hit for the pre-seeded key"
+    assert (g2.duration, g2.tempo) == (grid.duration, grid.tempo)
+    assert [(b.time, b.is_downbeat, b.energy, b.section_id) for b in g2.beats] == \
+           [(b.time, b.is_downbeat, b.energy, b.section_id) for b in grid.beats]
+    assert [(s.id, s.start, s.end, s.intensity) for s in g2.sections] == \
+           [(s.id, s.start, s.end, s.intensity) for s in grid.sections]
+    assert g2.onsets == grid.onsets
+    assert (g2.engine, g2.device, g2.engine_note) == ("madmom", "cpu", "")
+    # No cache dir -> the loader must report a miss path (falls through to
+    # analyze_audio; not exercised here to keep librosa out of the tests).
+    print("  beat-cache hit: pre-seeded grid returned bit-identical OK")
+
+
+def test_beat_cache_prune_lru():
+    import os, tempfile, time
+    from pathlib import Path
+    cache = Path(tempfile.mkdtemp())
+    files = []
+    now = time.time()
+    for i in range(4):
+        f = cache / f"{i:040d}.json.gz"
+        f.write_bytes(b"x")
+        os.utime(f, (now + i, now + i))        # staggered mtimes: 3 is newest
+        files.append(f)
+    old = m.BEAT_CACHE_MAX_ENTRIES
+    m.BEAT_CACHE_MAX_ENTRIES = 2
+    try:
+        m._prune_beat_cache(cache)
+    finally:
+        m.BEAT_CACHE_MAX_ENTRIES = old
+    left = sorted(f.name for f in cache.glob("*.json.gz"))
+    assert left == [files[2].name, files[3].name], left
+    print("  beat-cache prune: LRU keeps the 2 newest of 4 OK")
+
+
 if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
@@ -552,4 +621,7 @@ if __name__ == "__main__":
     test_head_trim_leaves_normal_footage_alone()
     test_head_offset_flows_to_edl()
     test_utterance_head_offset_shift()
+    test_beat_cache_key_content_hashed()
+    test_beat_cache_hit_roundtrips_grid_exactly()
+    test_beat_cache_prune_lru()
     print("all passed")
