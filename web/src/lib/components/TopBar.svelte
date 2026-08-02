@@ -5,7 +5,7 @@
   import Popover from './Popover.svelte';
   import QuotaBolts from './QuotaBolts.svelte';
 
-  let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {}, onplay = () => {} } = $props();
+  let { onrefresh = () => {}, onfilters = () => {}, onmenu = () => {}, onplay = () => {}, onmontage = () => {} } = $props();
 
   const periods = [
     { id: 'all', label: 'All time' },
@@ -99,6 +99,20 @@
     </div>
 
     <div class="ml-auto flex shrink-0 items-center gap-1.5 sm:ml-0">
+      <!-- Montage maker, selection-free: opens Generate Movie with no clips (it
+           defaults to Auto-pick there). Lives in TIER 1 deliberately — tier 2's
+           workspace row is already at its iPhone-portrait width budget (one more
+           button crushes the view-switcher pill to a bare chevron); this row has
+           slack on every width because the search field wraps to its own line
+           below sm. Icon-only below sm, like its Display neighbour. -->
+      <button type="button"
+        class="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-line bg-[var(--surface-2)] px-2.5 text-sm font-semibold transition hover:border-[var(--accent)]"
+        aria-label="Create a montage"
+        title="Create a montage — Auto-pick chooses clips for your song"
+        onclick={() => onmontage()}>
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z"/><path d="m6.2 5.3 3.1 3.9"/><path d="m12.4 3.4 3.1 4"/><path d="M3 11h18v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+        <span class="hidden sm:inline">Montage</span>
+      </button>
       <!-- Grok weekly usage — one ⚡ bolt per active account, breakdown on click. -->
       <QuotaBolts />
       <!-- Display: period · sort · density · theme, tucked into one popover. -->

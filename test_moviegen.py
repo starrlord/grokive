@@ -592,6 +592,46 @@ def test_beat_cache_prune_lru():
     print("  beat-cache prune: LRU keeps the 2 newest of 4 OK")
 
 
+def test_motion_diff_cache_roundtrip_no_decode():
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    clip = d / "clip.mp4"
+    clip.write_bytes(b"not-actually-a-video")   # undecodable on purpose
+    cache = d / "motion_cache"
+    raw = [0.4, 0.5, 0.3, 38.0] + [9.0, 11.0, 7.5] * 20   # a HELD-card head + motion
+    m._save_motion_diffs(clip, cache, raw, 6.0)
+    assert m.motion_cache_has(clip, cache)
+    got = m._load_motion_diffs(clip, cache)
+    assert got is not None and got[1] == 6.0 and got[0] == raw, "raw diffs must round-trip exactly"
+    # The cache-hit path never touches ffmpeg: the file is junk, so if
+    # analyze_motion tried to decode it the curve would come back empty.
+    curve = m.analyze_motion("7", clip, hwaccel_decode=False, cache_dir=cache)
+    ref = m._curve_from_raw("7", clip, raw, 6.0)
+    assert curve.samples == ref.samples and curve.duration == ref.duration
+    assert curve.head_offset == ref.head_offset == 0.5, curve.head_offset
+    # Touching the file invalidates the key (size+mtime identity, like matchcut).
+    clip.write_bytes(b"not-actually-a-video-2")
+    assert not m.motion_cache_has(clip, cache)
+    print("  motion-cache: raw diffs round-trip, hit path decodes nothing, mtime keys OK")
+
+
+def test_motion_cache_purge_on_delete():
+    import tempfile
+    from pathlib import Path
+    d = Path(tempfile.mkdtemp())
+    clip = d / "clip.mp4"
+    clip.write_bytes(b"junk")
+    cache = d / "motion_cache"
+    m._save_motion_diffs(clip, cache, [1.0] * 16, 2.0)
+    assert m.motion_cache_has(clip, cache)
+    m.purge_motion_cache_for(clip, cache)      # the delete-hook path
+    assert not m.motion_cache_has(clip, cache), "purge must drop the entry"
+    m.purge_motion_cache_for(clip, cache)      # idempotent, never raises
+    m.purge_motion_cache_for(d / "never-existed.mp4", cache)
+    print("  motion-cache purge: entry dropped on delete, idempotent, missing-safe OK")
+
+
 if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
@@ -624,4 +664,6 @@ if __name__ == "__main__":
     test_beat_cache_key_content_hashed()
     test_beat_cache_hit_roundtrips_grid_exactly()
     test_beat_cache_prune_lru()
+    test_motion_diff_cache_roundtrip_no_decode()
+    test_motion_cache_purge_on_delete()
     print("all passed")

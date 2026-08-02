@@ -492,6 +492,74 @@ def media_by_ids(db_path: str | Path, ids: list[str]) -> list[dict[str, Any]]:
         conn.close()
 
 
+_ORIENT_SQL = ("CASE WHEN media_w > media_h THEN 'landscape' "
+               "WHEN media_w < media_h THEN 'portrait' ELSE 'square' END")
+# Source videos only: montage outputs are renders, not montage material.
+_SOURCE_VIDEO_SQL = "media_type = 'video' AND (model IS NULL OR model != 'Beat Montage')"
+
+
+def video_resolution_stats(db_path: str | Path, ids: list[str] | None = None) -> list[dict[str, Any]]:
+    """Exact-dimension histogram of source videos (montage outputs excluded):
+    ``[{w, h, orientation, count}]``, biggest count first. ``ids=None`` covers the
+    whole library; a list restricts to those ids. Rows without captured dimensions
+    (an index predating dimension capture) come back as one ``w=h=None`` bucket so
+    callers can surface "unknown" honestly instead of silently dropping them.
+    Drives the Generate Movie panel's aspect/resolution picker."""
+    conn = _connect(db_path)
+    try:
+        counts: dict[tuple, int] = {}
+        select = (f"SELECT media_w AS w, media_h AS h, {_ORIENT_SQL} AS orient, "
+                  f"COUNT(*) AS n FROM media WHERE {_SOURCE_VIDEO_SQL}")
+        if ids is None:
+            for r in conn.execute(select + " GROUP BY w, h"):
+                key = (r["w"], r["h"], r["orient"] if r["w"] is not None else None)
+                counts[key] = counts.get(key, 0) + r["n"]
+        else:
+            CHUNK = 400
+            uniq = list(dict.fromkeys(str(i) for i in ids))
+            for start in range(0, len(uniq), CHUNK):
+                chunk = uniq[start:start + CHUNK]
+                qmarks = ",".join("?" for _ in chunk)
+                for r in conn.execute(select + f" AND id IN ({qmarks}) GROUP BY w, h", chunk):
+                    key = (r["w"], r["h"], r["orient"] if r["w"] is not None else None)
+                    counts[key] = counts.get(key, 0) + r["n"]
+        return [{"w": w, "h": h, "orientation": o, "count": n}
+                for (w, h, o), n in sorted(counts.items(),
+                                           key=lambda kv: (-kv[1], str(kv[0])))]
+    finally:
+        conn.close()
+
+
+def filter_video_ids_by_orientation(db_path: str | Path, ids: list[str] | None,
+                                    orientation: str) -> list[str]:
+    """The subset of ``ids`` (order preserved) whose video dimensions match
+    ``orientation`` — 'landscape' | 'portrait' | 'square'. ``ids=None`` returns
+    every matching source-video id in the library. Rows without captured
+    dimensions never match (their shape can't be verified), so an aspect-filtered
+    montage never admits a clip that might render cropped. Montage outputs are
+    always excluded."""
+    if orientation not in ("landscape", "portrait", "square"):
+        return [str(i) for i in (ids or [])]
+    conn = _connect(db_path)
+    try:
+        base = (f"SELECT id FROM media WHERE {_SOURCE_VIDEO_SQL} "
+                f"AND media_w IS NOT NULL AND media_h IS NOT NULL "
+                f"AND {_ORIENT_SQL} = ?")
+        if ids is None:
+            return [r["id"] for r in conn.execute(base, (orientation,))]
+        keep: set[str] = set()
+        uniq = list(dict.fromkeys(str(i) for i in ids))
+        CHUNK = 400
+        for start in range(0, len(uniq), CHUNK):
+            chunk = uniq[start:start + CHUNK]
+            qmarks = ",".join("?" for _ in chunk)
+            keep.update(r["id"] for r in conn.execute(
+                base + f" AND id IN ({qmarks})", (orientation, *chunk)))
+        return [i for i in (str(x) for x in ids) if i in keep]
+    finally:
+        conn.close()
+
+
 def _media_dict(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None

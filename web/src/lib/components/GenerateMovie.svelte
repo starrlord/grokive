@@ -5,26 +5,37 @@
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
-  import { generateMovie, movieResultUrl, commitMovie } from '$lib/api.js';
-  import { loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode, montageRender } from '$lib/state.js';
+  import { generateMovie, movieResultUrl, commitMovie, motionCoverage, startMotionCache, movieResolutions } from '$lib/api.js';
+  import { collections, loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode, montageRender } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   // videoIds: ordered ids of the currently-selected videos (selection order).
   let { videoIds = [], onclose = () => {} } = $props();
 
-  const RES = [
-    // Auto (default): the server sizes the canvas to the largest source clip so
-    // footage isn't cropped to a mismatched frame. w/h null => send resolution:'auto'.
-    { id: 'auto', label: 'Auto', w: null, h: null },
-    { id: 'land1080', label: '1080p · 16:9', w: 1920, h: 1080 },
-    { id: 'land720', label: '720p · 16:9', w: 1280, h: 720 },
-    { id: 'vert', label: 'Vertical · 9:16', w: 1080, h: 1920 },
-    { id: 'square', label: 'Square · 1:1', w: 1080, h: 1080 }
+  // Aspect first, exact size second: what hurts a montage is aspect mismatch
+  // (cover-cropping a landscape clip into a vertical frame loses most of it),
+  // not resolution mismatch (scaling is benign). Picking an aspect reveals the
+  // resolutions actually present in the current pool (with counts) to set the
+  // canvas — and, in Auto-pick, also FILTERS the pool to matching clips.
+  const ASPECTS = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'landscape', label: 'Landscape' },
+    { id: 'portrait', label: 'Vertical' },
+    { id: 'square', label: 'Square' }
   ];
+  // When the histogram is unavailable (older server / empty index) the picker
+  // still works with the common Grok sizes, just without counts.
+  const FALLBACK_SIZES = {
+    landscape: [{ w: 1920, h: 1080 }, { w: 1280, h: 720 }],
+    portrait: [{ w: 1080, h: 1920 }, { w: 720, h: 1280 }],
+    square: [{ w: 1080, h: 1080 }]
+  };
   const STAGE_LABEL = {
     queued: 'Queued', analyzing_audio: 'Analyzing audio', analyzing_motion: 'Analyzing motion',
     // Match Cut's own stage: scoring every ordered clip pair's best seam.
     matching: 'Matching motion',
+    // Auto Montage's own stage: choosing which library clips best serve the song.
+    selecting: 'Choosing clips',
     planning: 'Planning cuts', rendering: 'Rendering', done: 'Done', error: 'Error'
   };
 
@@ -63,7 +74,8 @@
   // dialogue (from their subtitles) in the song's quiet spots and dip the music.
   let letClipsSpeak = $state(false);
   let speakMoments = $state('auto'); // 'auto' | '1'..'4'
-  let resId = $state('auto');
+  let aspectId = $state('auto');    // 'auto' | 'landscape' | 'portrait' | 'square'
+  let sizeKey = $state('');         // "WxH" of the chosen sub-resolution chip
   let fps = $state(30);
   let targetDuration = $state('');
   let name = $state('movie');
@@ -78,6 +90,86 @@
   let matchSpeed = $state(true);
   let matchDissolve = $state(false);
   let keepClipAudio = $state(true);
+
+  // Auto Montage (beat only): instead of the hand-picked selection, the server's
+  // clip picker chooses from the whole library — or just the ticked collections —
+  // whatever best serves this song, using the pre-analyzed motion cache.
+  let autoPick = $state(false);
+  let autoCollections = $state([]); // collection ids; empty = whole library
+  // Motion-cache coverage ({ videos, cached, running }) — gates Auto-pick and
+  // drives the Analyze Library readout. Polled only while the warm-up runs.
+  let coverage = $state(null);
+  let coverageTimer = null;
+  async function refreshCoverage() {
+    try {
+      coverage = await motionCoverage();
+    } catch { /* older server build — the Auto section degrades gracefully */ }
+    clearTimeout(coverageTimer);
+    if (coverage?.running) coverageTimer = setTimeout(refreshCoverage, 2000);
+  }
+  async function analyzeLibrary() {
+    try {
+      const res = await startMotionCache();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Another job is already running.');
+      }
+      coverage = { ...(coverage || { videos: 0, cached: 0 }), running: true };
+      toast('Analyzing library — watch progress in the sync log.', { type: 'success' });
+      refreshCoverage();
+    } catch (e) {
+      toast(e.message || 'Could not start the analysis.', { type: 'error' });
+    }
+  }
+  function toggleAutoCollection(id) {
+    autoCollections = autoCollections.includes(id)
+      ? autoCollections.filter((c) => c !== id)
+      : [...autoCollections, id];
+  }
+  // Locked/sealed collections stay private — never offered as an auto-pick pool
+  // (the server skips them too).
+  const pickableCollections = $derived(($collections || []).filter((c) => !c.locked));
+  // Rough candidate count for the footer hint (whole library uses coverage.videos).
+  const autoCandidateEstimate = $derived(
+    autoCollections.length
+      ? pickableCollections.filter((c) => autoCollections.includes(c.id))
+          .reduce((n, c) => n + (c.item_count ?? c.ids?.length ?? 0), 0)
+      : (coverage?.videos ?? 0)
+  );
+
+  // Resolution histogram of the CURRENT pool (auto-pick: the collections / whole
+  // library; manual: the selection) — powers the aspect picker's counts, the
+  // sub-resolution chips, and the "will be cropped" warning.
+  let resolutionStats = $state(null);
+  let resSeq = 0; // guards against a slow older response landing after a newer one
+  $effect(() => {
+    const req = autoPick && !matchCut
+      ? { collections: [...autoCollections] }
+      : { ids: [...activeIds] };
+    const seq = ++resSeq;
+    movieResolutions(req)
+      .then((r) => { if (seq === resSeq) resolutionStats = r; })
+      .catch(() => { if (seq === resSeq) resolutionStats = null; }); // older server — fallback sizes carry it
+  });
+  const aspectCount = (o) =>
+    (resolutionStats?.sizes || []).filter((s) => s.orientation === o)
+      .reduce((n, s) => n + s.count, 0);
+  // Sizes offered for the chosen aspect: what's really in the pool (commonest
+  // first — rendering at the dominant size keeps most clips native), else the
+  // static fallbacks.
+  const sizesForAspect = $derived.by(() => {
+    if (aspectId === 'auto') return [];
+    const real = (resolutionStats?.sizes || []).filter((s) => s.orientation === aspectId);
+    return real.length ? real : FALLBACK_SIZES[aspectId] || [];
+  });
+  const effectiveSize = $derived(
+    sizesForAspect.find((s) => `${s.w}x${s.h}` === sizeKey) || sizesForAspect[0] || null);
+  // Manual selection + explicit aspect: how many chosen clips DON'T match and
+  // will be cropped/letterboxed (the selection is never filtered — it's yours).
+  const mismatched = $derived.by(() => {
+    if (autoEffective || aspectId === 'auto' || !resolutionStats) return 0;
+    return (resolutionStats.total - aspectCount(aspectId)) + (resolutionStats.unknown || 0);
+  });
 
   let starting = $state(false);
   let startError = $state(''); // error from the kickoff POST (shown in-panel)
@@ -104,7 +196,6 @@
   // (a still has no motion to match), so the two never combine.
   const picVideoEffective = $derived(picVideo && !matchCut);
 
-  const res = $derived(RES.find((r) => r.id === resId) || RES[0]);
   const tightnessLabel = $derived(tightness < 0.34 ? 'Relaxed' : tightness > 0.66 ? 'Tight' : 'Balanced');
   const tightnessHelp = $derived(
     tightness < 0.34
@@ -117,29 +208,47 @@
   const running = $derived(!!job && job.running);
   const done = $derived(!!job && job.status === 'done' && !!job.result);
   const errored = $derived(!!job && job.status === 'error');
+  // Auto-pick is a beat-mode concept (the picker scores clips against the song's
+  // grid); flipping to Match Cut falls back to the hand-picked selection.
+  const autoEffective = $derived(autoPick && !matchCut);
+  // Auto needs at least 2 analyzed clips in the cache to have anything to pick.
+  const autoReady = $derived((coverage?.cached ?? 0) >= 2);
   // The song is OPTIONAL in Match Cut — the edit is driven by motion continuity, and
   // with no song the render is silent.
-  const canGenerate = $derived(activeIds.length >= 2 && (matchCut || !!song) && !starting && !running);
+  const canGenerate = $derived(
+    (autoEffective ? autoReady : activeIds.length >= 2)
+    && (matchCut || !!song) && !starting && !running);
   // Prefer the JOB's source count + preset (from server provenance) whenever a job
   // is owned — the live selection is only meaningful on the fresh setup form and is
   // empty when the panel is reopened from the status chip.
   const sourceCount = $derived(job?.sources ?? activeIds.length);
   const styleLabel = $derived(ALL_PRESETS.find((p) => p.id === (job?.preset ?? job?.result?.preset))?.label || '');
 
-  onMount(async () => {
-    // Reconnect to whatever the status chip considers pending — a live render OR a
-    // finished/failed result not yet acknowledged — so reopening always lands you
-    // back on it. An acknowledged or absent job leaves the fresh setup form. Live
-    // progress is fed by the global poller.
-    await refreshMovieStatus();
-    if (get(movieChip)) {
-      owned = true;
-      // Remember the job's source clips so the result's source count stays correct
-      // even though the live selection that started it is long gone.
-      const ids = get(movieJob).source_ids;
-      if (ids?.length) sessionIds = ids;
-      if (get(movieJob).running) ensureMoviePolling();
-    }
+  onMount(() => {
+    (async () => {
+      // Reconnect to whatever the status chip considers pending — a live render OR a
+      // finished/failed result not yet acknowledged — so reopening always lands you
+      // back on it. An acknowledged or absent job leaves the fresh setup form. Live
+      // progress is fed by the global poller.
+      await refreshMovieStatus();
+      if (get(movieChip)) {
+        owned = true;
+        // Remember the job's source clips so the result's source count stays correct
+        // even though the live selection that started it is long gone.
+        const ids = get(movieJob).source_ids;
+        if (ids?.length) sessionIds = ids;
+        if (get(movieJob).running) ensureMoviePolling();
+      } else if (!videoIds.length) {
+        // Opened selection-free (the topbar Montage button): Auto-pick is the only
+        // way to generate with no clips in hand, so start there.
+        autoPick = true;
+      }
+      // Auto-pick needs the collections list + cache coverage; both are cheap and
+      // load in the background so the form never blocks on them.
+      loadCollections();
+      refreshCoverage();
+    })();
+    return () => clearTimeout(coverageTimer);
   });
 
   // Closing never discards the job — the floating chip keeps it reachable until the
@@ -165,7 +274,9 @@
     starting = true;
     startError = '';
     // Lock in the clips we're rendering so the result's source count stays correct.
-    const ids = [...activeIds];
+    // Auto-pick sends no ids — the server resolves the pool from the collections
+    // (or the whole library) and the render's picker does the choosing.
+    const ids = autoEffective ? [] : [...activeIds];
     sessionIds = ids;
     try {
       const data = await generateMovie({
@@ -174,12 +285,20 @@
         options: {
           name: name.trim() || 'movie',
           mode: matchCut ? 'matchcut' : 'beat',
+          ...(autoEffective ? { auto_pick: 1,
+                                ...(autoCollections.length
+                                    ? { auto_collections: JSON.stringify(autoCollections) } : {}) } : {}),
           ...(matchCut ? { match_speed: matchSpeed ? 1 : 0, match_dissolve: matchDissolve ? 1 : 0,
                            keep_audio: keepClipAudio ? 1 : 0 } : {}),
           preset: effectivePreset,
           tightness,
-          // Auto (res.w/h null) lets the server match the largest clip; otherwise pin the picked size.
-          ...(res.w && res.h ? { width: res.w, height: res.h } : { resolution: 'auto' }),
+          // Auto lets the server size the canvas (dominant resolution of an
+          // auto-pick pool; largest source clip for a manual selection). An
+          // explicit aspect pins the picked size — and in Auto-pick also filters
+          // the candidate pool to matching-orientation clips.
+          ...(aspectId !== 'auto' && effectiveSize
+              ? { width: effectiveSize.w, height: effectiveSize.h } : { resolution: 'auto' }),
+          ...(autoEffective && aspectId !== 'auto' ? { aspect: aspectId } : {}),
           fps,
           target_duration: targetDuration,
           let_clips_speak: letClipsSpeak,
@@ -254,6 +373,7 @@
         <h2 class="text-lg font-extrabold tracking-tight">{matchCut ? 'Create Match Cut' : 'Create Montage'}</h2>
         <p class="text-sm text-muted">
           {#if matchCut}Motion match cut from {sourceCount} selected video{sourceCount === 1 ? '' : 's'}.
+          {:else if job ? job.auto_pick : autoEffective}Beat-synced montage · clips auto-picked for the song{styleLabel ? ` · ${styleLabel} style` : ''}.
           {:else}Beat-synced montage from {sourceCount} selected {picVideoEffective ? 'item' : 'video'}{sourceCount === 1 ? '' : 's'}{styleLabel ? ` · ${styleLabel} style` : ''}.{/if}
         </p>
       </div>
@@ -278,6 +398,13 @@
             <p class="text-xs text-muted">
               Matched {job.result.match.clips_gated} of {job.result.match.clips_in} clips{#if job.result.match.clips_in > job.result.match.clips_gated} · {job.result.match.clips_in - job.result.match.clips_gated} had too little motion to match{/if}
               · seam quality {job.result.match.seam_mean_chain} of {job.result.match.seam_max_possible}{#if job.result.match.speed_ramped} · {job.result.match.speed_ramped} shot{job.result.match.speed_ramped === 1 ? '' : 's'} speed-matched{/if}
+            </p>
+          {/if}
+          {#if job.result.auto}
+            <!-- What Auto Montage chose, and whether any candidates were invisible
+                 to it (not yet analyzed) — that's the cue to run Analyze Library. -->
+            <p class="text-xs text-muted">
+              Auto-picked {job.result.auto.picked} clips from {job.result.auto.analyzed} analyzed candidate{job.result.auto.analyzed === 1 ? '' : 's'}{#if job.result.auto.skipped_uncached} · {job.result.auto.skipped_uncached} skipped (not yet analyzed){/if}
             </p>
           {/if}
           <div class="flex flex-wrap gap-2">
@@ -340,6 +467,58 @@
               {/each}
             </div>
           </div>
+
+          <!-- Clips: the hand-picked selection, or Auto Montage — the server picks
+               from the pre-analyzed library whatever best serves this song. Beat
+               only: the picker scores clips against the song's beat grid. -->
+          {#if !matchCut}
+          <div>
+            <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Clips</div>
+            <div class="grid grid-cols-2 gap-1.5">
+              <button type="button"
+                class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {!autoPick ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                onclick={() => (autoPick = false)}>My selection ({activeIds.length})</button>
+              <button type="button" title="Analyzes the song, then picks the clips whose motion best fits it — calm shots for quiet passages, wild ones for the drops."
+                class="rounded-lg border px-3 py-1.5 text-sm font-semibold transition {autoPick ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                onclick={() => (autoPick = true)}>Auto-pick for this song</button>
+            </div>
+            {#if autoPick}
+              <div class="mt-2 space-y-2.5 rounded-lg border border-line p-3">
+                <p class="text-[11px] leading-snug text-muted">
+                  The song is analyzed first, then clips whose motion best fits its energy are chosen from
+                  {autoCollections.length ? 'the ticked collections' : 'your whole library'} — calm footage for the quiet passages, the wildest shots saved for the drops.
+                </p>
+                {#if pickableCollections.length}
+                  <div class="max-h-28 overflow-y-auto">
+                    <div class="flex flex-wrap gap-1.5">
+                      <button type="button"
+                        class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {!autoCollections.length ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                        onclick={() => (autoCollections = [])}>Whole library</button>
+                      {#each pickableCollections as c (c.id)}
+                        <button type="button"
+                          class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {autoCollections.includes(c.id) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                          onclick={() => toggleAutoCollection(c.id)}>{c.name} <span class="opacity-60">{c.item_count ?? c.ids?.length ?? 0}</span></button>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+                {#if coverage}
+                  {#if coverage.running}
+                    <p class="text-xs text-muted">Analyzing library… {coverage.cached} of {coverage.videos} clips done — progress is in the sync log.</p>
+                  {:else if coverage.cached < coverage.videos}
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <span class="text-xs text-muted">{coverage.cached} of {coverage.videos} clips analyzed{!autoReady ? ' — analyze first' : ''}.</span>
+                      <button type="button" class="rounded-lg border border-line px-2.5 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)]"
+                        onclick={analyzeLibrary}>Analyze library</button>
+                    </div>
+                  {:else}
+                    <p class="text-xs text-muted">All {coverage.videos} clips analyzed — syncs keep this up to date.</p>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
+          </div>
+          {/if}
 
           <!-- Song -->
           <div>
@@ -470,15 +649,34 @@
             <div>
               <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Aspect / resolution</div>
               <div class="grid grid-cols-2 gap-1.5">
-                {#each RES as r (r.id)}
-                  <button type="button" class="rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition {resId === r.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-                    onclick={() => (resId = r.id)}>{r.label}</button>
+                {#each ASPECTS as a (a.id)}
+                  <button type="button" class="rounded-lg border px-2.5 py-1.5 text-xs font-semibold transition {aspectId === a.id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                    onclick={() => { aspectId = a.id; sizeKey = ''; }}>
+                    {a.label}{#if a.id !== 'auto' && resolutionStats}<span class="ml-1 opacity-60">{aspectCount(a.id)}</span>{/if}
+                  </button>
                 {/each}
               </div>
+              {#if aspectId !== 'auto' && sizesForAspect.length}
+                <!-- The resolutions actually present in this pool, commonest first —
+                     rendering at the dominant size keeps most clips native. -->
+                <div class="mt-1.5 flex flex-wrap gap-1.5">
+                  {#each sizesForAspect as s (`${s.w}x${s.h}`)}
+                    <button type="button"
+                      class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {effectiveSize && effectiveSize.w === s.w && effectiveSize.h === s.h ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+                      onclick={() => (sizeKey = `${s.w}x${s.h}`)}>{s.w}×{s.h}{#if s.count}<span class="ml-1 opacity-60">{s.count}</span>{/if}</button>
+                  {/each}
+                </div>
+              {/if}
               <p class="mt-1.5 text-[11px] leading-snug text-muted">
-                {resId === 'auto'
-                  ? 'Matches the largest clip — no cropping.'
-                  : 'Fixed frame — off-shape clips are cropped or letterboxed.'}
+                {#if aspectId === 'auto'}
+                  {autoEffective ? 'Sized to the pool’s most common clip shape — no cropping for most clips.' : 'Matches the largest clip — no cropping.'}
+                {:else if autoEffective}
+                  Only {ASPECTS.find((a) => a.id === aspectId)?.label.toLowerCase()} clips enter the pool — nothing gets cropped to shape.
+                {:else if mismatched > 0}
+                  <span class="text-[var(--danger-ink-soft,inherit)]">{mismatched} of {resolutionStats.total + (resolutionStats.unknown || 0)} selected clips aren’t {ASPECTS.find((a) => a.id === aspectId)?.label.toLowerCase()} and will be cropped or letterboxed.</span>
+                {:else}
+                  Fixed frame — off-shape clips are cropped or letterboxed.
+                {/if}
               </p>
             </div>
             <div class="space-y-4">
@@ -511,7 +709,9 @@
     {#if !done && !running}
       <footer class="flex items-center justify-between gap-3 border-t border-line px-5 py-4">
         <p class="text-xs text-muted">
-          {#if activeIds.length < 2}Select at least 2 {picVideoEffective ? 'photos or videos' : 'videos'}.{:else if !song && !matchCut}Choose a song to continue.{:else if matchCut && !song}Ready — no song, so the cut will be silent.{:else}Ready to generate.{/if}
+          {#if autoEffective}
+            {#if !autoReady}Analyze the library first — Auto-pick chooses from pre-analyzed clips.{:else if !song}Choose a song to continue.{:else if aspectId !== 'auto' && resolutionStats}Ready — picking from ~{aspectCount(aspectId)} {ASPECTS.find((a) => a.id === aspectId)?.label.toLowerCase()} clips.{:else}Ready — picking from ~{autoCandidateEstimate} clips for this song.{/if}
+          {:else if activeIds.length < 2}Select at least 2 {picVideoEffective ? 'photos or videos' : 'videos'}.{:else if !song && !matchCut}Choose a song to continue.{:else if matchCut && !song}Ready — no song, so the cut will be silent.{:else}Ready to generate.{/if}
         </p>
         <button type="button" class="rounded-lg bg-[var(--accent)] px-5 py-2.5 font-bold text-[var(--on-accent)] disabled:opacity-45"
           disabled={!canGenerate} onclick={generate}>

@@ -505,6 +505,11 @@ def _sync_worker() -> None:
         # can refresh the gallery NOW, before the optional (and potentially slow)
         # autotagging post-steps run.
         _sync["media_ready_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Warm the montage motion cache for whatever just landed, so Beat Montage
+        # analysis and Auto Montage clip picking hit the cache instead of decoding.
+        # Best-effort: a failed warm-up never flips the sync to error (montages
+        # just analyze those clips lazily at render time).
+        _run_step("motioncache", [py, cli, "motioncache"])
         # Run optional post-sync automation (best-effort; never flips the sync to
         # error). Off unless the toggle is set.
         if _autonomous_enabled():
@@ -972,6 +977,42 @@ def start_subtitles() -> bool:
         _sync["media_ready_at"] = None
         _sync["log"].clear()
     threading.Thread(target=_subtitles_worker, daemon=True).start()
+    return True
+
+
+def _motioncache_worker() -> None:
+    """One-step job: run the CLI motion-cache warm-up (`grokive.py motioncache`).
+    Shares the sync job slot + log, so the existing log panel shows its progress."""
+    rc = 1
+    try:
+        rc = _run_step("motioncache",
+                       [sys.executable, str(ROOT / "grokive.py"), "motioncache"])
+        _sync["step"] = "done" if rc == 0 else "error"
+    except Exception as exc:  # pragma: no cover - defensive
+        _sync["step"] = "error"
+        _log(f"motioncache crashed: {exc}")
+    finally:
+        _sync["returncode"] = rc
+        _sync["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _sync["running"] = False
+
+
+def start_motioncache() -> bool:
+    """Library motion warm-up on demand (the Generate Movie panel's Analyze
+    Library button). Same single job slot as sync/subtitles."""
+    with _sync_lock:
+        if _sync["running"]:
+            return False
+        _sync["running"] = True
+        _sync["job"] = "motioncache"
+        _sync["step"] = "motioncache"
+        _sync["returncode"] = None
+        _sync["auth_hint"] = False
+        _sync["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _sync["finished_at"] = None
+        _sync["media_ready_at"] = None
+        _sync["log"].clear()
+    threading.Thread(target=_motioncache_worker, daemon=True).start()
     return True
 
 
@@ -3444,6 +3485,47 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, option
             _movie["running"] = False
 
 
+def _auto_candidate_ids(coll_ids: list) -> list[str]:
+    """Candidate media ids for an Auto Montage pool: the union of the given
+    collections in order (locked collections stay private — their members never
+    enter a pool; the UI doesn't offer them either), or every library video when
+    none are given. Shared by the generate endpoint and the resolution histogram
+    so the picker's counts describe exactly the pool a render would use."""
+    if coll_ids:
+        wanted = {str(c) for c in coll_ids}
+        ids, seen = [], set()
+        for coll in _load_collections():
+            if coll["id"] in wanted and not coll.get("locked"):
+                for mid in coll["ids"]:
+                    if mid not in seen:
+                        seen.add(mid)
+                        ids.append(mid)
+        return ids
+    return [mid for mid, rec in _metadata_index().items()
+            if rec.get("media_type") == "video"]
+
+
+def _auto_canvas_from_pool(ids: list) -> tuple[int, int]:
+    """Auto canvas for an auto-pick pool: the DOMINANT (most common) source
+    resolution rather than the largest — most clips then render native and only
+    the minority upscales, where largest-of-thousands would upscale nearly
+    everything. Falls back to the largest-source rule (over a capped sample)
+    when the index carries no dimensions."""
+    try:
+        stats = [s for s in db.video_resolution_stats(DB_FILE, [str(i) for i in ids])
+                 if s.get("w")]
+    except Exception:
+        stats = []
+    if not stats:
+        return _auto_canvas_from_sources(ids[:200])
+    w, h = int(stats[0]["w"]), int(stats[0]["h"])   # sorted by count desc
+    scale = min(1.0, 3840 / w, 2160 / h)
+    w, h = round(w * scale), round(h * scale)
+    w = max(160, min(3840, w)); w -= w % 2
+    h = max(160, min(2160, h)); h -= h % 2
+    return (w, h)
+
+
 def _auto_canvas_from_sources(ids: list, default_wh: tuple[int, int] = (1920, 1080)) -> tuple[int, int]:
     """Canvas size matching the largest (by pixel area) source video, so clips of that
     shape render edge-to-edge instead of being cropped/letterboxed to a mismatched
@@ -3501,14 +3583,42 @@ def api_movie_generate() -> Response:
         preset = moviegen.DEFAULT_PRESET
     allow_stills = (bool(moviegen.PRESETS.get(preset, {}).get("allow_stills"))
                     and mode != "matchcut")
+    # Auto Montage: instead of a hand-picked selection, the CANDIDATE pool is the
+    # whole library or the chosen collections; the render child's selection stage
+    # picks the clips that best serve the song from cached motion analyses.
+    auto_pick = (request.form.get("auto_pick") or "").strip().lower() in ("1", "true", "on", "yes")
+    if auto_pick and mode != "beat":
+        return jsonify(ok=False, error="Auto-pick works with beat montages only."), 400
+    aspect = (request.form.get("aspect") or "").strip().lower()
+    if auto_pick:
+        try:
+            coll_ids = json.loads(request.form.get("auto_collections", "[]"))
+        except Exception:
+            coll_ids = []
+        if not isinstance(coll_ids, list):
+            coll_ids = []
+        ids = _auto_candidate_ids(coll_ids)
+        # Aspect-matched pools: a vertical montage is cut from vertical clips —
+        # cropping landscape footage to 9:16 loses most of the frame, so the
+        # canvas orientation FILTERS the pool rather than mutilating it. Clips
+        # the index has no dimensions for never match (shape unverifiable).
+        if aspect in ("landscape", "portrait", "square"):
+            ids = db.filter_video_ids_by_orientation(
+                DB_FILE, ids if coll_ids else None, aspect)
     # A montage is built from source clips, never from other montages — exclude
     # them so a beat-montage can't be fed back into a new one.
-    paths = (_montage_source_paths_for_ids(ids) if allow_stills
+    paths = (_montage_source_paths_for_ids(ids) if allow_stills and not auto_pick
              else _video_paths_for_ids(ids, exclude_montages=True))
     if len(paths) < 2:
-        err = ("Select at least 2 videos or images that exist on the server."
-               if allow_stills else
-               "Select at least 2 non-montage videos that exist on the server.")
+        if auto_pick and aspect:
+            err = (f"Auto-pick found fewer than 2 {aspect} videos in the pool — "
+                   f"try a different aspect or more collections.")
+        elif auto_pick:
+            err = "Auto-pick found fewer than 2 videos in the chosen collections."
+        elif allow_stills:
+            err = "Select at least 2 videos or images that exist on the server."
+        else:
+            err = "Select at least 2 non-montage videos that exist on the server."
         return jsonify(ok=False, error=err), 400
 
     # The song sets the beat grid, so it is mandatory for a beat montage and merely a
@@ -3542,7 +3652,10 @@ def api_movie_generate() -> Response:
     # source clip so footage isn't cropped/letterboxed to a mismatched frame; an
     # explicit width/height from the manual picker overrides it.
     if (request.form.get("resolution") or "").strip().lower() == "auto" or not request.form.get("width"):
-        canvas_w, canvas_h = _auto_canvas_from_sources(ids)
+        # Auto-pick: dominant resolution of the (aspect-filtered) pool; manual
+        # selection keeps the largest-source rule.
+        canvas_w, canvas_h = (_auto_canvas_from_pool(ids) if auto_pick
+                              else _auto_canvas_from_sources(ids))
     else:
         canvas_w = int(_num("width", 1920, 160, 3840, int))
         canvas_h = int(_num("height", 1080, 160, 2160, int))
@@ -3575,6 +3688,7 @@ def api_movie_generate() -> Response:
         # Defaults ON — otherwise the render is silent and usable audio is thrown away.
         "keep_audio": (request.form.get("keep_audio") or "1").strip().lower()
                       in ("1", "true", "on", "yes"),
+        "auto_pick": auto_pick,
     }
 
     with _movie_lock:
@@ -3601,10 +3715,75 @@ def api_movie_generate() -> Response:
                           "fps": options["fps"], "preset": options["preset"],
                           "let_clips_speak": options["let_clips_speak"],
                           "speak_moments": options["speak_moments"],
-                          "source_ids": [str(i) for i in ids],
+                          # Auto-pick pools can be thousands of ids; the status
+                          # endpoint echoes source_ids every poll, so keep them
+                          # out and flag the mode instead.
+                          "source_ids": [] if auto_pick else [str(i) for i in ids],
+                          "auto_pick": auto_pick,
                       })
     threading.Thread(target=_movie_worker, args=(job_id, paths, song_path, options), daemon=True).start()
     return jsonify(ok=True, job_id=job_id), 202
+
+
+@app.post("/api/movie/motioncache")
+def api_movie_motioncache() -> Response:
+    """Start the library motion warm-up (the panel's Analyze Library button).
+    Shares the sync/subtitles job slot; progress streams into the same log panel."""
+    if start_motioncache():
+        return jsonify(ok=True)
+    return jsonify(ok=False, error="Another job is already running."), 409
+
+
+@app.post("/api/movie/resolutions")
+def api_movie_resolutions() -> Response:
+    """Resolution histogram for a montage candidate pool — drives the panel's
+    aspect/resolution picker. Body: ``{collections?: [ids], ids?: [media ids]}``;
+    explicit ``ids`` (a manual selection) win, else the auto-pick pool for the
+    given collections (none = whole library). Returns ``sizes`` ([{w, h,
+    orientation, count}], biggest count first), ``total`` (dimensioned videos)
+    and ``unknown`` (videos the index has no dimensions for — old index rows)."""
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids")
+    try:
+        if isinstance(ids, list) and ids:
+            stats = db.video_resolution_stats(DB_FILE, [str(i) for i in ids])
+        else:
+            coll = body.get("collections")
+            coll = coll if isinstance(coll, list) else []
+            # Whole library skips the id plumbing entirely (one GROUP BY).
+            stats = db.video_resolution_stats(
+                DB_FILE, _auto_candidate_ids(coll) if coll else None)
+    except Exception:
+        stats = []
+    known = [s for s in stats if s.get("w")]
+    unknown = sum(s["count"] for s in stats if not s.get("w"))
+    return jsonify(sizes=known, total=sum(s["count"] for s in known), unknown=unknown)
+
+
+@app.get("/api/movie/motion_coverage")
+def api_movie_motion_coverage() -> Response:
+    """How much of the library the montage motion cache covers — drives the
+    Generate Movie panel's Analyze Library readout and gates Auto-pick. Two
+    stats per clip (media file + cache entry), no decoding."""
+    videos = cached = 0
+    gallery_root = GALLERY_DIR.resolve()
+    for item in _metadata_index().values():
+        if item.get("media_type") != "video" or item.get("model") == "Beat Montage":
+            continue
+        rel = str(item.get("local_path", "")).replace("\\", "/")
+        if not rel:
+            continue
+        p = (GALLERY_DIR / rel).resolve()
+        if p != gallery_root and gallery_root not in p.parents:
+            continue
+        if not p.exists():
+            continue
+        videos += 1
+        if moviegen.motion_cache_has(p, MOTION_CACHE_DIR):
+            cached += 1
+    with _sync_lock:
+        running = bool(_sync["running"] and _sync.get("job") == "motioncache")
+    return jsonify(videos=videos, cached=cached, running=running)
 
 
 @app.get("/api/movie/status")
@@ -3635,6 +3814,9 @@ def api_movie_status() -> Response:
         sources=len(meta.get("source_ids") or []),
         source_ids=meta.get("source_ids") or [],
         preset=meta.get("preset"),
+        # Auto Montage: the panel header/labels say "auto-picked" instead of a
+        # selection count (source_ids is deliberately empty for auto jobs).
+        auto_pick=bool(meta.get("auto_pick")),
         # Which pipeline produced this job. The panel is destroyed on close, so on
         # reopen this is the ONLY signal of the job's true mode — without it a live
         # match cut is labelled as a beat montage.
@@ -5966,6 +6148,10 @@ def _delete_media_files(item: dict) -> None:
     if rel:
         media = (GALLERY_DIR / rel).resolve()
         if media == gallery_root or gallery_root in media.parents:
+            # Drop the clip's cached motion analyses (beat diffs + match-cut
+            # descriptor) BEFORE the file goes — both cache keys need its stat.
+            if item.get("media_type") == "video" and media.exists():
+                moviegen.purge_motion_cache_for(media, MOTION_CACHE_DIR)
             targets += [media, media.with_suffix(".srt"), media.with_suffix(".vtt")]
     mid = str(item.get("id") or "")
     if mid:

@@ -83,6 +83,37 @@ def build_index() -> int:
     return 0
 
 
+def warm_motion_cache() -> int:
+    """Pre-analyze every library video's motion into the montage cache
+    (data/motion_cache) so Beat Montage analysis and Auto Montage's clip picker
+    hit it instead of decoding. Skips montage outputs (they're renders, not
+    sources) and anything already cached; prints progress for the sync log."""
+    import json
+
+    import mediautil
+    import moviegen
+
+    metadata = DATA_DIR / "metadata.json"
+    if not metadata.exists():
+        print(f"no metadata.json in {DATA_DIR}; run 'download' first")
+        return 1
+    try:
+        items = json.loads(metadata.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        print(f"metadata.json unreadable: {exc}")
+        return 1
+    gallery = DATA_DIR / "gallery"
+    paths = []
+    for item in items:
+        if item.get("media_type") != "video" or item.get("model") == "Beat Montage":
+            continue
+        p = gallery / mediautil.media_rel_path(item)
+        if p.exists():
+            paths.append(p)
+    moviegen.warm_motion_cache(paths, DATA_DIR / "motion_cache")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Grokive command helper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -115,6 +146,8 @@ def main() -> int:
     post.add_argument("--verbose", action="store_true")
 
     sub.add_parser("index", help="Generate missing thumbnails and (re)build the SQLite index (index.db) the web UI queries.")
+
+    sub.add_parser("motioncache", help="Pre-analyze library videos' motion into the montage cache (speeds up Beat Montage; powers Auto Montage clip picking).")
 
     all_cmd = sub.add_parser("all", help="Download, then build the index.")
     all_cmd.add_argument("--curl", default=default_curl())
@@ -166,6 +199,8 @@ def main() -> int:
         return run(cmd)
     if args.command == "index":
         return build_index()
+    if args.command == "motioncache":
+        return warm_motion_cache()
     if args.command == "reindex":
         return run([sys.executable, script("reindex.py")])
     if args.command == "all":
@@ -178,7 +213,13 @@ def main() -> int:
         ])
         if code:
             return code
-        return build_index()
+        code = build_index()
+        if code:
+            return code
+        # Warm the montage motion cache for whatever just landed — best-effort:
+        # a failed warm-up must not fail the sync (montages just analyze lazily).
+        warm_motion_cache()
+        return 0
     return 1
 
 

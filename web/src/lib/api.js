@@ -270,6 +270,24 @@ export function movieResultUrl(download = false, v = '') {
   return `/api/movie/result${qs ? `?${qs}` : ''}`;
 }
 
+// How much of the library the montage motion cache covers ({ videos, cached,
+// running }) — the panel's Analyze Library readout, and what gates Auto-pick.
+export const motionCoverage = () => getJSON('/api/movie/motion_coverage');
+// Resolution histogram for a montage candidate pool ({ sizes:[{w,h,orientation,
+// count}], total, unknown }) — drives the aspect/resolution picker. Pass either
+// { collections } (auto-pick pool; empty = whole library) or { ids } (a manual
+// selection, for the "these will be cropped" warning).
+export async function movieResolutions({ collections = [], ids = [] } = {}) {
+  const res = await fetch('/api/movie/resolutions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ids.length ? { ids } : { collections })
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+// Kick off the library motion warm-up (shares the sync job slot; watch the log panel).
+export const startMotionCache = () => fetch('/api/movie/motioncache', { method: 'POST' });
+
 // --- Jobs (sync + subtitles share one slot) --------------------------------
 export const startSync = () => fetch('/api/sync', { method: 'POST' });
 export const startSubtitles = () => fetch('/api/subtitles', { method: 'POST' });

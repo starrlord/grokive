@@ -59,14 +59,17 @@ ANALYSIS_H = 180
 
 # Segment renders are independent single-input ffmpeg jobs, so they run in a small
 # worker pool. Sub-second Music Video segments are dominated by per-process spawn +
-# input-open + seek overhead, not encode time, so parallelism is near-linear. 4 stays
-# inside every consumer NVENC concurrent-session cap (5 on older drivers, 8 on newer)
-# while still soaking that overhead; MOVIE_RENDER_WORKERS overrides (1 = the old
-# strictly-serial behaviour).
+# input-open + seek overhead, not encode time, so parallelism is near-linear there.
+# 6 leaves 2 NVENC sessions of the GeForce 8-session cap (driver 550+) free for
+# whatever else the server encodes mid-render (Merge/Export, subtitle burn) — the
+# CPU-filter segment path has NO libx264 fallback, so running AT the cap turns a
+# concurrent encode into a dead render. MOVIE_RENDER_WORKERS overrides (1 = the
+# old strictly-serial behaviour); the same pool drives motion-analysis decodes
+# (NVDEC, uncapped) and the library warm-up.
 try:
-    RENDER_WORKERS = max(1, min(16, int(os.environ.get("MOVIE_RENDER_WORKERS", "") or 4)))
+    RENDER_WORKERS = max(1, min(16, int(os.environ.get("MOVIE_RENDER_WORKERS", "") or 6)))
 except ValueError:
-    RENDER_WORKERS = 4
+    RENDER_WORKERS = 6
 
 # Planner weights (see spec §5.3). Lower-is-better penalties are subtracted.
 W_MOTION = 1.0
@@ -91,6 +94,14 @@ _STAGE_ORDER = ["analyzing_audio", "analyzing_motion", "planning", "rendering"]
 MATCHCUT_STAGE_WEIGHTS = {"analyzing_motion": 0.45, "matching": 0.15,
                           "planning": 0.05, "rendering": 0.35}
 MATCHCUT_STAGE_ORDER = ["analyzing_motion", "matching", "planning", "rendering"]
+# Auto Montage adds a "selecting" stage (score the candidate library against the
+# song, pure cache reads) between audio and motion. Separate table, same rule as
+# matchcut: never mutate the beat tables — that reweights every existing bar.
+AUTOPICK_STAGE_WEIGHTS = {"analyzing_audio": 0.10, "selecting": 0.03,
+                          "analyzing_motion": 0.42, "planning": 0.05,
+                          "rendering": 0.40}
+AUTOPICK_STAGE_ORDER = ["analyzing_audio", "selecting", "analyzing_motion",
+                        "planning", "rendering"]
 
 # Presets bundle the analysis mode, cut rhythm, transition policy, framing and
 # per-shot motion. "classic" is the original v1 behaviour, byte-for-byte — it
@@ -966,19 +977,13 @@ def detect_head_trim(src: Path, *, hwaccel_decode: bool = False) -> float:
         return 0.0
 
 
-def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve:
-    """Per-frame motion curve via CPU frame-differencing.
-
-    Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
-    then motion[t] = mean(|frame[t] - frame[t-1]|), normalized 0..1. No OpenCV.
-
-    A detected character-sheet intro card is cut off the head FIRST, on the raw
-    diffs (see _head_trim_from_diffs): the leading samples are dropped, duration
-    shrinks, and the trim is recorded as MotionCurve.head_offset — so the curve,
-    its windows/scene cuts, and everything the planner derives are all in trimmed
-    clip time, and normalization is no longer poisoned by the card's cut spike."""
-    duration = probe_duration(src)
-    samples = _gray_diffs(src, hwaccel_decode)
+def _curve_from_raw(clip_id: str, src: Path, raw: list[float],
+                    duration: float) -> MotionCurve:
+    """Head-trim + peak-normalize RAW diffs into a MotionCurve — the pure-math
+    tail of ``analyze_motion``, split out so cached raw diffs (see the motion-diff
+    cache below) and a fresh decode produce bit-identical curves. Auto-pick uses
+    it too, so its features come from exactly the pipeline's own processing."""
+    samples = list(raw)
     head = _head_trim_from_diffs(samples, float(ANALYSIS_FPS))
     if head > 0 and duration - head >= HEAD_MIN_REMAIN_S:
         samples = samples[round(head * ANALYSIS_FPS):]
@@ -991,6 +996,162 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool) -> MotionCurve
     return MotionCurve(clip_id=clip_id, src_path=str(src), duration=duration,
                        fps_analyzed=float(ANALYSIS_FPS), samples=samples,
                        head_offset=head)
+
+
+def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool,
+                   cache_dir: Path | None = None) -> MotionCurve:
+    """Per-frame motion curve via CPU frame-differencing.
+
+    Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
+    then motion[t] = mean(|frame[t] - frame[t-1]|), normalized 0..1. No OpenCV.
+
+    A detected character-sheet intro card is cut off the head FIRST, on the raw
+    diffs (see _head_trim_from_diffs): the leading samples are dropped, duration
+    shrinks, and the trim is recorded as MotionCurve.head_offset — so the curve,
+    its windows/scene cuts, and everything the planner derives are all in trimmed
+    clip time, and normalization is no longer poisoned by the card's cut spike.
+
+    ``cache_dir`` (the shared motion_cache) short-circuits the decode with the
+    clip's cached RAW diffs; head-trim + normalization always re-run on top, so a
+    hit is bit-identical to a fresh analysis."""
+    raw = duration = None
+    if cache_dir is not None:
+        hit = _load_motion_diffs(src, cache_dir)
+        if hit is not None:
+            raw, duration = hit
+    if raw is None:
+        duration = probe_duration(src)
+        raw = _gray_diffs(src, hwaccel_decode)
+        if cache_dir is not None:
+            _save_motion_diffs(src, cache_dir, raw, duration)
+    return _curve_from_raw(clip_id, src, raw, duration)
+
+
+# --------------------------------------------------------------------------- #
+# Motion-diff cache — the RAW frame diffs are the expensive part of stage 2 (a
+# full decode of every clip); everything derived (head trim, normalization,
+# windows, scene cuts) is pure math on top, so caching the diffs reproduces
+# analyze_motion bit-exactly while staying valid if detection thresholds are
+# ever retuned. Entries live under motion_cache/beat/ — a sibling namespace of
+# Motion Match Cut's descriptors, sharing its LRU size/age budget (its
+# prune_cache rglobs the whole motion_cache tree). Keyed by path+size+mtime
+# like matchcut (library media is immutable once downloaded). Tiny: ~8 floats
+# per second of footage, so a whole library is a few MB.
+# --------------------------------------------------------------------------- #
+
+MOTION_CACHE_VERSION = 1
+
+
+def _motion_cache_key(src: Path) -> str:
+    st = Path(src).stat()
+    return (f"mv{MOTION_CACHE_VERSION}:{ANALYSIS_FPS}x{ANALYSIS_W}x{ANALYSIS_H}:"
+            f"{Path(src).resolve()}:{st.st_size}:{int(st.st_mtime)}")
+
+
+def _motion_cache_path(cache_dir: Path, key: str) -> Path:
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return cache_dir / "beat" / h[:2] / f"{h}.json.gz"
+
+
+def motion_cache_has(src: Path, cache_dir: Path) -> bool:
+    """Whether SRC has a cached analysis (no decode, two stats). Used by the
+    server's coverage readout; never raises."""
+    try:
+        return _motion_cache_path(cache_dir, _motion_cache_key(src)).is_file()
+    except Exception:
+        return False
+
+
+def _load_motion_diffs(src: Path, cache_dir: Path) -> tuple[list[float], float] | None:
+    """Cached ``(raw_diffs, container_duration)`` for SRC, or None. A hit touches
+    the entry's mtime so matchcut.prune_cache's LRU reflects real use."""
+    try:
+        p = _motion_cache_path(cache_dir, _motion_cache_key(src))
+        if not p.is_file():
+            return None
+        with gzip.open(p, "rt", encoding="utf-8") as fh:
+            d = json.load(fh)
+        os.utime(p)
+        return [float(x) for x in d["raw"]], float(d["duration"])
+    except Exception:
+        return None
+
+
+def _save_motion_diffs(src: Path, cache_dir: Path, raw: list[float],
+                       duration: float) -> None:
+    """Best-effort cache write; the payload keeps the source path so a future
+    hygiene sweep can match entries to files without reversing the key hash."""
+    try:
+        p = _motion_cache_path(cache_dir, _motion_cache_key(src))
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            json.dump({"v": MOTION_CACHE_VERSION, "src": str(src),
+                       "duration": duration, "fps": ANALYSIS_FPS,
+                       "raw": raw}, fh)
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def purge_motion_cache_for(src: Path, cache_dir: Path | None) -> None:
+    """Drop SRC's cached analyses — the beat-mode diffs AND the Motion Match Cut
+    descriptor — so deleting a clip doesn't strand cache data. MUST run while the
+    file still exists (both keys include size+mtime). Never raises; an entry that
+    can't be matched is left for the LRU prune to age out."""
+    if cache_dir is None:
+        return
+    try:
+        _motion_cache_path(cache_dir, _motion_cache_key(src)).unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        import matchcut
+        matchcut._cache_path(cache_dir, matchcut._cache_key(Path(src))).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def warm_motion_cache(paths: list, cache_dir: Path, *, hwaccel_decode: bool = False,
+                      workers: int | None = None, log=print) -> dict:
+    """Pre-analyze clips into the motion-diff cache (the library warm-up).
+
+    Skips images and anything already cached; misses decode in a RENDER_WORKERS
+    pool. ``log`` lines go to stdout by default — the CLI's output streams into
+    the server's sync log panel, so progress is visible there. Returns
+    ``{"videos", "cached", "analyzed", "failed"}``."""
+    vids = [Path(p) for p in paths if not _is_image(p)]
+    todo = [p for p in vids if not motion_cache_has(p, cache_dir)]
+    cached = len(vids) - len(todo)
+    stats = {"videos": len(vids), "cached": cached, "analyzed": 0, "failed": 0}
+    if not todo:
+        log(f"motion cache: all {len(vids)} clip(s) already analyzed")
+        return stats
+    log(f"motion cache: {cached} already analyzed, {len(todo)} to go")
+
+    def _one(p: Path) -> bool:
+        duration = probe_duration(p)
+        raw = _gray_diffs(p, hwaccel_decode)
+        if not raw:
+            return False
+        _save_motion_diffs(p, cache_dir, raw, duration)
+        return True
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(workers or RENDER_WORKERS, len(todo)))) as pool:
+        futures = {pool.submit(_one, p): p for p in todo}
+        for fut in as_completed(futures):
+            try:
+                ok = fut.result()
+            except Exception:
+                ok = False
+            stats["analyzed" if ok else "failed"] += 1
+            done += 1
+            if done % 25 == 0 or done == len(todo):
+                log(f"motion cache: {done}/{len(todo)} analyzed")
+    log(f"motion cache: done — {stats['analyzed']} new, {stats['failed']} failed, "
+        f"{cached} were already analyzed")
+    return stats
 
 
 def _is_image(path) -> bool:
@@ -2368,6 +2529,10 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
     # "Let clips speak" is preset-independent: a checkbox + how many moments.
     let_speak = bool(options.get("let_clips_speak"))
     speak_moments = options.get("speak_moments", "auto")
+    # Auto Montage: video_paths is the CANDIDATE pool (whole library / chosen
+    # collections); a "selecting" stage picks the clips that best serve this song
+    # from cached analyses before the normal pipeline runs. Beat mode only.
+    auto_pick = bool(options.get("auto_pick")) and mode == "beat"
 
     if mode == "matchcut":
         # Motion Match Cut owns its own look: the seam is the effect, so every beat
@@ -2380,6 +2545,8 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
         let_speak = False
         transitions = "none"
         stage_order, stage_weights = MATCHCUT_STAGE_ORDER, MATCHCUT_STAGE_WEIGHTS
+    elif auto_pick:
+        stage_order, stage_weights = AUTOPICK_STAGE_ORDER, AUTOPICK_STAGE_WEIGHTS
     else:
         stage_order, stage_weights = _STAGE_ORDER, STAGE_WEIGHTS
 
@@ -2403,6 +2570,26 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
             eng += " · cached"
         progress("analyzing_audio", _ov("analyzing_audio", 1.0), 1.0,
                  f"{len(grid.beats)} beats @ {grid.tempo:.0f} BPM · {eng}")
+
+    # 1b. auto-pick (Auto Montage) ------------------------------------------- #
+    # Score the candidate pool against this song's demand profile using ONLY
+    # cached artifacts (beat grid + per-clip raw diffs) — zero decoding — and
+    # narrow video_paths to the chosen clips. Uncached candidates are skipped
+    # (the warm-up / sync keeps coverage converging to 100%).
+    auto_stats: dict = {}
+    if auto_pick:
+        import autopick
+        progress("selecting", _ov("selecting", 0.0), 0.0,
+                 f"Choosing clips for this song ({len(video_paths)} candidates)…")
+        video_paths, auto_stats = autopick.select_clips(
+            [Path(p) for p in video_paths], grid, cache_dir,
+            tightness=tightness, target_duration=target,
+            scene_aware=scene_aware, allow_stills=allow_stills, seed=seed)
+        detail = (f"Picked {auto_stats['picked']} of {auto_stats['analyzed']} "
+                  f"analyzed clips (~{auto_stats['est_slots']} slots)")
+        if auto_stats.get("skipped_uncached"):
+            detail += f" · {auto_stats['skipped_uncached']} unanalyzed skipped"
+        progress("selecting", _ov("selecting", 1.0), 1.0, detail)
 
     # 2. motion (the slow stage — surface per-clip progress) ----------------- #
     curves: list[MotionCurve] = []
@@ -2438,21 +2625,38 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
                  f"Analyzed {len(descs)} clips"
                  + (f" · trimmed {n_trimmed} intro card(s)" if n_trimmed else ""))
     else:
-        for idx, src in enumerate(video_paths):
-            sp = (idx) / total
-            progress("analyzing_motion", _ov("analyzing_motion", sp), sp,
-                     f"Analyzing motion: clip {idx + 1} of {total}")
+        # Beat-mode analysis runs through the motion-diff cache (a hit skips the
+        # decode entirely and reproduces the curve bit-exactly) and a worker pool
+        # for the misses — decodes are independent single-input ffmpeg jobs, so
+        # the pool changes wall-clock only. Results keep candidate order (clip_id
+        # = original index; the planner's determinism depends on stable order).
+        # progress() stays on this thread — see the render pool for why.
+        results: list[MotionCurve | None] = [None] * total
+
+        def _analyze_one(idx: int) -> None:
+            src = video_paths[idx]
             try:
                 # A still image (Picture & Video mode only) can't be decoded for motion —
                 # substitute a synthetic flat curve so the planner can place it like a clip.
                 if allow_stills and _is_image(src):
                     curve = _still_curve(str(idx), Path(src))
                 else:
-                    curve = analyze_motion(str(idx), Path(src), hwaccel_decode)
+                    curve = analyze_motion(str(idx), Path(src), hwaccel_decode,
+                                           cache_dir=cache_dir)
                 if curve.duration > 0 and curve.samples:
-                    curves.append(curve)
+                    results[idx] = curve
             except Exception:
                 pass  # skip undecodable clips; fail later only if <2 remain
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=max(1, min(RENDER_WORKERS, total))) as pool:
+            for fut in as_completed([pool.submit(_analyze_one, i) for i in range(total)]):
+                fut.result()          # _analyze_one never raises; keep the contract loud
+                done += 1
+                sp = done / total
+                progress("analyzing_motion", _ov("analyzing_motion", sp), sp,
+                         f"Analyzing motion: clip {done} of {total}")
+        curves = [c for c in results if c is not None]
         if len(curves) < 2:
             raise RuntimeError("fewer than 2 usable clips after motion analysis")
         n_trimmed = sum(1 for c in curves if c.head_offset > 0)
@@ -2693,6 +2897,9 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
     if mode == "matchcut":
         # How many shots contributed their own audio (songless match cut only).
         result["audio_shots"] = n_audio
+    if auto_stats:
+        # What Auto Montage chose and from how much — the panel's readout.
+        result["auto"] = auto_stats
     if grid is not None:
         # Beat-engine provenance only exists when a grid was built. The panel guards
         # this behind an #if, so omitting it in match-cut mode is safe.
