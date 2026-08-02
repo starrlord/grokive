@@ -776,13 +776,18 @@
              field-sizing which iOS Safari lacks): both stack in one grid cell whose width
              is the text's, so the pill sits right after the name and follows live renames.
              min-w-0 + overflow-hidden let it shrink and scroll for very long names. -->
-        <div class="flex min-w-0 flex-1 items-center gap-2">
+        <!-- Below sm the Group field drops to its own line (order-last, after the pill):
+             it can't shrink under 8rem, so sharing a phone-width line with the name
+             chopped the name off. Wrap is mobile-only — on sm+ the name's shrink keeps
+             everything on one line, and enabling wrap there would kick Group + pill to
+             a new line for long names instead. -->
+        <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-nowrap">
           <label class="relative grid min-w-0 max-w-full items-center overflow-hidden">
             <span aria-hidden="true" class="name-sizer invisible whitespace-pre rounded-lg border border-transparent px-1.5 py-1 text-base font-extrabold sm:text-lg">{collectionName || ' '}</span>
             <input class="absolute inset-0 h-full w-full rounded-lg border border-transparent bg-transparent px-1.5 py-1 text-base font-extrabold text-ink outline-none transition hover:border-line focus:border-[var(--accent)] focus:bg-[var(--surface-2)] sm:text-lg"
               aria-label="Collection name" title="Rename collection" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
           </label>
-          <label class="flex min-w-[8rem] max-w-48 shrink items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1 text-sm">
+          <label class="order-last flex w-full min-w-[8rem] max-w-48 shrink items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-2 py-1 text-sm sm:order-none sm:w-auto">
             <span class="text-muted">Group</span>
             <input class="min-w-0 flex-1 bg-transparent font-semibold text-ink outline-none placeholder:text-muted"
               aria-label="Collection group" title="Collection group" placeholder="None" list="collection-group-options"

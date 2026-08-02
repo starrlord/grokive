@@ -190,7 +190,11 @@
             {fam.videos.length} video{fam.videos.length === 1 ? '' : 's'}{fam.base ? (fam.external ? ` · ${baseNoun(fam)} not in collection` : ` · ${baseNoun(fam)}`) : ''}
           </p>
         </div>
-        <div class="flex flex-wrap items-center gap-1.5">
+        <!-- w-full below sm: the nowrap Play/Export/Montage strip is wider than a phone
+             leaves next to the label, and the label (min-w-0 flex-1) loses that fight —
+             it crushes to a sliver and the meta wraps word-by-word into the buttons.
+             Forcing the cluster onto its own row gives the label the full first line. -->
+        <div class="flex w-full flex-wrap items-center gap-1.5 sm:w-auto">
           <button type="button" class="group-action" disabled={!complete || !fam.videos.length} onclick={() => onplay(fam.videos, fam.label)}>
             <span class="text-[0.7rem]">▶</span> Play
           </button>
