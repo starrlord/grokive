@@ -162,6 +162,11 @@ def test_video_resolution_stats_and_orientation_filter():
         assert db.filter_video_ids_by_orientation(dbfile, ids, "landscape") == ["land3"]
         assert db.filter_video_ids_by_orientation(dbfile, None, "square") == ["sq1"]
         assert db.filter_video_ids_by_orientation(dbfile, ids, "nonsense") == [str(i) for i in ids]
+        # Orientation map: every dimensioned source video, nothing else (no
+        # montage output, no image, no dimension-less row).
+        omap = db.video_orientation_map(dbfile)
+        assert omap == {"land1": "landscape", "land2": "landscape", "land3": "landscape",
+                        "port1": "portrait", "port2": "portrait", "sq1": "square"}, omap
     print("  resolutions: histogram buckets/sorting, montage+image excluded, filter order-preserving OK")
 
 

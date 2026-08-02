@@ -277,10 +277,10 @@ export const motionCoverage = () => getJSON('/api/movie/motion_coverage');
 // count}], total, unknown }) — drives the aspect/resolution picker. Pass either
 // { collections } (auto-pick pool; empty = whole library) or { ids } (a manual
 // selection, for the "these will be cropped" warning).
-export async function movieResolutions({ collections = [], ids = [] } = {}) {
+export async function movieResolutions({ collections = [], ids = [], perCollection = false } = {}) {
   const res = await fetch('/api/movie/resolutions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(ids.length ? { ids } : { collections })
+    body: JSON.stringify(ids.length ? { ids } : { collections, per_collection: perCollection })
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();

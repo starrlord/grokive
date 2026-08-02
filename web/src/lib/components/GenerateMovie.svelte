@@ -129,6 +129,16 @@
   // Locked/sealed collections stay private — never offered as an auto-pick pool
   // (the server skips them too).
   const pickableCollections = $derived(($collections || []).filter((c) => !c.locked));
+  // What a collection chip's number means: with an aspect chosen, the clips that
+  // collection would actually CONTRIBUTE to the pool (matching-orientation videos
+  // — the pool filters at orientation level; a specific sub-resolution only sets
+  // the canvas, all same-orientation clips still qualify). With aspect on Auto,
+  // its eligible video count when known, else the total item count.
+  function collectionChipCount(c) {
+    const per = resolutionStats?.collections?.[c.id];
+    if (per) return aspectId !== 'auto' ? (per[aspectId] ?? 0) : per.videos;
+    return c.item_count ?? c.ids?.length ?? 0;
+  }
   // Rough candidate count for the footer hint (whole library uses coverage.videos).
   const autoCandidateEstimate = $derived(
     autoCollections.length
@@ -144,7 +154,7 @@
   let resSeq = 0; // guards against a slow older response landing after a newer one
   $effect(() => {
     const req = autoPick && !matchCut
-      ? { collections: [...autoCollections] }
+      ? { collections: [...autoCollections], perCollection: true }
       : { ids: [...activeIds] };
     const seq = ++resSeq;
     movieResolutions(req)
@@ -495,9 +505,11 @@
                         class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {!autoCollections.length ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                         onclick={() => (autoCollections = [])}>Whole library</button>
                       {#each pickableCollections as c (c.id)}
+                        <!-- Collections that would contribute nothing at the chosen
+                             aspect stay tickable but read as empty. -->
                         <button type="button"
-                          class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {autoCollections.includes(c.id) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
-                          onclick={() => toggleAutoCollection(c.id)}>{c.name} <span class="opacity-60">{c.item_count ?? c.ids?.length ?? 0}</span></button>
+                          class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {autoCollections.includes(c.id) ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'} {collectionChipCount(c) === 0 ? 'opacity-50' : ''}"
+                          onclick={() => toggleAutoCollection(c.id)}>{c.name} <span class="opacity-60">{collectionChipCount(c)}</span></button>
                       {/each}
                     </div>
                   </div>

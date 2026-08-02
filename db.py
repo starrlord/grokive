@@ -530,6 +530,19 @@ def video_resolution_stats(db_path: str | Path, ids: list[str] | None = None) ->
         conn.close()
 
 
+def video_orientation_map(db_path: str | Path) -> dict[str, str]:
+    """``{media_id: orientation}`` for every dimensioned source video — one
+    query, so callers can count pool eligibility per collection without a query
+    per collection (the montage panel's aspect-scoped collection chips)."""
+    conn = _connect(db_path)
+    try:
+        return {r["id"]: r["orient"] for r in conn.execute(
+            f"SELECT id, {_ORIENT_SQL} AS orient FROM media "
+            f"WHERE {_SOURCE_VIDEO_SQL} AND media_w IS NOT NULL AND media_h IS NOT NULL")}
+    finally:
+        conn.close()
+
+
 def filter_video_ids_by_orientation(db_path: str | Path, ids: list[str] | None,
                                     orientation: str) -> list[str]:
     """The subset of ``ids`` (order preserved) whose video dimensions match

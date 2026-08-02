@@ -3757,7 +3757,31 @@ def api_movie_resolutions() -> Response:
         stats = []
     known = [s for s in stats if s.get("w")]
     unknown = sum(s["count"] for s in stats if not s.get("w"))
-    return jsonify(sizes=known, total=sum(s["count"] for s in known), unknown=unknown)
+    resp = {"sizes": known, "total": sum(s["count"] for s in known), "unknown": unknown}
+    # per_collection: orientation counts for EVERY pickable collection, so the
+    # panel's collection chips can show how many clips each would contribute to
+    # an aspect-filtered pool (a chip's total item count is misleading there —
+    # images and off-aspect clips never enter the pool). One orientation map
+    # query + in-memory membership counting; aspect-independent, so switching
+    # aspects client-side needs no refetch.
+    if body.get("per_collection"):
+        try:
+            omap = db.video_orientation_map(DB_FILE)
+            colls: dict = {}
+            for coll in _load_collections():
+                if coll.get("locked"):
+                    continue
+                counts = {"landscape": 0, "portrait": 0, "square": 0}
+                for mid in coll["ids"]:
+                    o = omap.get(str(mid))
+                    if o:
+                        counts[o] += 1
+                counts["videos"] = sum(counts.values())
+                colls[coll["id"]] = counts
+            resp["collections"] = colls
+        except Exception:
+            pass  # older index / no db — chips fall back to total item counts
+    return jsonify(**resp)
 
 
 @app.get("/api/movie/motion_coverage")
