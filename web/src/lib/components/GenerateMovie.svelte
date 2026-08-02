@@ -139,6 +139,13 @@
     if (per) return aspectId !== 'auto' ? (per[aspectId] ?? 0) : per.videos;
     return c.item_count ?? c.ids?.length ?? 0;
   }
+  // Chips ordered by what they'd actually contribute (most relevant clips
+  // first, so the useful pools are on top); re-sorts as the aspect changes.
+  // Name tie-break keeps equal-count chips stable across refetches.
+  const sortedCollections = $derived.by(() =>
+    [...pickableCollections].sort((a, b) =>
+      collectionChipCount(b) - collectionChipCount(a)
+      || (a.name || '').localeCompare(b.name || '')));
   // Rough candidate count for the footer hint (whole library uses coverage.videos).
   const autoCandidateEstimate = $derived(
     autoCollections.length
@@ -504,7 +511,7 @@
                       <button type="button"
                         class="rounded-full border px-2.5 py-1 text-xs font-semibold transition {!autoCollections.length ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
                         onclick={() => (autoCollections = [])}>Whole library</button>
-                      {#each pickableCollections as c (c.id)}
+                      {#each sortedCollections as c (c.id)}
                         <!-- Collections that would contribute nothing at the chosen
                              aspect stay tickable but read as empty. -->
                         <button type="button"
