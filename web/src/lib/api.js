@@ -116,8 +116,11 @@ async function downloadBlob(response, name) {
 }
 export const exportPlaylist = (id, name) =>
   fetch(`/api/playlists/${encodeURIComponent(id)}/export`).then((r) => downloadBlob(r, name));
-export const exportSelection = (ids, name = 'selection') =>
-  fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, name }) }).then((r) => downloadBlob(r, name));
+// `intro` (optional) asks the server to render a cinematic title intro and prepend
+// it to the merge: { title, subtitle, title_color, stroke_color, subtitle_color,
+// border_color, duration }. Null/omitted = plain merge, exactly as before.
+export const exportSelection = (ids, name = 'selection', intro = null) =>
+  fetch('/api/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(intro ? { ids, name, intro } : { ids, name }) }).then((r) => downloadBlob(r, name));
 
 // Stream a response to the browser as a download, honouring the server's
 // Content-Disposition filename (falls back to `fallback` when absent). Used where the

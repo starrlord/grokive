@@ -80,6 +80,14 @@ const _clampVolume = (n) => { const v = Number(n); return Number.isFinite(v) ? M
 export const loadVolume = () => _clampVolume(LS('ga.volume', 1));
 export const saveVolume = (n) => persist('ga.volume', _clampVolume(n));
 
+// Last-used cinematic-intro settings from the export modal (title/subtitle/style/
+// duration) so a repeat export doesn't retype them. Read/written directly (like
+// loadVolume) — the modal seeds its local $state once per open. The intro TOGGLE
+// itself is deliberately NOT persisted: adding an intro is a per-export choice,
+// and defaulting it on would silently prepend one to every future merge.
+export const loadIntroPrefs = () => LS('ga.introPrefs', null);
+export const saveIntroPrefs = (v) => persist('ga.introPrefs', v);
+
 // --- Filter / view state ----------------------------------------------------
 export const filters = writable({
   view: 'recent', // recent | all | collections | favorites | archive | canvases

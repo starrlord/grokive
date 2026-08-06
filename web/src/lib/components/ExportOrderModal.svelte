@@ -5,7 +5,13 @@
   // the user drags / ▲▼ them into the exact sequence the combined MP4 should play, then
   // exports. This is the ONLY place the merge order is chosen deliberately; the backend
   // concatenates ids in the order it's handed, so top-to-bottom here == playback order.
+  //
+  // It also owns the "Cinematic intro" option: a server-rendered trailer-style opener
+  // (title card over a grid of up to 9 randomly sampled clips) prepended to the merge.
+  // A toggle here — rather than a separate "Create intro?" dialog — because every
+  // multi-video merge already passes through this modal; off = the export of old.
   import { exportSelection } from '$lib/api.js';
+  import { loadIntroPrefs, saveIntroPrefs } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
@@ -18,6 +24,55 @@
   let list = $state((items || []).filter((v) => v && v.media_type === 'video'));
   let dragId = $state(null);
   let busy = $state(false);
+
+  // --- Cinematic intro -------------------------------------------------------
+  // Style presets: title fill + stroke + subtitle; the border reuses the title color.
+  const PRESETS = [
+    { id: 'gold',    label: 'Gold',    title: '#D4AF37', stroke: '#8B6914', subtitle: '#E8D5A3' },
+    { id: 'silver',  label: 'Silver',  title: '#C9CCD1', stroke: '#585E66', subtitle: '#E8EAED' },
+    { id: 'crimson', label: 'Crimson', title: '#E0364B', stroke: '#6E0F1C', subtitle: '#F2B8C0' },
+    { id: 'ocean',   label: 'Ocean',   title: '#38BDF8', stroke: '#0C4A6E', subtitle: '#BAE6FD' },
+    { id: 'emerald', label: 'Emerald', title: '#34D399', stroke: '#065F46', subtitle: '#A7F3D0' },
+    { id: 'violet',  label: 'Violet',  title: '#A78BFA', stroke: '#3B1D77', subtitle: '#DDD6FE' }
+  ];
+  const DURATIONS = [8, 12, 16];
+  // Texts/style persist across exports (loadIntroPrefs); the toggle itself is always
+  // off on open — adding an intro is a per-export decision.
+  const prefs = loadIntroPrefs() || {};
+  let introOn = $state(false);
+  let introTitle = $state(typeof prefs.title === 'string' ? prefs.title : '');
+  let introSubtitle = $state(typeof prefs.subtitle === 'string' ? prefs.subtitle : '');
+  let introPreset = $state(PRESETS.some((p) => p.id === prefs.preset) || prefs.preset === 'custom' ? prefs.preset : 'gold');
+  let customColor = $state(/^#[0-9a-fA-F]{6}$/.test(prefs.custom || '') ? prefs.custom : '#d4af37');
+  let introDur = $state(DURATIONS.includes(prefs.duration) ? prefs.duration : 12);
+
+  const tileCount = $derived(Math.min(9, list.length));
+  // A one-off selection has the meaningless name 'selection' — don't title the movie that.
+  const fallbackTitle = $derived(name && name !== 'selection' ? name : '');
+
+  function mixHex(a, b, t) {
+    const ch = (h, i) => parseInt(h.replace('#', '').slice(i, i + 2), 16);
+    const px = (i) => Math.round(ch(a, i) + (ch(b, i) - ch(a, i)) * t).toString(16).padStart(2, '0');
+    return `#${px(0)}${px(2)}${px(4)}`;
+  }
+  function introColors() {
+    if (introPreset === 'custom') {
+      return { title: customColor, stroke: mixHex(customColor, '#000000', 0.55), subtitle: mixHex(customColor, '#ffffff', 0.55) };
+    }
+    return PRESETS.find((p) => p.id === introPreset) || PRESETS[0];
+  }
+  function introPayload() {
+    const c = introColors();
+    return {
+      title: introTitle.trim() || fallbackTitle,
+      subtitle: introSubtitle.trim(),
+      title_color: c.title,
+      stroke_color: c.stroke,
+      subtitle_color: c.subtitle,
+      border_color: c.title,
+      duration: introDur
+    };
+  }
 
   function move(id, d) {
     const a = [...list];
@@ -53,8 +108,11 @@
     if (!list.length || busy) return;
     busy = true;
     try {
-      await exportSelection(list.map((v) => v.id), name);
-      toast(`Exported ${list.length} video${list.length === 1 ? '' : 's'}`, { type: 'success' });
+      if (introOn) {
+        saveIntroPrefs({ title: introTitle.trim(), subtitle: introSubtitle.trim(), preset: introPreset, custom: customColor, duration: introDur });
+      }
+      await exportSelection(list.map((v) => v.id), name, introOn ? introPayload() : null);
+      toast(`Exported ${list.length} video${list.length === 1 ? '' : 's'}${introOn ? ' with intro' : ''}`, { type: 'success' });
       onclose();
     } catch (e) {
       toast(e?.message || 'Export failed.', { type: 'error' });
@@ -65,8 +123,9 @@
 </script>
 
 <!-- While a merge is preparing, freeze dismissal (Escape / click-outside) so the export
-     can't be orphaned mid-request; the Cancel button is disabled to match. -->
-<Modal onclose={busy ? () => {} : onclose} ariaLabel="Arrange videos before export" z="z-50" overlay="overlay-strong" closeOnEscape={!busy}
+     can't be orphaned mid-request; the Cancel button is disabled to match.
+     z-[70]: this modal can stack over the PlaylistEditor (default z-[60]). -->
+<Modal onclose={busy ? () => {} : onclose} ariaLabel="Arrange videos before export" z="z-[70]" overlay="overlay-strong" closeOnEscape={!busy}
        panelClass="panel flex max-h-[88dvh] w-full max-w-2xl flex-col overflow-hidden rounded-card">
   <div class="flex items-center gap-3 border-b border-line p-4">
     <div class="min-w-0 flex-1">
@@ -107,9 +166,51 @@
     {/if}
   </div>
 
+  <div class="space-y-3 border-t border-line px-4 py-3">
+    <label class="flex cursor-pointer items-start gap-3">
+      <input type="checkbox" bind:checked={introOn} disabled={busy} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--accent)]" />
+      <span class="min-w-0">
+        <span class="block text-sm font-semibold text-ink">Cinematic intro</span>
+        <span class="mt-0.5 block text-[11px] leading-snug text-muted">
+          Opens the movie with a title card over a grid of {tileCount} clip{tileCount === 1 ? '' : 's'} picked at random from your set{list.length > 9 ? ' (max 9)' : ''}.
+        </span>
+      </span>
+    </label>
+    {#if introOn}
+      <div class="grid gap-2 sm:grid-cols-2">
+        <input type="text" maxlength="80" bind:value={introTitle} disabled={busy} aria-label="Intro title"
+          placeholder={fallbackTitle || 'Title (optional)'}
+          class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none transition focus:border-[var(--accent)]" />
+        <input type="text" maxlength="120" bind:value={introSubtitle} disabled={busy} aria-label="Intro subtitle"
+          placeholder="Subtitle (optional)"
+          class="w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none transition focus:border-[var(--accent)]" />
+      </div>
+      <div class="flex flex-wrap items-center gap-1.5">
+        {#each PRESETS as p (p.id)}
+          <button type="button" disabled={busy} onclick={() => (introPreset = p.id)}
+            class="flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition {introPreset === p.id ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] text-ink' : 'border-line text-muted hover:text-ink'}"
+            aria-pressed={introPreset === p.id}>
+            <span class="h-2.5 w-2.5 rounded-full" style="background:{p.title}" aria-hidden="true"></span>{p.label}
+          </button>
+        {/each}
+        <label class="flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition {introPreset === 'custom' ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] text-ink' : 'border-line text-muted hover:text-ink'}">
+          <input type="color" bind:value={customColor} disabled={busy} oninput={() => (introPreset = 'custom')} onclick={() => (introPreset = 'custom')}
+            class="h-3.5 w-5 cursor-pointer rounded-sm border-0 bg-transparent p-0" aria-label="Custom intro color" />
+          Custom
+        </label>
+        <span class="mx-1 hidden h-4 w-px bg-line sm:inline-block" aria-hidden="true"></span>
+        {#each DURATIONS as d (d)}
+          <button type="button" disabled={busy} onclick={() => (introDur = d)}
+            class="rounded-full border px-2.5 py-1 text-xs tabular-nums transition {introDur === d ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] text-ink' : 'border-line text-muted hover:text-ink'}"
+            aria-pressed={introDur === d}>{d}s</button>
+        {/each}
+      </div>
+    {/if}
+  </div>
+
   <div class="flex items-center gap-2 border-t border-line p-4">
     <span class="hidden text-xs text-muted sm:inline">Combined into one MP4, top to bottom.</span>
     <Button class="ml-auto" variant="secondary" disabled={busy} onclick={onclose}>Cancel</Button>
-    <Button disabled={!list.length || busy} onclick={doExport}>{busy ? 'Preparing…' : 'Export merged'}</Button>
+    <Button disabled={!list.length || busy} onclick={doExport}>{busy ? (introOn ? 'Rendering intro…' : 'Preparing…') : 'Export merged'}</Button>
   </div>
 </Modal>

@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import secrets
 import shutil
@@ -56,6 +57,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import db
 import gdownloader
+import introgen
 import moviegen
 import promptstudio
 import xai_imagine
@@ -2907,6 +2909,27 @@ def _has_audio(path: Path) -> bool:
         return False
 
 
+def _probe_audio_params(path: Path):
+    """(codec_name, sample_rate, channels) of the first audio stream, or None.
+    Used to give a generated intro an AUDIO track matching the clips it precedes,
+    so a uniform set keeps its lossless concat (the concat demuxer takes the
+    output's stream layout from the FIRST file — the intro)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_name,sample_rate,channels",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        streams = (json.loads(out.stdout or "{}").get("streams") or [])
+        if not streams:
+            return None
+        s = streams[0]
+        return (s.get("codec_name"), int(s.get("sample_rate") or 0), int(s.get("channels") or 0))
+    except Exception:
+        return None
+
+
 def _run_ffmpeg(cmd: list[str], what: str, cwd: str | None = None) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, cwd=cwd)
     if proc.returncode != 0:
@@ -2986,9 +3009,15 @@ def _video_encode_args(crf: str, cpu_preset: str = PRESET, nvenc_cq: str = NVENC
     return ["-c:v", "libx264", "-preset", cpu_preset, "-crf", crf, "-pix_fmt", "yuv420p"]
 
 
-def _merge_videos(paths: list[Path], out_path: Path) -> bool:
+def _merge_videos(paths: list[Path], out_path: Path, *, trim_exempt: int = 0,
+                  force_reencode: bool = False) -> bool:
     """Merge clips in order into out_path. Returns True if the merge was a pure
     stream copy (zero quality loss), False if clips had to be re-encoded.
+
+    ``trim_exempt`` skips intro-card detection for that many LEADING paths — the
+    generated cinematic intro fades in from black, which must never be mistaken
+    for a Grok character-sheet card and trimmed. ``force_reencode`` bypasses the
+    lossless gate (used when the intro's audio couldn't be matched to the clips).
 
     When every clip shares codec/width/height/pix_fmt/fps the clips are
     concatenated with ``-c copy`` — no re-encode, audio untouched. When specs
@@ -3006,11 +3035,13 @@ def _merge_videos(paths: list[Path], out_path: Path) -> bool:
     Raises RuntimeError if ffmpeg exits non-zero.
     """
     signatures = [_probe_signature(p) for p in paths]
-    trims = [moviegen.detect_head_trim(p) for p in paths]
+    trims = [0.0 if i < trim_exempt else moviegen.detect_head_trim(p)
+             for i, p in enumerate(paths)]
     if any(t > 0 for t in trims):
         _log(f"export: trimming intro card from {sum(1 for t in trims if t > 0)} "
              f"of {len(paths)} clip(s)")
-    lossless = (all(sig is not None for sig in signatures)
+    lossless = (not force_reencode
+                and all(sig is not None for sig in signatures)
                 and len(set(signatures)) == 1 and not any(t > 0 for t in trims))
     listfile = out_path.parent / "concat.txt"
 
@@ -3153,11 +3184,90 @@ def _burn_subtitles_into(video_path: Path) -> Path:
 # quick 503 instead of tying up a thread waiting.
 _EXPORT_SLOTS = threading.BoundedSemaphore(2)
 
+_HEX_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
 
-def _export_response(paths: list[Path], name: str):
-    """Merge ``paths`` (in order), optionally burn subtitles, and stream the result
-    as an MP4 download. The temp dir is deleted after streaming — nothing persists.
-    Shared by the saved-playlist and one-off (selection) export routes."""
+# Grid tiles in the generated intro are capped here no matter how many clips the
+# merge contains — a random sample of the set fills the grid.
+INTRO_MAX_TILES = 9
+
+
+def _intro_options(payload: dict):
+    """Validated cinematic-intro options from an export payload, or None when the
+    request doesn't ask for one. Unknown/malformed fields fall back to the gold
+    defaults rather than failing the export."""
+    raw = payload.get("intro")
+    if not isinstance(raw, dict):
+        return None
+
+    def color(key: str) -> str:
+        v = str(raw.get(key) or "")
+        return "#" + v.lstrip("#") if _HEX_COLOR_RE.match(v) else introgen.DEFAULTS[key]
+
+    try:
+        duration = float(raw.get("duration") or 12.0)
+    except (TypeError, ValueError):
+        duration = 12.0
+    return {
+        "title": str(raw.get("title") or "")[:80].strip(),
+        "subtitle": str(raw.get("subtitle") or "")[:120].strip(),
+        "title_color": color("title_color"),
+        "stroke_color": color("stroke_color"),
+        "subtitle_color": color("subtitle_color"),
+        "border_color": color("border_color"),
+        "duration": max(6.0, min(20.0, duration)),
+    }
+
+
+def _build_intro(paths: list[Path], tmpdir: Path, opts: dict) -> tuple[Path, bool]:
+    """Render the cinematic intro for a merge set into ``tmpdir``. Returns
+    ``(intro_path, force_reencode)``.
+
+    The grid uses a random sample of up to INTRO_MAX_TILES clips. The canvas is
+    the same target _merge_videos would re-encode to (largest input by pixels);
+    when the set is UNIFORM the intro also matches its exact fps and gets a
+    silent AAC track matching the clips' audio, so the whole merge stays a
+    lossless stream copy. Non-AAC audio can't be matched (we only produce AAC),
+    so that one case forces the re-encode path instead of splicing mismatched
+    audio codecs in a copy concat."""
+    sample = random.sample(paths, min(INTRO_MAX_TILES, len(paths)))
+    signatures = [_probe_signature(p) for p in paths]
+
+    best_pixels = 0
+    target_w, target_h = FALLBACK_W, FALLBACK_H
+    for sig in signatures:
+        if sig and sig[1] and sig[2]:
+            pixels = sig[1] * sig[2]
+            if pixels > best_pixels:
+                best_pixels = pixels
+                target_w, target_h = sig[1], sig[2]
+    target_w += target_w % 2
+    target_h += target_h % 2
+
+    uniform = all(sig is not None for sig in signatures) and len(set(signatures)) == 1
+    fps = str(signatures[0][4]) if uniform and signatures[0] and signatures[0][4] else "24"
+    audio = None
+    force_reencode = False
+    if uniform and _has_audio(paths[0]):
+        params = _probe_audio_params(paths[0])
+        if params and params[0] == "aac" and params[1] > 0 and params[2] > 0:
+            audio = (params[1], params[2])
+        else:
+            force_reencode = True
+
+    intro_path = introgen.generate_intro(
+        sample, tmpdir / "intro.mp4", tmpdir / "intro_work",
+        canvas=(target_w, target_h), fps=fps, audio=audio,
+        video_args=_video_encode_args("16", cpu_preset="medium", nvenc_cq="21"),
+        options=opts, log=_log,
+    )
+    return intro_path, force_reencode
+
+
+def _export_response(paths: list[Path], name: str, intro: dict | None = None):
+    """Merge ``paths`` (in order), optionally prepending a generated cinematic
+    intro, optionally burn subtitles, and stream the result as an MP4 download.
+    The temp dir is deleted after streaming — nothing persists. Shared by the
+    saved-playlist and one-off (selection) export routes."""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         return jsonify(ok=False, error="ffmpeg is not available on the server."), 500
     if not paths:
@@ -3168,8 +3278,21 @@ def _export_response(paths: list[Path], name: str):
 
     tmpdir = Path(tempfile.mkdtemp(prefix="ga-export-"))
     out_path = tmpdir / "merged.mp4"
+    merge_paths = paths
+    trim_exempt = 0
+    force_reencode = False
+    if intro:
+        try:
+            intro_path, force_reencode = _build_intro(paths, tmpdir, intro)
+            merge_paths = [intro_path] + paths
+            trim_exempt = 1
+        except Exception as exc:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            _EXPORT_SLOTS.release()
+            return jsonify(ok=False, error=f"Intro generation failed: {exc}"), 500
     try:
-        _merge_videos(paths, out_path)
+        _merge_videos(merge_paths, out_path, trim_exempt=trim_exempt,
+                      force_reencode=force_reencode)
         if _burn_enabled():
             out_path = _burn_subtitles_into(out_path)
     except Exception as exc:
@@ -3233,7 +3356,8 @@ def api_export() -> Response:
     ids = payload.get("ids")
     if not isinstance(ids, list) or not ids:
         return jsonify(ok=False, error="No items selected to export."), 400
-    return _export_response(_video_paths_for_ids(ids), payload.get("name") or "export")
+    return _export_response(_video_paths_for_ids(ids), payload.get("name") or "export",
+                            intro=_intro_options(payload))
 
 
 def _image_paths_for_ids(ids: list) -> list[Path]:

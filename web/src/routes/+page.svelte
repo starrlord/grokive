@@ -1044,7 +1044,8 @@
 {/if}
 
 {#if editing}
-  <PlaylistEditor playlist={editing} onclose={() => (editing = null)} onplay={playResolved} />
+  <PlaylistEditor playlist={editing} onclose={() => (editing = null)} onplay={playResolved}
+    onexportorder={(videos, label) => openExportOrder(videos, label)} />
 {/if}
 
 {#if exportOrder}

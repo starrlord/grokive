@@ -8,7 +8,7 @@
   import Button from './Button.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
-  let { playlist, onclose = () => {}, onplay = () => {} } = $props();
+  let { playlist, onclose = () => {}, onplay = () => {}, onexportorder = null } = $props();
 
   let name = $state(playlist.name);
   let ids = $state([...playlist.ids]);
@@ -92,6 +92,10 @@
   function close() { commit(); onclose(); }
   function play() { commit(); onplay(videos, name.trim() || playlist.name); }
   async function doExport() {
+    // 2+ videos: hand off to the shared merge modal (final order check + the
+    // Cinematic-intro option), committing the edited order first so the two agree.
+    // The editor stays open underneath — cancelling the merge returns here.
+    if (onexportorder && videos.length > 1) { commit(); onexportorder(videos, name.trim() || playlist.name); return; }
     busy = true;
     try { await exportSelection(videos.map((v) => v.id)); } catch (e) { toast(e.message || 'Export failed.', { type: 'error' }); } finally { busy = false; }
   }
