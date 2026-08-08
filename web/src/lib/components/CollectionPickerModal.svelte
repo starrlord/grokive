@@ -1,21 +1,26 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
   import SearchField from './SearchField.svelte';
   import {
     collections, collectionGroups, addCollection, addCollectionAndRemove, addToCollection, addToCollectionAndRemove,
-    loadCollections, setStashed, setSelectMode, clearSelection
+    loadCollections, setStashed, setSelectMode, clearSelection, loadLastGroup, saveLastGroup
   } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
   let { ids = [], currentCollection = null, onclose = () => {} } = $props();
   let q = $state('');
   let name = $state('');
-  let groupName = $state('');
+  // Sentinel for the "New group…" dropdown row. Real group names are user-typed trimmed
+  // text, so a NUL character can never collide with one.
+  const NEW_GROUP = '\u0000';
+  let groupChoice = $state(''); // '' = no group | existing group name | NEW_GROUP
+  let newGroup = $state('');
+  let newGroupInput = $state(null);
   let archiveAfter = $state(true);
   let removeAfter = $state(false);
-  let initializedFor = '';
+  let initializedFor = null;
 
   // The collections list is a shared, server-owned store loaded once at app start. Refetch on every
   // open so a rename/add made on another device (e.g. on mobile) shows here instead of a stale label.
@@ -63,14 +68,34 @@
       .sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''))
   );
 
+  // Seed the group dropdown once per source context. Opened from inside a collection, that
+  // collection's group (or, ungrouped, its name — as a suggested new group) wins; opened from
+  // the library, the last group committed by Create is re-selected. Either way a remembered
+  // name that no longer matches an existing group falls back rather than showing a dead option.
   $effect(() => {
     const sourceId = currentCollection?.id || '';
     if (initializedFor === sourceId) return;
     initializedFor = sourceId;
     archiveAfter = !currentCollection;
     removeAfter = !!currentCollection;
-    groupName = currentCollection?.group || currentCollection?.name || '';
+    if (currentCollection) {
+      const seed = canonicalGroup(currentCollection.group || currentCollection.name || '');
+      if (existingGroups.includes(seed)) { groupChoice = seed; newGroup = ''; }
+      else { groupChoice = NEW_GROUP; newGroup = seed; }
+    } else {
+      const remembered = canonicalGroup(loadLastGroup());
+      groupChoice = existingGroups.includes(remembered) ? remembered : '';
+      newGroup = '';
+    }
   });
+
+  // Focus the free-text input as soon as "New group…" is picked — the {#if} swap hasn't
+  // rendered it yet inside the change handler, hence the tick().
+  async function onGroupSelect() {
+    if (groupChoice !== NEW_GROUP) return;
+    await tick();
+    newGroupInput?.focus();
+  }
 
   function finish(collectionName, didMove) {
     const selectedNow = [...selected];
@@ -86,7 +111,8 @@
   function create() {
     const clean = name.trim();
     if (!clean || !selected.length) return;
-    const group = canonicalGroup(groupName);
+    const group = groupChoice === NEW_GROUP ? canonicalGroup(newGroup) : groupChoice;
+    saveLastGroup(group); // '' (No group) clears the memory
     const move = !!currentCollection && removeAfter;
     if (move) addCollectionAndRemove(clean, selected, group ? { group } : {}, currentCollection.id);
     else addCollection(clean, selected, group ? { group } : {});
@@ -117,13 +143,24 @@
         <div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
           <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
             placeholder="Collection name" bind:value={name} maxlength="80" />
-          <input class="min-w-0 flex-1 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
-            placeholder="Group" bind:value={groupName} list="collection-picker-groups" maxlength="120" />
-          <datalist id="collection-picker-groups">
-            {#each existingGroups as group (group)}
-              <option value={group}></option>
-            {/each}
-          </datalist>
+          {#if groupChoice === NEW_GROUP}
+            <div class="relative min-w-0">
+              <input class="w-full rounded-lg border border-line bg-[var(--surface-2)] py-2 pl-3 pr-9 text-sm outline-none"
+                placeholder="New group" bind:value={newGroup} bind:this={newGroupInput} maxlength="120" />
+              <button type="button" class="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-muted transition hover:text-[var(--ink)]"
+                aria-label="Back to group list" title="Back to group list"
+                onclick={() => { groupChoice = ''; newGroup = ''; }}>✕</button>
+            </div>
+          {:else}
+            <select class="min-w-0 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none"
+              aria-label="Group" bind:value={groupChoice} onchange={onGroupSelect}>
+              <option value="">No group</option>
+              {#each existingGroups as group (group)}
+                <option value={group}>{group}</option>
+              {/each}
+              <option value={NEW_GROUP}>New group…</option>
+            </select>
+          {/if}
           <Button class="text-sm" disabled={!name.trim() || !selected.length} onclick={create}>Create</Button>
         </div>
       </div>

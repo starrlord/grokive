@@ -88,6 +88,14 @@ export const saveVolume = (n) => persist('ga.volume', _clampVolume(n));
 export const loadIntroPrefs = () => LS('ga.introPrefs', null);
 export const saveIntroPrefs = (v) => persist('ga.introPrefs', v);
 
+// Last group committed when creating a collection from the Add-to-Collection picker, so
+// filing a run of new collections under the same group doesn't re-pick it every time.
+// Saved on Create only (browsing the dropdown commits nothing); creating with "No group"
+// clears it. Read/written directly (like loadVolume) — the picker seeds its dropdown once
+// per open, and a source collection's own group still outranks this when moving out of one.
+export const loadLastGroup = () => { const v = LS('ga.lastGroup', ''); return typeof v === 'string' ? v : ''; };
+export const saveLastGroup = (v) => persist('ga.lastGroup', String(v || ''));
+
 // --- Filter / view state ----------------------------------------------------
 export const filters = writable({
   view: 'recent', // recent | all | collections | favorites | archive | canvases
