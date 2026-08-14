@@ -7,11 +7,11 @@
   // concatenates ids in the order it's handed, so top-to-bottom here == playback order.
   //
   // It also owns the "Cinematic intro" option: a server-rendered trailer-style opener
-  // (title card over a grid of up to 9 randomly sampled clips) prepended to the merge.
-  // A toggle here — rather than a separate "Create intro?" dialog — because every
-  // multi-video merge already passes through this modal; off = the export of old.
+  // (a title card in one of four styles over clips sampled from the set) prepended to
+  // the merge. A toggle here — rather than a separate "Create intro?" dialog — because
+  // every multi-video merge already passes through this modal; off = the export of old.
   import { exportSelection } from '$lib/api.js';
-  import { loadIntroPrefs, saveIntroPrefs } from '$lib/state.js';
+  import { loadIntroPrefs, saveIntroPrefs, shuffled } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
@@ -36,17 +36,27 @@
     { id: 'violet',  label: 'Violet',  title: '#A78BFA', stroke: '#3B1D77', subtitle: '#DDD6FE' }
   ];
   const DURATIONS = [8, 12, 16];
+  // Intro styles — ids must mirror introgen.STYLES on the server (unknown ids fall
+  // back to mosaic there). Descriptions double as the picker's explainer line.
+  const STYLES = [
+    { id: 'mosaic',  label: 'Mosaic',  desc: (n) => `A title card over a grid of ${n} clip${n === 1 ? '' : 's'} picked at random from your set.` },
+    { id: 'epic',    label: 'Epic',    desc: () => 'Full-screen slow push across up to 3 clips behind widescreen bars — the movie-trailer opener.' },
+    { id: 'cascade', label: 'Cascade', desc: () => 'A scrolling wall of your clips drifting at different speeds behind a frosted title band.' },
+    { id: 'prism',   label: 'Prism',   desc: () => 'Your clips folded into a slowly turning mirror kaleidoscope behind bold glass typography.' }
+  ];
   // Texts/style persist across exports (loadIntroPrefs); the toggle itself is always
   // off on open — adding an intro is a per-export decision.
   const prefs = loadIntroPrefs() || {};
   let introOn = $state(false);
   let introTitle = $state(typeof prefs.title === 'string' ? prefs.title : '');
   let introSubtitle = $state(typeof prefs.subtitle === 'string' ? prefs.subtitle : '');
+  let introStyle = $state(STYLES.some((s) => s.id === prefs.style) ? prefs.style : 'mosaic');
   let introPreset = $state(PRESETS.some((p) => p.id === prefs.preset) || prefs.preset === 'custom' ? prefs.preset : 'gold');
   let customColor = $state(/^#[0-9a-fA-F]{6}$/.test(prefs.custom || '') ? prefs.custom : '#d4af37');
   let introDur = $state(DURATIONS.includes(prefs.duration) ? prefs.duration : 12);
 
   const tileCount = $derived(Math.min(9, list.length));
+  const styleDesc = $derived((STYLES.find((s) => s.id === introStyle) || STYLES[0]).desc(tileCount));
   // A one-off selection has the meaningless name 'selection' — don't title the movie that.
   const fallbackTitle = $derived(name && name !== 'selection' ? name : '');
 
@@ -64,6 +74,7 @@
   function introPayload() {
     const c = introColors();
     return {
+      style: introStyle,
       title: introTitle.trim() || fallbackTitle,
       subtitle: introSubtitle.trim(),
       title_color: c.title,
@@ -83,6 +94,17 @@
     list = a;
   }
   function remove(id) { list = list.filter((v) => v.id !== id); }
+  // Re-clickable, like the Play Queue / playlist Randomize. Unlike those, re-roll when
+  // the shuffle lands on the current order: with 2–3 clips that's a 50%/17% outcome, and
+  // the only feedback here is the badges visibly renumbering — an identical result reads
+  // as a broken button. Bounded so a pathological RNG streak can't spin forever.
+  function randomize() {
+    if (list.length < 2) return;
+    for (let tries = 0; tries < 10; tries++) {
+      const a = shuffled(list);
+      if (a.some((v, i) => v.id !== list[i].id)) { list = a; break; }
+    }
+  }
   // Firefox won't start an HTML5 drag session unless dragstart writes a payload (and
   // sets effectAllowed) — same quirk SavedResponses.svelte already works around. Without
   // it, drag-reorder silently no-ops on Firefox (the ▲/▼ buttons still work).
@@ -109,7 +131,7 @@
     busy = true;
     try {
       if (introOn) {
-        saveIntroPrefs({ title: introTitle.trim(), subtitle: introSubtitle.trim(), preset: introPreset, custom: customColor, duration: introDur });
+        saveIntroPrefs({ title: introTitle.trim(), subtitle: introSubtitle.trim(), style: introStyle, preset: introPreset, custom: customColor, duration: introDur });
       }
       await exportSelection(list.map((v) => v.id), name, introOn ? introPayload() : null);
       toast(`Exported ${list.length} video${list.length === 1 ? '' : 's'}${introOn ? ' with intro' : ''}`, { type: 'success' });
@@ -132,6 +154,11 @@
       <p class="text-base font-bold text-ink">Arrange before merging</p>
       <p class="text-xs text-muted">Drag the handle (or ▲/▼) to set play order · the top clip plays first</p>
     </div>
+    <button type="button"
+      class="grid h-7 w-7 shrink-0 place-items-center pointer-coarse:h-11 pointer-coarse:w-11 rounded-md border border-line text-muted transition hover:border-[color-mix(in_srgb,var(--accent)_45%,var(--line))] hover:text-ink disabled:opacity-35 disabled:hover:border-line disabled:hover:text-muted"
+      disabled={list.length < 2 || busy} onclick={randomize} title="Randomize order" aria-label="Randomize clip order">
+      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>
+    </button>
     <span class="shrink-0 tabular-nums text-xs text-muted">{list.length} video{list.length === 1 ? '' : 's'}</span>
   </div>
 
@@ -172,11 +199,19 @@
       <span class="min-w-0">
         <span class="block text-sm font-semibold text-ink">Cinematic intro</span>
         <span class="mt-0.5 block text-[11px] leading-snug text-muted">
-          Opens the movie with a title card over a grid of {tileCount} clip{tileCount === 1 ? '' : 's'} picked at random from your set{list.length > 9 ? ' (max 9)' : ''}.
+          Opens the movie with a rendered title-card opener — pick from four styles.
         </span>
       </span>
     </label>
     {#if introOn}
+      <div class="flex flex-wrap items-center gap-1.5">
+        {#each STYLES as s (s.id)}
+          <button type="button" disabled={busy} onclick={() => (introStyle = s.id)}
+            class="rounded-full border px-2.5 py-1 text-xs transition {introStyle === s.id ? 'border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] text-ink' : 'border-line text-muted hover:text-ink'}"
+            aria-pressed={introStyle === s.id}>{s.label}</button>
+        {/each}
+      </div>
+      <p class="text-[11px] leading-snug text-muted">{styleDesc}</p>
       <div class="grid gap-2 sm:grid-cols-2">
         <input type="text" maxlength="80" bind:value={introTitle} disabled={busy} aria-label="Intro title"
           placeholder={fallbackTitle || 'Title (optional)'}

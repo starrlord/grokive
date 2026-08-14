@@ -3207,7 +3207,9 @@ def _intro_options(payload: dict):
         duration = float(raw.get("duration") or 12.0)
     except (TypeError, ValueError):
         duration = 12.0
+    style = str(raw.get("style") or "").strip().lower()
     return {
+        "style": style if style in introgen.STYLES else "mosaic",
         "title": str(raw.get("title") or "")[:80].strip(),
         "subtitle": str(raw.get("subtitle") or "")[:120].strip(),
         "title_color": color("title_color"),
