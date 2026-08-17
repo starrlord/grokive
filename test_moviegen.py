@@ -444,51 +444,104 @@ def test_breakdown_presets_configured():
     print("  presets: slow-mo on cinematic+musicvideo, off classic/moody OK")
 
 
+def _sheet_frame(w=480, h=270, phase=0.0, strip=4):
+    """Synthetic character-sheet frame: four panels of unrelated textures split
+    at w/2 and h/2 (composited seams on both axes) over a flat 140-luma backdrop
+    strip — clears the flatness gate the way a real sheet's studio bg does.
+    ``strip`` = the flat strip's width divisor (w//strip); larger = less flat,
+    modelling the later white-gradient-wall sheet style."""
+    import numpy as np
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    tex = lambda fx, fy, p: 40.0 * np.sin(2 * np.pi * (xs / fx + ys / fy) + p)
+    top, left = ys < h // 2, xs < w // 2
+    f = np.full((h, w), 140.0, dtype=np.float32)
+    f += np.where(top & left, tex(16, 11, phase), 0)
+    f += np.where(top & ~left, tex(13, 9, 2.1 + phase), 0)
+    f += np.where(~top & left, tex(19, 13, 4.2 + phase), 0)
+    f += np.where(~top & ~left, tex(11, 17, 1.3 + phase), 0)
+    f[:, :w // strip] = 140.0
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def _content_frame(w=480, h=270, phase=0.0, bright=0.0):
+    """Synthetic content frame: one continuous texture, no seams, no flat
+    backdrop (a dither term keeps the sine's histogram from peaking)."""
+    import numpy as np
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    f = (140.0 + bright + 40.0 * np.sin(2 * np.pi * (xs / 15 + ys / 10) + phase)
+         + 8.0 * np.sin(2 * np.pi * xs / 3.1) * np.sin(2 * np.pi * ys / 2.7))
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def _blend(a, b, alpha):
+    import numpy as np
+    return np.clip(a.astype(np.float32) * (1 - alpha) + b.astype(np.float32) * alpha,
+                   0, 255).astype(np.uint8)
+
+
 def test_head_trim_detects_reference_sheet():
-    fps = 8.0
-    # HELD card, 0.5s: frames 0..3 held (3 near-zero raw diffs), hard cut at
-    # raw[3], then normal motion. Content starts at frame 4 -> trim 4/8 = 0.5s.
-    raw = [0.4, 0.5, 0.3, 38.0] + [9.0, 11.0, 7.5] * 20
-    assert m._head_trim_from_diffs(raw, fps) == 0.5, m._head_trim_from_diffs(raw, fps)
-    # HELD card, 1.0s: 7 static diffs, cut at raw[7] -> trim 1.0s.
-    raw = [0.5] * 7 + [45.0] + [8.0] * 40
-    assert m._head_trim_from_diffs(raw, fps) == 1.0
-    # HELD card exiting via a short dissolve instead of a single hard cut.
-    raw = [0.5] * 4 + [30.0, 25.0, 18.0] + [5.0] * 30
-    assert m._head_trim_from_diffs(raw, fps) == 7 / 8
-    # FLASH cards — raw diffs measured on real Grok exports: the card lives on
-    # frame 0 and cross-fades out within 1-2 analysis frames.
-    real_a = [45.2, 18.0, 2.8, 3.2, 3.0, 3.2, 3.5, 3.9, 3.5, 3.2, 3.0, 3.4, 2.9, 2.7]
-    assert m._head_trim_from_diffs(real_a, fps) == 0.25, m._head_trim_from_diffs(real_a, fps)
-    real_b = [65.7, 5.2, 4.3, 3.3, 2.8, 2.6, 2.1, 1.6, 1.6, 2.1, 2.0, 2.0, 2.1, 1.9]
-    assert m._head_trim_from_diffs(real_b, fps) == 0.125, m._head_trim_from_diffs(real_b, fps)
-    print("  head-trim: held (0.5s/1.0s/dissolve) + real flash cards detected OK")
+    fps = 24.0
+    sheet = _sheet_frame()
+    content = _content_frame()
+    assert m._sheet_like(sheet), "synthetic sheet must read as a sheet"
+    assert not m._sheet_like(content), "synthetic content must not"
+    # FLASH card: 3 sheet frames, hard cut to (near-static) content -> 3/24.
+    frames = [sheet] * 3 + [content] * 60
+    assert m._head_trim_from_frames(frames, fps) == 3 / 24, m._head_trim_from_frames(frames, fps)
+    # HELD card: half a second of sheet, then the cut -> 12/24.
+    frames = [sheet] * 12 + [content] * 60
+    assert m._head_trim_from_frames(frames, fps) == 12 / 24
+    # Dissolve exit: sheet cross-fades out over 6 frames — the trim lands where
+    # the drift plateaus, i.e. once the ghost is gone (not at the fade's start).
+    fade = [_blend(sheet, content, a) for a in (0.17, 0.33, 0.5, 0.67, 0.83, 1.0)]
+    frames = [sheet] * 3 + fade + [content] * 60
+    trim = m._head_trim_from_frames(frames, fps)
+    assert 8 / 24 <= trim <= 12 / 24, trim
+    # ANIMATED sheet (panels move during the hold) exiting into content that
+    # keeps changing (drift never plateaus): the flatness-collapse fallback.
+    anim = [_sheet_frame(phase=0.05 * k) for k in range(6)]
+    moving = [_content_frame(phase=0.02 * k, bright=1.2 * k) for k in range(90)]
+    frames = anim + [_blend(anim[-1], moving[0], a) for a in (0.25, 0.5, 0.75)] + moving
+    trim = m._head_trim_from_frames(frames, fps)
+    assert 0.25 <= trim <= 1.5, trim
+    # Weak-backdrop sheet (the white-gradient-wall style): too little flatness
+    # for the base gate, but the towering seams carry it through the second path.
+    weak = _sheet_frame(strip=10)
+    _, weak_flat = m._sheet_flatness(weak)
+    assert m.SHEET_FLAT_MIN2 <= weak_flat < m.SHEET_FLAT_MIN, weak_flat
+    assert m._sheet_like(weak)
+    assert m._head_trim_from_frames([weak] * 3 + [content] * 60, fps) == 3 / 24
+    print("  head-trim: flash/held/dissolve/animated/weak-backdrop sheets detected OK")
 
 
 def test_head_trim_leaves_normal_footage_alone():
-    fps = 8.0
-    # Motion from the very first frame — no static run, nothing to trim.
-    assert m._head_trim_from_diffs([12.0, 9.0, 14.0] * 10, fps) == 0.0
-    # A fade-in rises gradually — the static run ends on a gentle rise, not a spike.
-    ramp = [0.2, 0.5, 1.0, 2.5, 4.0, 6.0, 9.0, 12.0] + [10.0] * 30
-    assert m._head_trim_from_diffs(ramp, fps) == 0.0
-    # A hard cut at ~2s is a real scene change, not an intro card.
-    late = [0.5] * 16 + [40.0] + [9.0] * 30
-    assert m._head_trim_from_diffs(late, fps) == 0.0
-    # A clip that is static throughout has no cut to trim to.
-    assert m._head_trim_from_diffs([0.3] * 40, fps) == 0.0
-    # An opening spike over BUSY content isn't a flash card (ratio < 5x baseline).
-    assert m._head_trim_from_diffs([38.0] + [9.0] * 30, fps) == 0.0
-    # Sustained fast action from frame 0 — a long spike-run is not a dissolve.
-    assert m._head_trim_from_diffs([40.0, 35.0, 30.0, 25.0, 20.0, 15.0, 13.0] + [9.0] * 30, fps) == 0.0
-    # Real calm clips (measured): baselines hover at/under the static floor with
-    # no exit spike — never confused with a held card.
-    real_calm = [2.2, 2.0, 2.0, 2.1, 2.5, 2.5, 2.5, 2.8, 3.1, 3.1] + [3.0] * 10
-    assert m._head_trim_from_diffs(real_calm, fps) == 0.0
-    real_fade = [0.6, 0.8, 1.2, 2.2, 3.9, 5.3, 5.6, 5.0, 5.1, 4.6] + [5.0] * 10
-    assert m._head_trim_from_diffs(real_fade, fps) == 0.0
-    assert m._head_trim_from_diffs([], fps) == 0.0
-    print("  head-trim: motion/fade-in/late-cut/static/busy-open clips untouched OK")
+    fps = 24.0
+    sheet = _sheet_frame()
+    content = _content_frame()
+    # Ordinary content from frame 0 — the gate never opens.
+    frames = [_content_frame(phase=0.05 * k) for k in range(80)]
+    assert m._head_trim_from_frames(frames, fps) == 0.0
+    # Flat studio-backdrop CONTENT (the classic false positive): big flat area,
+    # a subject blob, but no composited seam grid -> rejected by the seam checks.
+    import numpy as np
+    studio = np.full((270, 480), 140.0, dtype=np.float32)
+    ys, xs = np.mgrid[0:270, 0:480].astype(np.float32)
+    blob = (abs(ys - 135) < 80) & (abs(xs - 240) < 60)
+    studio[blob] += 40.0 * np.sin(2 * np.pi * (xs[blob] / 14 + ys[blob] / 9))
+    studio = np.clip(studio, 0, 255).astype(np.uint8)
+    assert not m._sheet_like(studio)
+    assert m._head_trim_from_frames([studio] * 40 + [content] * 40, fps) == 0.0
+    # Frame 0 looks like a sheet but its "seam" moves by frame 1 (a motion edge,
+    # not a composited boundary) -> the persistence check rejects it.
+    shifted = np.roll(sheet, 8, axis=0)
+    assert m._head_trim_from_frames([sheet, shifted] + [content] * 60, fps) == 0.0
+    # A sheet that never ends inside the scan window: nothing safe to cut.
+    frames = [_sheet_frame(phase=0.01 * k) for k in range(120)]
+    assert m._head_trim_from_frames(frames, fps) == 0.0
+    # Degenerate inputs.
+    assert m._head_trim_from_frames([], fps) == 0.0
+    assert m._head_trim_from_frames([sheet] * 3 + [content] * 60, 0.0) == 0.0
+    print("  head-trim: content/studio/moving-edge/endless-sheet clips untouched OK")
 
 
 def test_head_offset_flows_to_edl():
@@ -599,15 +652,16 @@ def test_motion_diff_cache_roundtrip_no_decode():
     clip = d / "clip.mp4"
     clip.write_bytes(b"not-actually-a-video")   # undecodable on purpose
     cache = d / "motion_cache"
-    raw = [0.4, 0.5, 0.3, 38.0] + [9.0, 11.0, 7.5] * 20   # a HELD-card head + motion
-    m._save_motion_diffs(clip, cache, raw, 6.0)
+    raw = [0.4, 0.5, 0.3, 38.0] + [9.0, 11.0, 7.5] * 20   # a card head + motion
+    m._save_motion_diffs(clip, cache, raw, 6.0, 0.5)      # head trim cached too
     assert m.motion_cache_has(clip, cache)
     got = m._load_motion_diffs(clip, cache)
     assert got is not None and got[1] == 6.0 and got[0] == raw, "raw diffs must round-trip exactly"
+    assert got[2] == 0.5, "head trim must round-trip"
     # The cache-hit path never touches ffmpeg: the file is junk, so if
     # analyze_motion tried to decode it the curve would come back empty.
     curve = m.analyze_motion("7", clip, hwaccel_decode=False, cache_dir=cache)
-    ref = m._curve_from_raw("7", clip, raw, 6.0)
+    ref = m._curve_from_raw("7", clip, raw, 6.0, 0.5)
     assert curve.samples == ref.samples and curve.duration == ref.duration
     assert curve.head_offset == ref.head_offset == 0.5, curve.head_offset
     # Touching the file invalidates the key (size+mtime identity, like matchcut).
@@ -623,7 +677,7 @@ def test_motion_cache_purge_on_delete():
     clip = d / "clip.mp4"
     clip.write_bytes(b"junk")
     cache = d / "motion_cache"
-    m._save_motion_diffs(clip, cache, [1.0] * 16, 2.0)
+    m._save_motion_diffs(clip, cache, [1.0] * 16, 2.0, 0.0)
     assert m.motion_cache_has(clip, cache)
     m.purge_motion_cache_for(clip, cache)      # the delete-hook path
     assert not m.motion_cache_has(clip, cache), "purge must drop the entry"

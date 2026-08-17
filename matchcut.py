@@ -113,7 +113,9 @@ TIMELINE_PER_CLIP = 2.7    # measured seconds of timeline per clip, for L = T / 
 # a product decision; an explicit target duration still overrides it downward.
 DEFAULT_MAX_SHOTS = 600
 
-CACHE_VERSION = 1          # bump to invalidate every cached descriptor
+CACHE_VERSION = 2          # bump to invalidate every cached descriptor
+                           # (v2: head_offset comes from the content-based
+                           # sheet detector, shifting every trimmed timeline)
 
 # Descriptor-cache hygiene. Entries are ~60 KB/clip, so a fully-analysed 2,000-clip
 # library is ~120 MB — but nothing bounds it, and every re-sync or move of a clip
@@ -377,8 +379,10 @@ def analyze_clip(clip_id: str, src: Path, hwaccel_decode: bool = False) -> ClipD
 
     # Cut a character-sheet intro card off the head before anything else — its exit
     # spike is often the clip's peak and would otherwise poison normalization AND
-    # look like the strongest motion in the library.
-    head = moviegen._head_trim_from_diffs(list(diffs), float(ANALYSIS_FPS))
+    # look like the strongest motion in the library. (Own small decode — the
+    # content-based detector needs frames, not our diffs; non-carded clips only
+    # pay for its 2-frame gate.)
+    head = moviegen.detect_head_trim(src, hwaccel_decode=hwaccel_decode)
     duration = moviegen.probe_duration(src)
     if head > 0 and duration - head >= moviegen.HEAD_MIN_REMAIN_S:
         drop = int(round(head * ANALYSIS_FPS))

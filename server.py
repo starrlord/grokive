@@ -3026,11 +3026,12 @@ def _merge_videos(paths: list[Path], out_path: Path, *, trim_exempt: int = 0,
     AAC (a silent track is added to any clip lacking audio so audio is never
     dropped); the normalised clips are then losslessly concatenated.
 
-    A clip that opens on a Grok character-sheet intro card (a static held frame,
-    then a hard cut, inside the first ~1.5s — see moviegen.detect_head_trim) gets
-    that head cut off. A frame-accurate trim can't be stream-copied (the cut isn't
-    a keyframe), so any detected card forces the re-encode path for the whole
-    merge — near-lossless at CRF 10, and the only way to keep the cards out.
+    A clip that opens on a Grok character-sheet intro card (the pose-grid frame —
+    static or animated, exiting by hard cut or slow dissolve, up to ~4.5s in —
+    see moviegen.detect_head_trim) gets that head cut off. A frame-accurate trim
+    can't be stream-copied (the cut isn't a keyframe), so any detected card
+    forces the re-encode path for the whole merge — near-lossless at CRF 10, and
+    the only way to keep the cards out.
 
     Raises RuntimeError if ffmpeg exits non-zero.
     """

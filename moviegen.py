@@ -218,29 +218,59 @@ W_LOWCONTRAST = 0.5
 LOWCONTRAST_FLOOR = 0.045  # mean normalized motion below this reads as dead footage
 
 # Character reference-sheet head trim. Grok prepends some generations with a
-# "character sheet" card (a grid of poses + face crops) that then transitions into
-# the real footage. Two shapes exist in the wild, both unmistakable on the RAW
-# (unnormalized) frame-diff curve, so the montage analysis pass and the server's
-# Merge/Export head scan detect them the same way (_head_trim_from_diffs):
-#   - FLASH card (measured on real exports): the card lives on the very first
-#     frame(s) and cross-fades out within ~0.25s — a huge first diff (~45-65 vs a
-#     settled baseline of ~2-5), i.e. raw[0] towers over the post-dissolve median.
-#   - HELD card: the card sits static for ~0.5-1.0s, then cuts/dissolves — a run
-#     of near-zero diffs ended by a spike run.
-# Thresholds are on the raw 0-255 mean-abs-diff scale: detection MUST run before
-# peak normalization, because the card's exit spike is often the clip's peak — it
-# would otherwise both survive as the normalization divisor (deflating every real
-# motion value) and attract the planner's peak-anchor math to the card itself.
-HEAD_STATIC_DIFF = 2.0     # raw diff below which a frame pair reads as "held still"
-HEAD_SPIKE_DIFF = 12.0     # raw diff that reads as part of the cut/dissolve out of the card
-HEAD_MIN_STATIC_S = 0.25   # a HELD card needs at least this much leading stillness
-HEAD_FLASH_MIN = 20.0      # a FLASH card's first diff must be at least this big...
-HEAD_FLASH_RATIO = 5.0     # ...and this many times the settled post-dissolve median
-                           # (real cards measure 14-23x; opening motion stays ~1x)
-HEAD_DISSOLVE_MAX_S = 0.5  # a card's exit spike-run can't run longer (that's real action)
-HEAD_MAX_TRIM_S = 1.5      # a card exit later than this is content, not an intro card
+# "character sheet" card (a grid of pose/face panels on a flat studio backdrop)
+# that then cuts or cross-fades into the real footage. The card zoo is wide —
+# 2-frame flashes, 0.5s holds, ANIMATED sheets whose panels move for seconds,
+# and dissolves so gradual no adjacent-frame diff ever spikes — so detection is
+# two-stage and content-based rather than motion-based (_head_trim_from_frames):
+#   GATE — does frame 0 LOOK like a sheet? Flat background (a narrow histogram
+#   mode holding a big pixel share, mid-tone so black/white fades don't count)
+#   plus panel seams on BOTH axes: a variance-gated decorrelation of adjacent
+#   pixel lines spikes where two unrelated panels meet, and the vertical check
+#   runs inside the bands the horizontal seams cut (sheet verticals only span
+#   their own band). The strongest seam must persist at the same position into
+#   frame 1 — motion/smoke edges wander, composited seams don't. Measured on
+#   real cards: flat 0.19-0.29, h-seam 0.61-0.83, v-seam 0.43-0.64; the closest
+#   of ~2000 library content clips reaches flat 0.14 / h 0.37 past the gate's
+#   other conjuncts, so every threshold keeps a real margin on both sides.
+#   TRIM — where does the card END? Primary: drift-plateau — mean|frame_k -
+#   frame_0| races up through the cut/dissolve then goes flat once the ghost is
+#   gone (content motion keeps drifting, so the plateau IS the card exit; works
+#   for cuts, fades, and animated holds alike). Fallback for cards that dissolve
+#   into high-motion content (drift never flattens): the background-flatness
+#   collapse point plus a small pad. Either way the cut frame must itself no
+#   longer look like a sheet, so a false gate can't amputate real content.
+HEAD_ANALYSIS_EDGE = 480   # head-scan decode size (long side). At 320 the 4x
+                           # decimation of a 720x1280 source averages a soft
+                           # 1-2px seam away (0.75 -> 0.42); 480 keeps it crisp.
+SHEET_FLAT_MIN = 0.17      # share of pixels within +-3 luma of the histogram mode
+SHEET_MODE_LO = 40         # ...with the mode in mid-tones (a fade-to-black frame
+SHEET_MODE_HI = 235        # is "flat" too, but it is not a studio backdrop)
+SHEET_SEAM_MIN_H = 0.50    # strongest horizontal seam (1 - corr of adjacent rows)
+SHEET_SEAM_MIN_V = 0.38    # strongest vertical seam within a horizontal band
+# Second acceptance path: a later sheet style (white/gradient wall backdrop —
+# measured flat only 0.15-0.16 because the gradient spreads the histogram peak,
+# v-seams 0.34-0.39) fails the base gate, but its h-seams are exceptionally
+# strong (0.75-0.84). A towering h-seam plus grid structure compensates for the
+# softer backdrop: no measured content frame comes near it (the worst library
+# impostor reaches h 0.54, ordinary flat-wall scenes 0.2-0.3).
+SHEET_FLAT_MIN2 = 0.12
+SHEET_SEAM_MIN_H2 = 0.68
+SHEET_SEAM_MIN_V2 = 0.30
+SHEET_SEAM_PERSIST = 0.55  # frame-1 seam strength at frame-0's position, x frame-0's
+SHEET_STD_FLOOR = 12.0     # a line needs this much std to vote (flat bg lines are
+                           # noise-dominated and read as falsely decorrelated)
+SHEET_BAND_MIN_LINES = 30  # ignore slivers between seams for the vertical check
+HEAD_PLATEAU_WIN_S = 0.6   # drift must stay level this long to read as "settled"
+HEAD_PLATEAU_TOL = 2.5     # ...within max(this, 6% of the drift level)
+HEAD_DRIFT_MIN = 15.0      # a plateau only counts once the scene actually changed
+HEAD_FLAT_COLLAPSE = 0.6   # fallback: flatness below this share of frame-0's...
+HEAD_COLLAPSE_HOLD_S = 0.5 # ...sustained this long marks the dissolve
+HEAD_COLLAPSE_PAD_S = 0.5  # ...trim lands this far past the collapse (ghost tail)
+HEAD_GATE_SCAN_S = 0.3     # decode for the gate check (frames 0-1 + slack)
+HEAD_MAX_TRIM_S = 4.5      # longest observed animated sheet + dissolve is ~3.5s
 HEAD_MIN_REMAIN_S = 1.0    # never trim a clip down below this much remaining footage
-HEAD_SCAN_S = 3.0          # how much of the head detect_head_trim() decodes
+HEAD_SCAN_S = 5.0          # how much of the head the full trim scan decodes
 
 # Picture & Video preset — still images allowed as beats. A still has no container
 # duration and no decodable motion, so it never survives the normal video pipeline
@@ -869,16 +899,13 @@ def load_or_analyze_audio(song_path: Path, *, enhanced: bool, beat_engine: str,
 def _gray_diffs(src: Path, hwaccel_decode: bool, limit_s: float | None = None,
                 timeout_s: float = 900.0) -> list[float]:
     """RAW mean-abs frame diffs (0-255 scale) at ANALYSIS_FPS over downscaled
-    grayscale frames — the shared decode pass behind analyze_motion and
-    detect_head_trim. ``limit_s`` caps how much of the clip is decoded (the
-    head-only scan); None decodes the whole clip.
+    grayscale frames — analyze_motion's decode pass. ``limit_s`` caps how much
+    of the clip is decoded; None decodes the whole clip.
 
     ``timeout_s`` is a kill-watchdog on the decode: unlike every other ffmpeg
     call here (subprocess.run with a timeout), this one streams from a pipe, and
-    a wedged read (stalled network/FUSE mount) would otherwise block forever.
-    detect_head_trim runs on a server request thread holding an export slot, so
-    it MUST eventually return — a killed decode just yields the samples read so
-    far, which at worst means no trim for that clip."""
+    a wedged read (stalled network/FUSE mount) would otherwise block forever —
+    a killed decode just yields the samples read so far."""
     import numpy as np
 
     frame_bytes = ANALYSIS_W * ANALYSIS_H
@@ -918,55 +945,206 @@ def _gray_diffs(src: Path, hwaccel_decode: bool, limit_s: float | None = None,
     return samples
 
 
-def _head_trim_from_diffs(raw: list[float], fps: float) -> float:
-    """Seconds to cut off a clip's head when it opens on a character-sheet intro
-    card. ``raw[i]`` is the diff between frames i and i+1; the shared shape is an
-    optional leading static run (the held card), then a short spike-run (the
-    cut/dissolve out of the card), then settled content — trim to the first frame
-    after the spike-run. Returns 0.0 when neither card signature is present:
-    immediate ordinary motion never clears the spike threshold from a standing
-    start, a fade-in rises gradually with no spike, sustained fast action keeps
-    the spike-run going past HEAD_DISSOLVE_MAX_S, and a late exit is content.
+def _probe_video_meta(src: Path) -> tuple[int, int, float]:
+    """(width, height, fps) of the first video stream, zeros when unprobeable."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,r_frame_rate",
+             "-of", "csv=p=0", str(src)],
+            capture_output=True, text=True, timeout=30)
+        wtxt, htxt, ftxt = (out.stdout or "").strip().split(",")[:3]
+        num, den = ftxt.split("/")
+        return int(wtxt), int(htxt), float(num) / float(den or 1)
+    except Exception:
+        return 0, 0, 0.0
 
-    HELD card: the static run alone is proof (real footage that still for 0.25s+
-    does not then jump straight to a 12+ diff). FLASH card (no static run — the
-    card lives inside frame 0 and dissolves immediately): the first diff must
-    tower over the settled post-dissolve median (HEAD_FLASH_MIN/_RATIO), which
-    ordinary opening motion can't do — motion doesn't stop instantly."""
-    if fps <= 0 or len(raw) < 2:
+
+def _head_decode(src: Path, limit_s: float, hwaccel_decode: bool = False,
+                 timeout_s: float = 120.0):
+    """(gray frames, fps) of the clip head at native fps, aspect-preserving,
+    long side HEAD_ANALYSIS_EDGE. Same kill-watchdog as _gray_diffs — this runs
+    on server request threads, so a wedged decode must still return."""
+    import numpy as np
+
+    w, h, fps = _probe_video_meta(src)
+    if not w or not h or fps <= 0:
+        return [], 0.0
+    if w >= h:
+        ow, oh = HEAD_ANALYSIS_EDGE, max(2, round(h * HEAD_ANALYSIS_EDGE / w / 2) * 2)
+    else:
+        ow, oh = max(2, round(w * HEAD_ANALYSIS_EDGE / h / 2) * 2), HEAD_ANALYSIS_EDGE
+    frame_bytes = ow * oh
+    cmd = ["ffmpeg", "-v", "error"]
+    if hwaccel_decode:
+        cmd += ["-hwaccel", "cuda"]
+    cmd += ["-i", str(src), "-t", f"{limit_s:.3f}",
+            "-vf", f"scale={ow}:{oh},format=gray",
+            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdout is not None
+    watchdog = threading.Timer(timeout_s, proc.kill)
+    watchdog.start()
+    frames = []
+    try:
+        while True:
+            buf = proc.stdout.read(frame_bytes)
+            if len(buf) < frame_bytes:
+                break
+            frames.append(np.frombuffer(buf, dtype=np.uint8).reshape(oh, ow))
+    finally:
+        watchdog.cancel()
+        proc.stdout.close()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return frames, fps
+
+
+def _sheet_flatness(f) -> tuple[int, float]:
+    """(histogram mode, share of pixels within +-3 luma of it) — the flat studio
+    backdrop behind a character sheet concentrates a big share at one mid-tone."""
+    import numpy as np
+
+    hist, _ = np.histogram(f, bins=256, range=(0, 256))
+    mode = int(np.argmax(hist))
+    return mode, float(hist[max(0, mode - 3):mode + 4].sum() / f.size)
+
+
+def _line_decorr(g):
+    """Per adjacent row pair of float image g: 1 - correlation, zeroed where either
+    row lacks variance (SHEET_STD_FLOOR) — a flat line's correlation is noise.
+    Composited panel seams decorrelate; rows inside one photograph track ~0."""
+    import numpy as np
+
+    a = g[:-1, :] - g[:-1, :].mean(axis=1, keepdims=True)
+    b = g[1:, :] - g[1:, :].mean(axis=1, keepdims=True)
+    num = (a * b).sum(axis=1)
+    den = np.sqrt((a * a).sum(axis=1) * (b * b).sum(axis=1)) + 1e-6
+    d = 1.0 - num / den
+    d[(g[:-1, :].std(axis=1) < SHEET_STD_FLOOR) | (g[1:, :].std(axis=1) < SHEET_STD_FLOOR)] = 0.0
+    return d
+
+
+def _sheet_seams(f) -> tuple[float, int, float]:
+    """(hseam, y, vseam): strongest horizontal seam (and its row), and the
+    strongest vertical seam inside any horizontal band — sheet verticals only
+    span their own band, so a full-height column check would wash them out."""
+    import numpy as np
+
+    g = f.astype(np.float32)
+    hd = _line_decorr(g)
+    if not hd.size:
+        return 0.0, -1, 0.0
+    hbest, ybest = float(hd.max()), int(np.argmax(hd))
+    cuts = [0] + [y + 1 for y in np.nonzero(hd >= SHEET_SEAM_MIN_H)[0]] + [g.shape[0]]
+    vbest = 0.0
+    for lo, hi in zip(cuts, cuts[1:]):
+        if hi - lo < SHEET_BAND_MIN_LINES:
+            continue
+        vd = _line_decorr(np.ascontiguousarray(g[lo:hi, :].T))
+        if vd.size:
+            vbest = max(vbest, float(vd.max()))
+    return hbest, ybest, vbest
+
+
+def _sheet_metrics_pass(flat: float, h: float, v: float) -> bool:
+    """Either acceptance path: flat studio backdrop with clear grid seams, or a
+    towering h-seam with grid structure compensating for a softer backdrop."""
+    return ((flat >= SHEET_FLAT_MIN and h >= SHEET_SEAM_MIN_H and v >= SHEET_SEAM_MIN_V)
+            or (flat >= SHEET_FLAT_MIN2 and h >= SHEET_SEAM_MIN_H2 and v >= SHEET_SEAM_MIN_V2))
+
+
+def _sheet_like(f) -> bool:
+    """Does this single frame look like a character sheet? (flat mid-tone
+    backdrop + panel seams on both axes)"""
+    mode, flat = _sheet_flatness(f)
+    if not (SHEET_MODE_LO <= mode <= SHEET_MODE_HI):
+        return False
+    if flat < min(SHEET_FLAT_MIN, SHEET_FLAT_MIN2):
+        return False
+    h, _, v = _sheet_seams(f)
+    return _sheet_metrics_pass(flat, h, v)
+
+
+def _sheet_gate(frames) -> bool:
+    """Does the clip OPEN on a character sheet? Frame 0 must be sheet-like and
+    its strongest horizontal seam must persist at the same row into frame 1
+    (motion/smoke edges wander between frames; composited seams do not)."""
+    if len(frames) < 2:
+        return False
+    f0 = frames[0]
+    mode, flat = _sheet_flatness(f0)
+    if not (SHEET_MODE_LO <= mode <= SHEET_MODE_HI):
+        return False
+    h, y, v = _sheet_seams(f0)
+    if not _sheet_metrics_pass(flat, h, v):
+        return False
+    hd1 = _line_decorr(frames[1].astype("float32"))
+    lo, hi = max(0, y - 1), min(len(hd1), y + 2)
+    persist = float(hd1[lo:hi].max()) if hi > lo else 0.0
+    return persist >= SHEET_SEAM_PERSIST * h
+
+
+def _head_trim_from_frames(frames, fps: float) -> float:
+    """Seconds to cut off a clip's head when it opens on a character-sheet card,
+    0.0 otherwise. ``frames`` are the head's gray frames at native fps (see
+    _head_decode). Gate first (is frame 0 a sheet?), then find the card's end:
+    the drift plateau — mean|frame_k - frame_0| stops rising once the dissolve's
+    ghost is fully gone, while content motion keeps drifting — or, when content
+    keeps moving right through (no plateau), the collapse of the backdrop's
+    flatness plus a ghost-tail pad. Whichever fires, the cut frame must itself
+    no longer look like a sheet, so a mistaken gate can't amputate content."""
+    import numpy as np
+
+    if fps <= 0 or len(frames) < round(HEAD_MIN_REMAIN_S * fps):
         return 0.0
-    i = 0
-    while i < len(raw) and raw[i] < HEAD_STATIC_DIFF:
-        i += 1
-    j = i
-    while j < len(raw) and raw[j] >= HEAD_SPIKE_DIFF:
-        j += 1
-    if j == i or j >= len(raw):
-        return 0.0                      # no card exit / elevated to the end of the scan
-    trim = j / fps
-    if trim > HEAD_MAX_TRIM_S or (j - i) / fps > HEAD_DISSOLVE_MAX_S:
-        return 0.0                      # exit too late, or "dissolve" is sustained action
-    if i >= max(1, round(HEAD_MIN_STATIC_S * fps)):
-        return trim                     # HELD card: static run, then the exit spike-run
-    if i == 0 and raw[0] >= HEAD_FLASH_MIN:
-        settled = sorted(raw[j:j + 8])
-        med = settled[len(settled) // 2]
-        if raw[0] >= HEAD_FLASH_RATIO * max(med, 1.0):
-            return trim                 # FLASH card: frame 0 towers over settled content
+    if not _sheet_gate(frames):
+        return 0.0
+    f0 = frames[0].astype(np.float32)
+    d = [float(np.abs(f.astype(np.float32) - f0).mean()) for f in frames]
+    win = max(2, round(HEAD_PLATEAU_WIN_S * fps))
+    limit = min(len(d) - win, round(HEAD_MAX_TRIM_S * fps))
+    for k in range(1, limit):
+        if d[k] < HEAD_DRIFT_MIN:
+            continue
+        spread = d[k:k + win]
+        if max(spread) - min(spread) <= max(HEAD_PLATEAU_TOL, 0.06 * d[k]):
+            if _sheet_like(frames[k]):
+                continue                # plateaued but still ON the sheet — keep looking
+            return k / fps
+    # No plateau (card dissolved into high-motion content): the backdrop-flatness
+    # collapse marks the dissolve; pad past it to cover the fading ghost.
+    _, flat0 = _sheet_flatness(frames[0])
+    fl = [_sheet_flatness(f)[1] for f in frames]
+    hold = max(2, round(HEAD_COLLAPSE_HOLD_S * fps))
+    for k in range(1, len(fl) - hold):
+        if d[k] >= HEAD_DRIFT_MIN * 0.66 and all(
+                v <= HEAD_FLAT_COLLAPSE * flat0 for v in fl[k:k + hold]):
+            cut = min(k + round(HEAD_COLLAPSE_PAD_S * fps), len(frames) - 1)
+            if _sheet_like(frames[cut]) or cut / fps > HEAD_MAX_TRIM_S:
+                return 0.0
+            return cut / fps
     return 0.0
 
 
 def detect_head_trim(src: Path, *, hwaccel_decode: bool = False) -> float:
-    """Standalone head scan for callers outside the montage pipeline (the server's
-    Merge/Export): decode only the first HEAD_SCAN_S seconds and return the seconds
-    to trim off a detected character-sheet intro card, 0.0 when there's nothing to
-    trim. Never raises — detection must not be able to break an export."""
+    """Seconds to trim off SRC's head when it opens on a character-sheet card,
+    0.0 otherwise. Cheap for the common case: a tiny 2-frame decode feeds the
+    sheet gate, and only a gated clip (a fraction of a percent of the library)
+    pays for the full HEAD_SCAN_S decode that locates the card's end. Used by
+    the server's Merge/Export, the montage analysis pass, and Motion Match Cut.
+    Never raises — detection must not be able to break an export."""
     try:
         if _is_image(src):
             return 0.0
-        trim = _head_trim_from_diffs(
-            _gray_diffs(Path(src), hwaccel_decode, limit_s=HEAD_SCAN_S, timeout_s=120.0),
-            float(ANALYSIS_FPS))
+        head, fps = _head_decode(Path(src), HEAD_GATE_SCAN_S, hwaccel_decode)
+        if len(head) < 2 or not _sheet_gate(head):
+            return 0.0
+        frames, fps = _head_decode(Path(src), HEAD_SCAN_S, hwaccel_decode)
+        trim = _head_trim_from_frames(frames, fps)
         if trim <= 0.0:
             return 0.0
         duration = probe_duration(Path(src))
@@ -978,13 +1156,15 @@ def detect_head_trim(src: Path, *, hwaccel_decode: bool = False) -> float:
 
 
 def _curve_from_raw(clip_id: str, src: Path, raw: list[float],
-                    duration: float) -> MotionCurve:
+                    duration: float, head: float) -> MotionCurve:
     """Head-trim + peak-normalize RAW diffs into a MotionCurve — the pure-math
     tail of ``analyze_motion``, split out so cached raw diffs (see the motion-diff
     cache below) and a fresh decode produce bit-identical curves. Auto-pick uses
-    it too, so its features come from exactly the pipeline's own processing."""
+    it too, so its features come from exactly the pipeline's own processing.
+    ``head`` is detect_head_trim's verdict for the clip (cached alongside the
+    diffs): the card's samples are dropped so the curve, its windows/scene cuts,
+    and normalization all live in trimmed clip time."""
     samples = list(raw)
-    head = _head_trim_from_diffs(samples, float(ANALYSIS_FPS))
     if head > 0 and duration - head >= HEAD_MIN_REMAIN_S:
         samples = samples[round(head * ANALYSIS_FPS):]
         duration -= head
@@ -1005,41 +1185,41 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool,
     Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
     then motion[t] = mean(|frame[t] - frame[t-1]|), normalized 0..1. No OpenCV.
 
-    A detected character-sheet intro card is cut off the head FIRST, on the raw
-    diffs (see _head_trim_from_diffs): the leading samples are dropped, duration
-    shrinks, and the trim is recorded as MotionCurve.head_offset — so the curve,
-    its windows/scene cuts, and everything the planner derives are all in trimmed
+    A detected character-sheet intro card is cut off the head FIRST (see
+    detect_head_trim): the leading samples are dropped, duration shrinks, and
+    the trim is recorded as MotionCurve.head_offset — so the curve, its
+    windows/scene cuts, and everything the planner derives are all in trimmed
     clip time, and normalization is no longer poisoned by the card's cut spike.
 
     ``cache_dir`` (the shared motion_cache) short-circuits the decode with the
-    clip's cached RAW diffs; head-trim + normalization always re-run on top, so a
-    hit is bit-identical to a fresh analysis."""
-    raw = duration = None
+    clip's cached RAW diffs and head trim; normalization always re-runs on top,
+    so a hit is bit-identical to a fresh analysis."""
+    raw = duration = head = None
     if cache_dir is not None:
         hit = _load_motion_diffs(src, cache_dir)
         if hit is not None:
-            raw, duration = hit
+            raw, duration, head = hit
     if raw is None:
         duration = probe_duration(src)
         raw = _gray_diffs(src, hwaccel_decode)
+        head = detect_head_trim(src, hwaccel_decode=hwaccel_decode)
         if cache_dir is not None:
-            _save_motion_diffs(src, cache_dir, raw, duration)
-    return _curve_from_raw(clip_id, src, raw, duration)
+            _save_motion_diffs(src, cache_dir, raw, duration, head)
+    return _curve_from_raw(clip_id, src, raw, duration, head)
 
 
 # --------------------------------------------------------------------------- #
 # Motion-diff cache — the RAW frame diffs are the expensive part of stage 2 (a
-# full decode of every clip); everything derived (head trim, normalization,
-# windows, scene cuts) is pure math on top, so caching the diffs reproduces
-# analyze_motion bit-exactly while staying valid if detection thresholds are
-# ever retuned. Entries live under motion_cache/beat/ — a sibling namespace of
-# Motion Match Cut's descriptors, sharing its LRU size/age budget (its
-# prune_cache rglobs the whole motion_cache tree). Keyed by path+size+mtime
-# like matchcut (library media is immutable once downloaded). Tiny: ~8 floats
-# per second of footage, so a whole library is a few MB.
+# full decode of every clip), and the head trim is its own decode pass, so both
+# are cached; normalization/windows/scene cuts are pure math on top, so a hit
+# reproduces analyze_motion bit-exactly. Entries live under motion_cache/beat/ —
+# a sibling namespace of Motion Match Cut's descriptors, sharing its LRU
+# size/age budget (its prune_cache rglobs the whole motion_cache tree). Keyed by
+# path+size+mtime like matchcut (library media is immutable once downloaded).
+# Tiny: ~8 floats per second of footage, so a whole library is a few MB.
 # --------------------------------------------------------------------------- #
 
-MOTION_CACHE_VERSION = 1
+MOTION_CACHE_VERSION = 2   # v2: + "head" (content-based sheet detector's trim)
 
 
 def _motion_cache_key(src: Path) -> str:
@@ -1062,9 +1242,9 @@ def motion_cache_has(src: Path, cache_dir: Path) -> bool:
         return False
 
 
-def _load_motion_diffs(src: Path, cache_dir: Path) -> tuple[list[float], float] | None:
-    """Cached ``(raw_diffs, container_duration)`` for SRC, or None. A hit touches
-    the entry's mtime so matchcut.prune_cache's LRU reflects real use."""
+def _load_motion_diffs(src: Path, cache_dir: Path) -> tuple[list[float], float, float] | None:
+    """Cached ``(raw_diffs, container_duration, head_trim)`` for SRC, or None. A
+    hit touches the entry's mtime so matchcut.prune_cache's LRU reflects real use."""
     try:
         p = _motion_cache_path(cache_dir, _motion_cache_key(src))
         if not p.is_file():
@@ -1072,13 +1252,13 @@ def _load_motion_diffs(src: Path, cache_dir: Path) -> tuple[list[float], float] 
         with gzip.open(p, "rt", encoding="utf-8") as fh:
             d = json.load(fh)
         os.utime(p)
-        return [float(x) for x in d["raw"]], float(d["duration"])
+        return [float(x) for x in d["raw"]], float(d["duration"]), float(d["head"])
     except Exception:
         return None
 
 
 def _save_motion_diffs(src: Path, cache_dir: Path, raw: list[float],
-                       duration: float) -> None:
+                       duration: float, head: float) -> None:
     """Best-effort cache write; the payload keeps the source path so a future
     hygiene sweep can match entries to files without reversing the key hash."""
     try:
@@ -1088,7 +1268,7 @@ def _save_motion_diffs(src: Path, cache_dir: Path, raw: list[float],
         with gzip.open(tmp, "wt", encoding="utf-8") as fh:
             json.dump({"v": MOTION_CACHE_VERSION, "src": str(src),
                        "duration": duration, "fps": ANALYSIS_FPS,
-                       "raw": raw}, fh)
+                       "head": head, "raw": raw}, fh)
         tmp.replace(p)
     except Exception:
         pass
@@ -1134,7 +1314,8 @@ def warm_motion_cache(paths: list, cache_dir: Path, *, hwaccel_decode: bool = Fa
         raw = _gray_diffs(p, hwaccel_decode)
         if not raw:
             return False
-        _save_motion_diffs(p, cache_dir, raw, duration)
+        head = detect_head_trim(p, hwaccel_decode=hwaccel_decode)
+        _save_motion_diffs(p, cache_dir, raw, duration, head)
         return True
 
     done = 0

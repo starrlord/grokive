@@ -104,8 +104,8 @@ def select_clips(candidates: list[Path], grid: BeatGrid, cache_dir: Path | None,
         if hit is None:
             skipped_uncached += 1
             continue
-        raw, duration = hit
-        curve = moviegen._curve_from_raw(str(idx), p, raw, duration)
+        raw, duration, head = hit
+        curve = moviegen._curve_from_raw(str(idx), p, raw, duration, head)
         if curve.duration < MIN_CLIP_S or not curve.samples:
             skipped_short += 1
             continue

@@ -23,15 +23,15 @@ def _grid(n_beats: int, energy: float, spacing: float = 0.5) -> m.BeatGrid:
 
 
 def _lib(tmp: Path, cache: Path, specs: list[tuple[str, float, float]]) -> list[Path]:
-    """Create fake clip files + cached raw diffs. Each spec is
-    (name, raw_level, duration_s); a constant raw level trips neither the
-    head-trim detector nor scene-cut detection."""
+    """Create fake clip files + cached raw diffs (head trim 0 — no intro card).
+    Each spec is (name, raw_level, duration_s); a constant raw level never trips
+    scene-cut detection."""
     paths = []
     for name, level, dur in specs:
         p = tmp / f"{name}.mp4"
         p.write_bytes(b"junk-" + name.encode())
         n = max(2, int(dur * m.ANALYSIS_FPS))
-        m._save_motion_diffs(p, cache, [level] * n, dur)
+        m._save_motion_diffs(p, cache, [level] * n, dur, 0.0)
         paths.append(p)
     return paths
 
