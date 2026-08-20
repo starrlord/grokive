@@ -2,12 +2,19 @@
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
 
+  // `note` is an optional emphasized context line under the message (e.g. "It's also in
+  // 2 other collections"). `altLabel`/`onalt` add an optional safe-alternative action
+  // (e.g. Remove from collection instead of Delete) rendered full-width ABOVE the
+  // Cancel/confirm row, so the non-destructive path is the most prominent target.
   let {
     title = 'Are you sure?',
     message = '',
+    note = '',
     confirmLabel = 'Delete',
+    altLabel = '',
     danger = true,
     onconfirm = () => {},
+    onalt = () => {},
     oncancel = () => {}
   } = $props();
 
@@ -30,9 +37,15 @@
     {/if}
   </div>
   <h2 class="mb-1 text-lg font-bold">{title}</h2>
-  {#if message}<p class="mb-5 text-sm leading-relaxed text-muted">{message}</p>{/if}
-  <div class="flex gap-2">
-    <Button variant="secondary" size="lg" class="flex-1" onclick={oncancel}>Cancel</Button>
-    <Button variant={danger ? 'danger' : 'primary'} size="lg" class="flex-1 shadow-lg" onclick={onconfirm}>{confirmLabel}</Button>
+  {#if message}<p class="{note ? 'mb-3' : 'mb-5'} text-sm leading-relaxed text-muted">{message}</p>{/if}
+  {#if note}<p class="mb-5 rounded-lg bg-[var(--surface-2)] px-3 py-2 text-sm font-semibold leading-relaxed">{note}</p>{/if}
+  <div class="flex flex-col gap-2">
+    {#if altLabel}
+      <Button variant="primary" size="lg" class="w-full" onclick={onalt}>{altLabel}</Button>
+    {/if}
+    <div class="flex gap-2">
+      <Button variant="secondary" size="lg" class="flex-1" onclick={oncancel}>Cancel</Button>
+      <Button variant={danger ? 'danger' : 'primary'} size="lg" class="flex-1 shadow-lg" onclick={onconfirm}>{confirmLabel}</Button>
+    </div>
   </div>
 </Modal>

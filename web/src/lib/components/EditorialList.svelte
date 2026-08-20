@@ -1,13 +1,19 @@
 <script>
-  import { favorites, filters, toggleTag, toggleFavorite, removeMedia } from '$lib/state.js';
+  import { favorites, filters, toggleTag, toggleFavorite, removeMedia, collections, deleteMembershipNote } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   // `filterable` turns the tag chips into buttons that toggle the grid's tag filter.
   // Off by default — and intentionally left off in collection views, where a filter
   // change doesn't refetch the collection's items, so a click would do nothing.
-  let { items = [], onopen = () => {}, filterable = false } = $props();
+  // `collection` + `onremovefromcollection` (collection views only) let the delete
+  // confirm offer "remove from this collection" as the safe alternative.
+  let { items = [], onopen = () => {}, filterable = false, collection = null, onremovefromcollection = () => {} } = $props();
   let confirming = $state(null);
+  // Members only: grouped view can surface lineage items not in the open collection.
+  const confirmInCollection = $derived(!!(confirming && collection &&
+    (collection.ids || []).some((mid) => String(mid) === String(confirming.id))));
+  const confirmNote = $derived(confirming ? deleteMembershipNote($collections, [confirming.id], collection?.id || '') : '');
 
   const fmtDate = (s) => (s || '').slice(0, 10);
   const ratio = (it) => (it.thumb_w && it.thumb_h ? `${it.thumb_w}/${it.thumb_h}` : '16/9');
@@ -74,7 +80,10 @@
 {#if confirming}
   <ConfirmDialog title="Delete this item?"
     message="The file is permanently removed from disk and won't be re-downloaded on future syncs."
-    confirmLabel="Delete"
+    note={confirmNote}
+    confirmLabel={confirmInCollection ? 'Delete permanently' : 'Delete'}
+    altLabel={confirmInCollection ? 'Remove from this collection' : ''}
+    onalt={() => { onremovefromcollection(confirming.id); confirming = null; }}
     onconfirm={() => { removeMedia([confirming.id]); confirming = null; }}
     oncancel={() => (confirming = null)} />
 {/if}

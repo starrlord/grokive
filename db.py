@@ -789,6 +789,9 @@ def facets(
         canvas_rows = [
             {"id": r["canvas_id"], "name": r["canvas_name"] or r["canvas_id"],
              "count": r["n"], "videos": r["v"], "images": r["i"], "cover": r["cover"],
+             # The thumb path is thumbnails/<shard>/<id>.jpg, so the basename IS the
+             # media id — surfaced so the client can srcset the /covers high-res tier.
+             "cover_id": (r["cover"] or "").rsplit("/", 1)[-1].rsplit(".", 1)[0] or None,
              "created_at": r["first_at"], "updated_at": r["last_at"]}
             for r in conn.execute(
                 f"SELECT m.canvas_id, m.canvas_name, COUNT(*) n, "

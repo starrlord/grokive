@@ -65,10 +65,12 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Open a same-prompt view to see every image/video created from that prompt.
 - Click/copy prompts for reuse.
 - Show parent media when parent metadata is available.
-- Build **collections** for mixed images/videos, organize related collections into named **collection groups**, or make video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder. Collections and playlists live together under a **Library** tab.
+- Build **collections** for mixed images/videos, organize related collections into named **collection groups** (on desktop, just **drag one collection card onto another**), or make video **playlists** for back-to-back playback with fullscreen auto-advance and drag-to-reorder. Collections and playlists live together under a **Library** tab, whose landing opens with a **Recently active** row of featured cards and covers that **come alive on hover**.
 - **Import a folder** of your own videos/images straight into a new or existing collection — files are copied in with thumbnails and indexed alongside your synced media.
-- **Export a playlist** (or an ad-hoc selection) as one merged MP4 — lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
-- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), or Moody (long held shots with a slow push-in, punctuated by beat bursts) — with optional GPU-accelerated rendering (NVENC when available, else CPU) and one-click **Add to Collection**. Gather clips into a cross-library **Montage basket** to build one montage from videos spread across collections and canvases.
+- **Command palette:** press **Ctrl/Cmd+K** anywhere to fuzzy-jump to any collection, playlist, or view — or type `play`, `shuffle`, or `queue` plus a collection name to act on it directly.
+- **Play Queue:** a cross-library, reload-surviving video queue — add clips from a collection card, a grid card, or select mode, then play them back-to-back (in order or shuffled) or save the queue as a playlist.
+- **Export a playlist** (or an ad-hoc selection) as one merged MP4 — a reorder step lets you arrange (or shuffle) the clips first, an optional **cinematic intro** opens the video with a trailer-style title card built from your own clips, and the merge is a lossless stream-copy when clips match, otherwise a high-fidelity re-encode (audio always kept).
+- **Song Beat Montage:** pick videos + a song and the server cuts a beat-synced montage — motion peaks landed on the beat and cut density that follows the song's energy. Pick a **style** — Classic (punchy hard cuts), Cinematic (smarter analysis, beat-timed transitions, on-beat zoom punch), Moody (long held shots with a slow push-in, punctuated by beat bursts), or Music Video (maximum-energy sub-beat cutting, flashes, and a neon grade) — with optional GPU-accelerated rendering (NVENC when available, else CPU) and one-click **Add to Collection**. Gather clips into a cross-library **Montage basket** to build one montage from videos spread across collections and canvases, let **Auto-pick** choose clips for a song from your whole library, or switch to **Motion Match Cut** mode to splice clips where their motion flows across the cut (song optional).
 - **Prompt Studio:** build Grok Imagine prompts the way Grok works — a **two-stage composer** that emits a detailed **Image** prompt (the base still) and a short **Motion** prompt (to animate it), with a **Voice/Accent** control and suggestion chips mined from your own vocabulary. A **Scene Builder** scripts a whole multi-clip scene as numbered beats for Grok's *Extend from Frame* chaining. With an optional LLM/embeddings endpoint it adds semantic *"more like this"* search, auto-discovered **theme clusters**, and AI **Variations / Remix / Polish / Enhance** (in your style, with fresh dialogue). Use local Ollama for local-only AI, or OpenAI/OpenRouter when you want a remote provider.
 - **Grok Imagine generation (xAI):** generate brand-new **images and video** from text — or from a **source image** (edit a still, or animate it) — in its own **Grok Imagine** view. Work in multiple **workspaces** that each keep their own history and can render videos concurrently, bring an image in via **Use as source** (gallery), a previous generation, or an **upload** (button or drag-and-drop), then **Save to Gallery** the keepers (tagged with a ✨ badge and linked back to their source). Needs an xAI API key (`XAI_API_KEY` or **Config**).
 - **Describe for Grok (image → prompt):** a ⚡ button on any image in the lightbox reads the picture *and* its saved prompt with a **vision model** and writes a ready-to-paste Grok Imagine prompt — character, wardrobe, action, setting, and camera — which you can edit and **save straight into Prompt Studio**. Point it at a self-hosted multimodal model (e.g. a Qwen3-VL build in Ollama) to keep it local.
@@ -76,7 +78,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - Optional **subtitle generation** via a [Whisper ASR](https://github.com/ahmetoner/whisper-asr-webservice) server: writes `.srt`/`.vtt` per video, shows captions in the player, and can burn them into merged exports.
 - **Modern web app (Docker):** a SvelteKit SPA backed by a SQLite + FTS5 read-model — paginated browsing, full-text prompt search, a justified photo grid, infinite scroll, and an installable **PWA** (great on iPhone).
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
-- **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
+- **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. The confirm warns when an item also belongs to collections, and inside a collection offers **Remove from this collection** as the safe alternative to deleting. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
 - **Backup & Restore:** download a single portable `.zip` of all your *records and config* — the media index/metadata, favorites/archive, collections, playlists, Prompt Studio prompts/scenes/personas, and settings — from **Config → Backup & Restore**, and restore it later on this or another machine. The media files themselves aren't bundled (they're large and re-syncable). Secrets (API keys, Grok session) are excluded by default; tick *Include secrets* for a full machine migration. Restore validates the archive, snapshots your current state to `backups/` first, and rebuilds the index automatically.
 - **Ten themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
 - Self-hosted and local-first: core media storage, browsing, sync state, and metadata stay on your own hardware. Optional integrations only call the endpoints you configure, such as Whisper, OpenAI, OpenRouter, or another OpenAI-compatible server.
@@ -182,6 +184,9 @@ building on the server needed.
 | `IMAGINE_VIDEO_CONCURRENCY` | `5` | Max Grok Imagine **videos** rendering at once across all workspaces (each workspace is still one-at-a-time). |
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `BEAT_ENGINE` | `neural` | Beat detector for Beat Montage. Default uses **madmom** (steady beats + **real downbeats**, built into the image, CPU-only). Set `librosa` to use the simpler librosa tracker. See *Song Beat Montage → Beat & downbeat detection*. |
+| `MOVIE_RENDER_WORKERS` | `6` | Montage renders: parallel per-segment ffmpeg encodes and motion-analysis decodes (`1` = serial; clamped 1–16). |
+| `GROK_MOTION_CACHE_MB` | `512` | Size cap for the motion-analysis cache (`/data/motion_cache`) used by Match Cut and Auto-pick; least-recently-used entries are evicted above it. `0` disables the cap. |
+| `GROK_MOTION_CACHE_DAYS` | `90` | Drop cached motion descriptors unused for this long. `0` disables. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |
 
 Log out from **Config → Account**. Your Grok cURL cookies expire periodically — when a
@@ -271,7 +276,9 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 
 - **Views:** Recent, All Media, **Library**, Favorites, Archive, and Canvases tabs. The **Library** tab is the single home for both **Collections** and **Playlists** (switchable inside it). All Media intentionally shows everything that still exists on disk, independent of archive or collection membership.
 - **Workspaces:** beyond browsing, two top-bar tools — **✦ Prompt Studio** (compose prompts) and **✨ Grok Imagine** (generate images & video). See those sections below.
-- **Collections:** group mixed images and videos into named cards with covers, organize related collection cards into named **collection groups**, then drill into each collection with the normal gallery controls and scoped tag/resolution filters. **Import a folder** of local files into a new or existing collection (per-file progress; imports are auto-archived so they don't crowd Recent), and toggle **Group** inside an open collection to cluster its clips into *families* by the base image each was generated from (lineage traced through `parent_id`) — each family ready to merge-export or turn into a montage in one click.
+- **Collections:** group mixed images and videos into named cards with covers, organize related collection cards into named **collection groups**, then drill into each collection with the normal gallery controls and scoped tag/resolution filters. The landing opens with a **Recently active** row of oversized featured cards (default sort, wide screens), hovering a card makes its cover **come alive** — a muted looping clip, or a slow drift across the mosaic — and group cards wear a stacked-deck edge so containers read differently from single collections. **Import a folder** of local files into a new or existing collection (per-file progress; imports are auto-archived so they don't crowd Recent), and toggle **Group** inside an open collection to cluster its clips into *families* by the base image each was generated from (lineage traced through `parent_id`) — each family ready to merge-export or turn into a montage in one click.
+- **Command palette:** **Ctrl/Cmd+K** opens a fuzzy jump-to-anything — collections, playlists, and views — plus verb commands: type `play`, `shuffle`, or `queue` followed by a collection name to play it, play it shuffled, or add its videos to the Play Queue without leaving the keyboard.
+- **Play Queue:** a persistent, cross-library video queue, separate from any playlist — fill it from a collection card, a grid card's hover action, or select mode, reorder or shuffle it in its floating chip, play it back-to-back, or promote it into a saved playlist. It survives page reloads.
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
@@ -288,13 +295,18 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 - **Select mode:** multi-select (drag-to-paint with edge auto-scroll on desktop, long-press
   range-select on touch) plus compact Select Visible / Next 25 helpers, for bulk
   favorite/archive, **Add to Collection**, **Save as playlist**, **🎬 Movie** (Beat Montage),
-  **+ Queue** (add to the Montage basket), play in order, or a one-off **Export**.
+  **+ Queue** (add to the Montage basket), **Play Queue** (queue the videos for playback),
+  play in order, or a one-off **Export**.
 - **Library Stats:** a gear-menu modal showing total image/video counts and the library's
   total on-disk size.
 - **Lightbox:** the media fills the window; press `i` / tap ⓘ for prompt + actions, `f`
-  for fullscreen, arrows to navigate; subtitle track shown when available. On images, a
+  for fullscreen, arrows to navigate; subtitle track shown when available. The info panel
+  shows the item's **tags** and the **collections it belongs to** as clickable chips (jump
+  to a tag-filtered view, or drill straight into a collection). On images, a
   **⚡ Describe for Grok** button turns the picture into a Grok Imagine prompt (see
   *Prompt Studio → Describe for Grok*).
+- **Account usage at a glance:** ⚡ chips in the top bar show each active Grok account's
+  weekly usage percentage; click one for a per-product breakdown with the reset countdown.
 - **Installable PWA:** add to your home screen on iOS/Android for a full-screen app.
 - **Mobile:** a **Filters** button opens the same tag/model/type modal.
 
@@ -308,6 +320,11 @@ loose on the main Library page.
 This is separate from the **Group** toggle inside an open collection. The collection-level
 toggle clusters media by base image lineage; a **collection group** organizes multiple
 collection cards together.
+
+The fastest way to group on desktop is **drag and drop**: drag one collection card onto
+another. Dropping onto a group card adds the collection to that group; dropping onto a
+collection that's already grouped joins its group; dropping onto an ungrouped collection
+asks you to name a brand-new group holding both.
 
 Use collection groups like this:
 
@@ -330,8 +347,23 @@ Playlists let you collect a set of videos and watch or export them as one sequen
 
 - **Create:** click **Select** in the top bar, pick videos (in the order you want them), name the playlist, and **Save**.
 - **Play:** click ▶ on a playlist to play its clips back-to-back. Enter fullscreen and each clip auto-advances to the next.
-- **Edit:** click a playlist's name to open the editor — drag the handle (or use ▲/▼) to reorder, rename, or remove clips.
-- **Export:** click **Export** to merge the playlist into a single MP4 download. Clips that already share codec/resolution/frame-rate are concatenated **losslessly** (no re-encode); if they differ, each is re-encoded onto the largest frame size at high quality. Audio is always preserved (silent clips get a silent track so nothing desyncs).
+- **Edit:** click a playlist's name to open the editor — drag the handle (or use ▲/▼) to reorder, **Randomize** to shuffle the saved order, rename, or remove clips.
+- **Export:** click **Export** to merge the playlist into a single MP4 download. With more than one clip, a **reorder step** opens first — arrange the clips (or shuffle them) and optionally switch on a **cinematic intro** before the merge runs. Clips that already share codec/resolution/frame-rate are concatenated **losslessly** (no re-encode); if they differ, each is re-encoded onto the largest frame size at high quality. Audio is always preserved (silent clips get a silent track so nothing desyncs).
+
+### Cinematic intro
+
+The reorder step's **Cinematic intro** toggle prepends a trailer-style opening card built
+from your own clips: your title and subtitle over a darkened backdrop, with four **styles**
+— **Mosaic** (a bordered grid of sampled clips fading in), **Epic** (full-bleed hero shots
+with a slow push and letterbox bars), **Cascade** (a scrolling parallax wall of tiles), and
+**Prism** (clips folded into a slowly turning kaleidoscope) — six color presets (or custom
+colors) and a choice of 8/12/16 seconds. Your texts and style are remembered; the toggle
+itself is a per-export choice. On a uniform set the intro matches the clips' encoding
+exactly, so the lossless fast-path concat is preserved.
+
+Merges also auto-detect the **character reference sheet** Grok sometimes prepends to a
+generation (the grid-of-poses card) and trim it from the head of the clip, so exports and
+montages start on the real footage.
 
 Export and merging use the server's `ffmpeg`. The merged file is created in a temporary directory, streamed to your browser, and deleted — nothing extra is left on the volume.
 
@@ -366,13 +398,21 @@ analyses motion in each clip, plans a cut list, and renders the result (on the G
 is available, otherwise the CPU — see *Requirements & performance*).
 
 **Open it:** click **Select** in the top bar, pick **2 or more videos** (5+ gives the
-planner more to work with), then click **🎬 Movie** in the selection bar. The clips you
+planner more to work with), then click **🎬 Movie** in the selection bar — or open the
+panel any time, selection-free, from the **Montage** button in the top bar. The clips you
 selected become the candidate pool — the montage's order is *computed*, not your pick order.
 
 **Build across your library:** instead of a single selection, gather clips into the
 persistent **Montage basket** — from the lightbox, a collection card's music icon, or
 **+ Queue** in select mode — to pool videos from different collections and canvases, then
 launch one montage from the floating basket chip. The basket survives page reloads.
+
+**Or let it pick for you:** **Auto-pick for this song** chooses the clips itself — the
+server profiles the song's energy and selects footage from your whole library (or just the
+collections you tick) whose motion best fits it, using a library-wide **motion cache**.
+The cache refreshes automatically after every sync; an **Analyze Library** button (with a
+coverage readout) fills it on demand. Opening the panel from the top-bar **Montage**
+button with nothing selected defaults to Auto-pick.
 
 ### Controls
 
@@ -385,10 +425,13 @@ launch one montage from the floating basket chip. The basket survives page reloa
   one clip per beat — high-energy). On top of this baseline, **cut density automatically
   follows the song's energy**: quiet intros cut sparsely; as the track builds toward a
   drop or chorus the montage accelerates on its own. Great for slow-building songs.
-- **Aspect / resolution** — **Auto** (the default) sizes the canvas to the largest source
-  clip (capped at 4K) so footage isn't cropped or letterboxed to a mismatched frame, or pick a
-  fixed frame: `1080p 16:9`, `720p 16:9`, `Vertical 9:16`, or `Square 1:1`. A fixed frame
-  normalises every clip to that exact size, so mixed-orientation sources still combine cleanly.
+- **Aspect / resolution** — a two-level picker: choose an **aspect** first (Auto,
+  Landscape, Vertical, or Square — each showing a live count of matching clips), then a
+  specific resolution from the ones actually present in your pool. **Auto** sizes the
+  canvas to the sources so footage isn't cropped or letterboxed to a mismatched frame.
+  With Auto-pick, choosing an aspect also filters the candidate pool to clips of that
+  orientation; manually selected clips are never filtered out, but the panel warns when
+  some would be cropped.
 - **Let clips speak** — in the song's quiet pockets, hold on a clip that has a real spoken
   line, duck the music (~−8 dB), play the line, then swell back in on a beat. Preset-independent;
   **Moments** picks how many such holds (Auto, or 1–4). Needs the source clips to already have
@@ -417,6 +460,19 @@ montages render exactly as before.
   beats, and a saturated **neon grade**. It's also **scene-aware** — it avoids cutting
   across a hidden shot change inside a source clip. Highest impact, busiest look; pairs
   best with fast, drop-driven tracks. Looks best **vertical (9:16)**.
+
+### Motion Match Cut
+
+A second render mode, switchable next to Beat Montage in the panel. Instead of cutting on
+a beat grid, **Match Cut** analyses each clip's camera motion (direction, speed, zoom,
+roll) and splices clips where the **motion continues across the cut**, so one shot's
+movement flows into the next. The **song is optional** here: songless renders keep the
+shots' own audio, cut to the timeline with short seam fades (or come out silent if no shot
+has audio). Options let you **match the clips' speed** across a seam, **blend the seam**,
+and **keep the clips' audio** under a song. Video-only by nature (a still has no motion);
+clips that are too static to match are reported and left out. Motion analysis is cached
+per clip on disk, so repeat renders over the same library are fast (see
+`GROK_MOTION_CACHE_MB` / `GROK_MOTION_CACHE_DAYS` in *Environment variables*).
 
 ### How it picks and cuts
 
@@ -900,7 +956,8 @@ canvases (all of them, or pass specific IDs / `/imagine/agent/<id>` URLs);
 `python grokive.py conversations` fetches Imagine conversations. All write into the
 sharded `media/images/` and `media/videos/` layout (files bucketed by a hash of their id) plus
 `metadata.json`, and skip anything already downloaded. Shortcut: `python grokive.py all` runs
-download → index in one go.
+download → index → montage motion-cache analysis in one go (the same motion cache the web
+app's Analyze Library button fills; `python grokive.py motioncache` runs it alone).
 
 **Imagine v2 media only arrives via `conversations`.** Grok's newer Imagine UI keeps each
 generation chain in a conversation: nothing lands in the favorites list `download` reads, and

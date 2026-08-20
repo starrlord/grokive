@@ -1,5 +1,5 @@
 <script>
-  import { selection, filters, setFavorites, setStashed, addPlaylist, setSelectMode, clearSelection, addSelection, removeMedia, movieJob } from '$lib/state.js';
+  import { selection, filters, setFavorites, setStashed, addPlaylist, setSelectMode, clearSelection, addSelection, removeMedia, movieJob, collections, deleteMembershipNote } from '$lib/state.js';
   import { exportSelection, exportImagesZip } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -38,6 +38,14 @@
     removeMedia(ids);
     setSelectMode(false);
   }
+  // The delete confirm's safe alternative in collection context: same path as the
+  // dock's Remove button (the page splices its grid optimistically + clears selection).
+  function doRemoveInstead() {
+    confirmingDelete = false;
+    onremovefromcollection();
+  }
+  // Membership scan is O(all collection ids), so only run it while the confirm is open.
+  const deleteNote = $derived(confirmingDelete ? deleteMembershipNote($collections, $selection, collection?.id || '') : '');
 
   const view = $derived($filters.view);
   const n = $derived($selection.length);
@@ -213,7 +221,10 @@
 {#if confirmingDelete}
   <ConfirmDialog title={`Delete ${n} item${n === 1 ? '' : 's'}?`}
     message="The files are permanently removed from disk and won't be re-downloaded on future syncs."
-    confirmLabel="Delete" onconfirm={doDelete} oncancel={() => (confirmingDelete = false)} />
+    note={deleteNote}
+    confirmLabel={collection ? 'Delete permanently' : 'Delete'}
+    altLabel={collection ? 'Remove from this collection' : ''} onalt={doRemoveInstead}
+    onconfirm={doDelete} oncancel={() => (confirmingDelete = false)} />
 {/if}
 
 <style>

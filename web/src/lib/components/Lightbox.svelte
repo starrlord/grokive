@@ -25,7 +25,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fade, fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, lightboxChrome, collections, filters, activeCollectionId } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, lightboxChrome, collections, filters, activeCollectionId, removeFromCollection, deleteMembershipNote } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -45,7 +45,9 @@
   // onitemchange(id|null) — reports which item is showing as the viewer navigates
   // (arrows, deletes, prop updates). Lets a launcher that stays visible above the
   // Lightbox (the Montage-queue triage panel) highlight the row being viewed.
-  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', onclose = () => {}, onopenrelated = () => {}, onopencollection = () => {}, onitemchange = () => {} } = $props();
+  // collectionId: set only when the viewer was opened from inside an open collection's
+  // grid — enables "remove from this collection" as the delete confirm's safe alternative.
+  let { list = [], index = 0, autoAdvance = false, autoSlideshow = false, title = '', collectionId = '', onclose = () => {}, onopenrelated = () => {}, onopencollection = () => {}, onitemchange = () => {} } = $props();
   // Honour reduced-motion for the slide crossfade (and skip it entirely there).
   const reduceMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const FADE_MS = 360;
@@ -54,8 +56,10 @@
 
   // Deleted items drop out of the viewer live; navigate the filtered list. After a
   // delete the current index naturally lands on the next clip (or the previous one
-  // at the end); close when nothing's left.
-  const liveList = $derived(list.filter((x) => !$deleted.has(x.id)));
+  // at the end); close when nothing's left. droppedIds mirrors that behavior for
+  // "remove from this collection" (the item still exists — it just left THIS list).
+  let droppedIds = $state(new Set());
+  const liveList = $derived(list.filter((x) => !$deleted.has(x.id) && !droppedIds.has(x.id)));
   $effect(() => {
     if (liveList.length === 0) onclose();
     else if (i > liveList.length - 1) i = liveList.length - 1;
@@ -72,6 +76,9 @@
     index;
     autoplayVideos = autoAdvance;
     slideshow = autoSlideshow;
+    // A new list is a new viewing session (the component is REASSIGNED for related
+    // lists / queues, not remounted) — collection removals don't carry over to it.
+    droppedIds = new Set();
   });
   const nextPlayableVideo = $derived(liveList.findIndex((it, idx) => idx >= i && it.media_type === 'video'));
   const hasPlayableVideo = $derived(nextPlayableVideo !== -1);
@@ -107,6 +114,22 @@
   function doDelete() {
     confirmingDelete = false;
     if (item) removeMedia([item.id]);
+  }
+  // "Remove from this collection" is only offered while the open collection actually
+  // contains the item — a play-queue clip viewed over a collection isn't necessarily
+  // a member. Membership note computed only while the confirm is open (O(all ids) scan).
+  const openCollection = $derived(collectionId ? ($collections || []).find((c) => c.id === collectionId) || null : null);
+  const canRemoveInstead = $derived(!!(openCollection && item &&
+    (openCollection.ids || []).some((mid) => String(mid) === String(item.id))));
+  const deleteNote = $derived(confirmingDelete && item ? deleteMembershipNote($collections, [item.id], collectionId) : '');
+  function doRemoveInstead() {
+    confirmingDelete = false;
+    const it = item;
+    if (!it || !collectionId) return;
+    removeFromCollection(collectionId, [it.id]);
+    // Drop it from this viewing session the same way a delete does (advance to the
+    // next item / close when empty); the page's grid reconciles from the store change.
+    droppedIds = new Set([...droppedIds, it.id]);
   }
   let videoEl = $state(null);
   // Keep the global ::cue rule sized to the video's actual rendered height, so captions
@@ -617,7 +640,10 @@
     {#if confirmingDelete}
       <ConfirmDialog title="Delete this item?"
         message="The file is permanently removed from disk and won't be re-downloaded on future syncs."
-        confirmLabel="Delete" onconfirm={doDelete} oncancel={() => (confirmingDelete = false)} />
+        note={deleteNote}
+        confirmLabel={canRemoveInstead ? 'Delete permanently' : 'Delete'}
+        altLabel={canRemoveInstead ? 'Remove from this collection' : ''} onalt={doRemoveInstead}
+        onconfirm={doDelete} oncancel={() => (confirmingDelete = false)} />
     {/if}
 
     {#if showSubStyle}

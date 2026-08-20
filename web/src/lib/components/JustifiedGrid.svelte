@@ -1,17 +1,22 @@
 <script>
   import { justify } from '$lib/justified.js';
-  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, togglePlayQueue, playQueueMembers } from '$lib/state.js';
+  import { favorites, stashed, toggleFavorite, setStashed, removeMedia, setSelection, addSelection, setSelectMode, selectionMembers, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, togglePlayQueue, playQueueMembers, collections, deleteMembershipNote } from '$lib/state.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import PeekOverlay from './PeekOverlay.svelte';
 
+  // `collection` + `onremovefromcollection` (set only when this grid renders an open
+  // collection) let the tile delete confirm offer "remove from this collection" as the
+  // safe alternative to a hard delete.
   let {
     items = [],
     targetHeight = 240,
     gap = 10,
     selectMode = false,
     virtualize = false,
+    collection = null,
     onopen = () => {},
-    ontoggleselect = () => {}
+    ontoggleselect = () => {},
+    onremovefromcollection = () => {}
   } = $props();
 
   let width = $state(0);
@@ -51,6 +56,11 @@
   });
   const visibleRows = $derived(virtualizationActive ? rows.slice(virtualSlice.start, virtualSlice.end) : rows);
   let confirming = $state(null); // item pending delete confirmation
+  // Only offer "remove instead" for actual members: grouped view can surface lineage
+  // items (a family's base still) that were never added to the open collection.
+  const confirmInCollection = $derived(!!(confirming && collection &&
+    (collection.ids || []).some((mid) => String(mid) === String(confirming.id))));
+  const confirmNote = $derived(confirming ? deleteMembershipNote($collections, [confirming.id], collection?.id || '') : '');
   let viewportRAF = null;
 
   // Selection has three gestures, all funnelling through the same id-keyed store:
@@ -397,7 +407,10 @@
 {#if confirming}
   <ConfirmDialog title="Delete this item?"
     message="The file is permanently removed from disk and won't be re-downloaded on future syncs."
-    confirmLabel="Delete"
+    note={confirmNote}
+    confirmLabel={confirmInCollection ? 'Delete permanently' : 'Delete'}
+    altLabel={confirmInCollection ? 'Remove from this collection' : ''}
+    onalt={() => { onremovefromcollection(confirming.id); confirming = null; }}
     onconfirm={() => { removeMedia([confirming.id]); confirming = null; }}
     oncancel={() => (confirming = null)} />
 {/if}

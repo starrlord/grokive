@@ -707,6 +707,29 @@ export function removeFromCollection(id, ids) {
 export function setCollectionCover(id, mediaId) {
   updateCollection(id, { cover_id: String(mediaId || '') });
 }
+// One-line membership warning for delete confirms: a hard delete purges the item from
+// every collection, so surface how much curated structure it would punch through.
+// `excludeId` is the collection being browsed (its own membership is implied); pass ''
+// elsewhere. Sealed locked collections are served with ids: [] precisely so membership
+// can't leak — this never counts (or reveals) them. Returns '' when nothing matches.
+export function deleteMembershipNote(colls, ids, excludeId = '') {
+  const want = new Set((ids || []).map(String));
+  if (!want.size) return '';
+  const matched = new Set();
+  let collCount = 0;
+  for (const coll of colls || []) {
+    if (excludeId && coll.id === excludeId) continue;
+    let hit = false;
+    for (const mid of coll.ids || []) {
+      if (want.has(String(mid))) { matched.add(String(mid)); hit = true; }
+    }
+    if (hit) collCount += 1;
+  }
+  if (!collCount) return '';
+  const scope = `${collCount} ${excludeId ? 'other ' : ''}collection${collCount === 1 ? '' : 's'}`;
+  if (want.size === 1) return `It's also in ${scope} — deleting removes it there too.`;
+  return `${matched.size} of ${want.size} selected are in ${scope} — deleting removes them there too.`;
+}
 
 // --- Settings (Whisper / burn) ---------------------------------------------
 export const settings = writable({

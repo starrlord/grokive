@@ -17,12 +17,15 @@
 
 <script>
   import { tick } from 'svelte';
-  import { collections, collectionGroups, removeCollection, loadCollections, requestGalleryReload } from '$lib/state.js';
+  import { collections, collectionGroups, removeCollection, updateCollection, loadCollections, requestGalleryReload } from '$lib/state.js';
   import { relockCollection, relockAllCollections, relockGroup } from '$lib/api.js';
+  import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import SearchField from './SearchField.svelte';
   import CollectionLockModal from './CollectionLockModal.svelte';
   import PeekOverlay from './PeekOverlay.svelte';
+  import Modal from './Modal.svelte';
+  import Button from './Button.svelte';
 
   let { onopen = () => {}, onplay = () => {}, onqueue = () => {}, onplayqueue = () => {}, onimport = () => {} } = $props();
   let confirming = $state(null);
@@ -166,6 +169,108 @@
     return list.sort((a, b) => (isSealed(b) ? 1 : 0) - (isSealed(a) ? 1 : 0));
   });
 
+  // --- Hero band: on wide screens the first row of "Recently updated" renders as three
+  // oversized feature cards. Only in the default browse state (updated sort, no search,
+  // not inside a group) so card position stays meaningful under every other sort, and
+  // only when the landing is big enough that featuring doesn't cannibalize the grid.
+  // Sealed cards never feature (a vault has nothing to show at hero size).
+  let wideScreen = $state(typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches);
+  $effect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const onchange = () => (wideScreen = mq.matches);
+    mq.addEventListener('change', onchange);
+    return () => mq.removeEventListener('change', onchange);
+  });
+  const heroEntries = $derived.by(() => {
+    if (!wideScreen || activeGroup || sortBy !== 'updated' || q.trim() || shown.length < 8) return [];
+    return shown.filter((c) => !isSealed(c)).slice(0, 3);
+  });
+  const gridEntries = $derived.by(() => {
+    if (!heroEntries.length) return shown;
+    const heroIds = new Set(heroEntries.map((c) => c.id));
+    return shown.filter((c) => !heroIds.has(c.id));
+  });
+
+  // --- Living covers: hover-dwell makes ONE card at a time come alive — a muted looping
+  // clip when a cover item is a video, else a slow Ken Burns drift across the mosaic.
+  // Mouse-only (touch already has long-press peek) and skipped under reduced motion.
+  // The <video> element exists only while its card is live, so an idle landing costs
+  // nothing; sealed cards ship no cover_items, so they can never go live.
+  const reduceMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  let live = $state(null); // entry id currently alive
+  let liveTimer = null;
+  const liveVideoFor = (c) => (c.cover_items || []).find((it) => it?.media_type === 'video' && it.href) || null;
+  function liveEnter(c, e) {
+    if (reduceMotion || e.pointerType !== 'mouse') return;
+    if (isSealed(c) || !(c.cover_items || []).length) return;
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(() => (live = c.id), 400);
+  }
+  function liveLeave() {
+    clearTimeout(liveTimer);
+    liveTimer = null;
+    live = null;
+  }
+
+  // --- Drag a collection card onto another to group them (desktop HTML5 DnD; touch has
+  // no drag path — grouping stays available via the picker/group field). Onto a group
+  // card: join that group. Onto a grouped collection: join ITS group. Onto an ungrouped
+  // collection: name a brand-new group holding both. Sealed cards neither drag nor
+  // accept drops, and group cards themselves don't drag (group-merge is out of scope).
+  let dragging = $state(null); // id of the card being dragged
+  let dropTarget = $state(null); // id of the card currently hovered as a drop target
+  let groupPrompt = $state(null); // { source, target, name } -> new-group naming modal
+  const canDrop = (c) => !!dragging && c.id !== dragging && !isSealed(c);
+  function dragStart(c, e) {
+    // The pointer is dragging, not holding — disarm a pending long-press peek.
+    if (peekTimer != null) { clearTimeout(peekTimer); peekTimer = null; }
+    liveLeave();
+    dragging = c.id;
+    e.dataTransfer.setData('text/plain', c.id); // Firefox: no data = inert drag
+    e.dataTransfer.effectAllowed = 'move';
+  }
+  function dragEnd() { dragging = null; dropTarget = null; }
+  function dragOver(c, e) {
+    if (!canDrop(c)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    dropTarget = c.id;
+  }
+  function dragLeave(c, e) {
+    // dragleave fires for every child boundary — only clear when truly leaving the card.
+    if (dropTarget === c.id && !e.currentTarget.contains(e.relatedTarget)) dropTarget = null;
+  }
+  function dropOn(target, e) {
+    e.preventDefault();
+    const source = collectionsList.find((c) => c.id === dragging);
+    dragEnd();
+    if (!source || source.id === target.id) return;
+    const joinName = target.is_group ? target.name : String(target.group || '').trim();
+    if (joinName) {
+      updateCollection(source.id, { group: joinName });
+      toast(`Added “${source.name}” to “${joinName}”`, { type: 'success' });
+    } else {
+      groupPrompt = { source, target, name: '' };
+    }
+  }
+  function confirmGroupPrompt() {
+    const name = String(groupPrompt?.name || '').trim().slice(0, 60);
+    if (!name) return;
+    const { source, target } = groupPrompt;
+    groupPrompt = null;
+    updateCollection(target.id, { group: name });
+    updateCollection(source.id, { group: name });
+    toast(`Grouped “${source.name}” and “${target.name}” as “${name}”`, { type: 'success' });
+  }
+  // Modal's trapFocus focuses the PANEL one rAF after mount (deliberately not the first
+  // input — iOS keyboard pop). This dialog exists solely to type a name, so steal focus
+  // back one frame LATER; two rAFs land after the trap's one.
+  const autofocus = (el) => {
+    let r2 = 0;
+    const r1 = requestAnimationFrame(() => { r2 = requestAnimationFrame(() => el.focus()); });
+    return { destroy: () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2); } };
+  };
+
   // --- Long-press peek: hold a cover to preview the full media, release to dismiss ---
   // Armed on the full-bleed open button (it overlays the whole cover). A quick tap
   // still opens the collection; a >10px drift means scroll, which disarms. Sealed
@@ -228,6 +333,14 @@
     await tick();
     window.scrollTo({ top: landingScrollY });
   }
+
+  // Cover srcset: the 400px grid thumb for small slots, the server's lazily generated
+  // /covers/<id>.jpg high-res tier once a card renders large (desktop). `it` is a
+  // cover_items entry (which mirrors covers, same items and order — see server summary).
+  const coverSrcset = (thumb, it) => (it?.id ? `${thumb} 400w, /covers/${it.id}.jpg 1280w` : undefined);
+  // Mosaic quadrants are half the card's width; hero cards sit 3-across on wide screens.
+  const quadSizes = (hero) => (hero ? '16vw' : '(min-width: 1280px) 12vw, (min-width: 1024px) 16vw, (min-width: 640px) 25vw, 50vw');
+  const fullSizes = (hero) => (hero ? '33vw' : '(min-width: 1280px) 25vw, (min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw');
 
   // Count line for the cover, dropping any zero segments (e.g. "26 items · 26 videos").
   const countLabel = (c) => {
@@ -327,43 +440,93 @@
       <p class="py-16 text-center text-sm text-muted">No collections match “{q.trim()}”.</p>
     {/if}
   {:else}
+    {#if heroEntries.length}
+      <p class="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-muted">Recently active</p>
+      <div class="mb-5 grid grid-cols-3 gap-3">
+        {#each heroEntries as c (c.id)}
+          {@render collectionCard(c, true)}
+        {/each}
+      </div>
+    {/if}
     <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {#each shown as c (c.id)}
-        {@const sealed = c.locked && !c.unlocked}
-        <article class="group relative overflow-hidden rounded-card border border-line bg-[var(--surface-2)] transition-colors hover:border-[var(--accent)] focus-within:border-[var(--accent)]">
-          <!-- Cover with title + count overlay. -->
-          <div class="relative aspect-[4/3] w-full overflow-hidden bg-[var(--media-bg)]">
-            {#if sealed}
-              <!-- Sealed: no thumbnails leak. A lock placeholder; click to unlock. -->
-              <span class="grid h-full w-full place-items-center text-muted">
-                <svg viewBox="0 0 24 24" class="h-10 w-10 opacity-70" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-              </span>
-            {:else if c.covers?.length > 1}
-              <span class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">
-                {#each c.covers.slice(0, 4) as cover (cover)}
-                  <img src={cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-[1.03]" />
-                {/each}
-              </span>
-            {:else if c.cover}
-              <img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-[1.03]" />
-            {:else}
-              <span class="grid h-full w-full place-items-center text-sm text-muted">No cover</span>
-            {/if}
+      {#each gridEntries as c (c.id)}
+        {@render collectionCard(c, false)}
+      {/each}
+    </div>
+  {/if}
+{/if}
 
-            {#if c.locked && c.unlocked}
-              <!-- Unlocked-for-now badge: one tap to re-lock immediately. -->
-              <button type="button" class="absolute left-2 top-2 z-20 inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/90 px-2 py-1 text-[11px] font-bold text-[var(--on-accent)] backdrop-blur-sm"
-                title={`Unlocked — ${unlockHoursLeft(c)}h left. Click to lock now.`} aria-label="Lock now" onclick={(e) => { e.stopPropagation(); relockNow(c); }}>
-                <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-                {unlockHoursLeft(c)}h
-              </button>
-            {/if}
-
-            <span class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-3 pb-3 pt-14 text-[var(--media-control-ink)]">
-              <span class="block truncate text-base font-extrabold">{c.name}</span>
-              <span class="block text-xs opacity-80">{sealed && c.is_group ? `Locked · ${c.collection_count ?? 0} collection${(c.collection_count ?? 0) === 1 ? '' : 's'}` : `${sealed ? 'Locked · ' : ''}${countLabel(c)}`}</span>
+{#snippet collectionCard(c, hero = false)}
+  {@const sealed = c.locked && !c.unlocked}
+  {@const liveVideo = live === c.id ? liveVideoFor(c) : null}
+  <!-- Group cards get a stacked-deck silhouette (edges peeking above the card) so a
+       CONTAINER never shares a body with a leaf collection. -->
+  <div class="relative {c.is_group ? 'pt-2' : ''}">
+    {#if c.is_group}
+      <span aria-hidden="true" class="deck-edge absolute inset-x-4 top-0 h-3 rounded-t-[10px]"></span>
+      <span aria-hidden="true" class="deck-edge-near absolute inset-x-2 top-1 h-3 rounded-t-[10px]"></span>
+    {/if}
+    <article
+      class="group relative overflow-hidden rounded-card border bg-[var(--surface-2)] transition-colors focus-within:border-[var(--accent)] {sealed ? 'vault-card border-line' : 'border-line hover:border-[var(--accent)]'} {dragging === c.id ? 'opacity-40' : ''} {dropTarget === c.id ? 'drop-target' : ''}"
+      draggable={!sealed && !c.is_group}
+      ondragstart={(e) => dragStart(c, e)}
+      ondragend={dragEnd}
+      ondragover={(e) => dragOver(c, e)}
+      ondragleave={(e) => dragLeave(c, e)}
+      ondrop={(e) => canDrop(c) && dropOn(c, e)}
+      onpointerenter={(e) => liveEnter(c, e)}
+      onpointerleave={liveLeave}>
+      <!-- Cover with title + count overlay. -->
+      <div class="relative {hero ? 'aspect-[21/10]' : 'aspect-[4/3]'} w-full overflow-hidden bg-[var(--media-bg)]">
+        {#if sealed}
+          <!-- Vault: deliberately unlike a media card — no imagery, a ringed lock on a
+               dark glow. Identity is redacted server-side; the card only says "locked". -->
+          <span class="vault-face grid h-full w-full place-items-center">
+            <span class="grid h-16 w-16 place-items-center rounded-full border border-line bg-[var(--surface-2)]/70 text-muted backdrop-blur-sm">
+              <svg viewBox="0 0 24 24" class="h-7 w-7 opacity-80" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </span>
-          </div>
+          </span>
+        {:else if c.covers?.length > 1}
+          <span class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">
+            {#each c.covers.slice(0, 4) as cover, ci (cover)}
+              <img src={cover} alt="" loading="lazy"
+                srcset={coverSrcset(cover, c.cover_items?.[ci])} sizes={quadSizes(hero)}
+                class="h-full w-full object-cover object-top transition group-hover:scale-[1.03] {live === c.id && !liveVideo ? 'live-drift' : ''}" />
+            {/each}
+          </span>
+        {:else if c.cover}
+          <img src={c.cover} alt="" loading="lazy"
+            srcset={coverSrcset(c.cover, c.cover_peek)} sizes={fullSizes(hero)}
+            class="h-full w-full object-cover object-top transition group-hover:scale-[1.03] {live === c.id && !liveVideo ? 'live-drift' : ''}" />
+        {:else}
+          <span class="grid h-full w-full place-items-center text-sm text-muted">No cover</span>
+        {/if}
+
+        {#if liveVideo}
+          <!-- Living cover: one muted clip fades in over the mosaic while hovered. -->
+          <video class="live-video pointer-events-none absolute inset-0 h-full w-full object-cover object-top"
+            src={liveVideo.href} poster={liveVideo.thumb || undefined} autoplay muted loop playsinline></video>
+        {/if}
+
+        {#if c.locked && c.unlocked}
+          <!-- Unlocked-for-now badge: one tap to re-lock immediately. -->
+          <button type="button" class="absolute left-2 top-2 z-20 inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/90 px-2 py-1 text-[11px] font-bold text-[var(--on-accent)] backdrop-blur-sm"
+            title={`Unlocked — ${unlockHoursLeft(c)}h left. Click to lock now.`} aria-label="Lock now" onclick={(e) => { e.stopPropagation(); relockNow(c); }}>
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+            {unlockHoursLeft(c)}h
+          </button>
+        {/if}
+
+        <span class="pointer-events-none absolute inset-x-0 bottom-0 z-[5] bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-3 pb-3 {hero ? 'pt-20' : 'pt-14'} text-[var(--media-control-ink)]">
+          <span class="flex min-w-0 items-center gap-1.5">
+            {#if c.is_group}
+              <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 opacity-85" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+            {/if}
+            <span class="block truncate {hero ? 'text-2xl' : 'text-lg'} font-black tracking-tight">{c.name}</span>
+          </span>
+          <span class="block {hero ? 'text-sm' : 'text-xs'} font-medium opacity-65">{sealed && c.is_group ? `Locked · ${c.collection_count ?? 0} collection${(c.collection_count ?? 0) === 1 ? '' : 's'}` : `${sealed ? 'Locked · ' : ''}${countLabel(c)}`}</span>
+        </span>
+      </div>
 
           <!-- Full-bleed open target sits under the action buttons (which carry higher z).
                A sealed collection opens the unlock prompt instead of its contents.
@@ -430,11 +593,9 @@
               Unlock
             </button>
           {/if}
-        </article>
-      {/each}
-    </div>
-  {/if}
-{/if}
+    </article>
+  </div>
+{/snippet}
 
 {#if confirming}
   <ConfirmDialog title="Delete collection?"
@@ -449,6 +610,21 @@
     onclose={() => (lockModal = null)} ondone={() => { loadCollections(); requestGalleryReload(); }} />
 {/if}
 
+{#if groupPrompt}
+  <!-- Dropped one ungrouped collection onto another: name the group they'll share. -->
+  <Modal onclose={() => (groupPrompt = null)} ariaLabel="Name the new group" z="z-[70]" panelClass="panel w-full max-w-sm rounded-2xl p-6">
+    <h2 class="mb-1 text-lg font-bold">Group these collections?</h2>
+    <p class="mb-4 text-sm leading-relaxed text-muted">“{groupPrompt.source.name}” and “{groupPrompt.target.name}” will move into a new group.</p>
+    <input use:autofocus bind:value={groupPrompt.name} placeholder="Group name" maxlength="60"
+      class="mb-4 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]"
+      onkeydown={(e) => { if (e.key === 'Enter') confirmGroupPrompt(); }} />
+    <div class="flex gap-2">
+      <Button variant="secondary" size="lg" class="flex-1" onclick={() => (groupPrompt = null)}>Cancel</Button>
+      <Button variant="primary" size="lg" class="flex-1" disabled={!groupPrompt.name.trim()} onclick={confirmGroupPrompt}>Create group</Button>
+    </div>
+  </Modal>
+{/if}
+
 <!-- Release anywhere (or a cancelled gesture / window losing focus) ends the peek. -->
 <svelte:window onpointerup={peekEnd} onpointercancel={peekEnd} onblur={peekEnd} />
 
@@ -459,5 +635,57 @@
      hijacking it (same trick as JustifiedGrid's select-mode long-press). */
   .peek-press {
     -webkit-touch-callout: none;
+  }
+
+  /* Stacked-deck edges behind group cards: two card "backs" peeking above the top edge.
+     They live OUTSIDE the overflow-hidden article (in the pt-2 wrapper), farthest first. */
+  .deck-edge,
+  .deck-edge-near {
+    border: 1px solid var(--line);
+    border-bottom: none;
+  }
+
+  .deck-edge {
+    background: color-mix(in srgb, var(--surface-2) 72%, var(--bg));
+  }
+
+  .deck-edge-near {
+    background: color-mix(in srgb, var(--surface-2) 88%, var(--ink) 4%);
+  }
+
+  /* Vault face for sealed cards: no imagery by design — a faint accent glow, hairline
+     diagonal stripes, and a darkened floor so it can't be mistaken for a media card. */
+  .vault-face {
+    background:
+      radial-gradient(120% 90% at 50% 8%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 62%),
+      repeating-linear-gradient(135deg, transparent 0 16px, color-mix(in srgb, var(--line) 30%, transparent) 16px 17px),
+      linear-gradient(180deg, color-mix(in srgb, var(--media-bg) 86%, black), var(--media-bg));
+  }
+
+  /* Living cover: the clip melts in instead of popping. */
+  .live-video {
+    animation: live-fade 480ms ease;
+  }
+
+  @keyframes live-fade {
+    from { opacity: 0; }
+  }
+
+  /* Image-only living cover: a slow Ken Burns drift across the mosaic tiles. */
+  .live-drift {
+    animation: live-drift 7s ease-in-out infinite alternate;
+  }
+
+  @keyframes live-drift {
+    from { transform: scale(1.04); }
+    to { transform: scale(1.16) translateY(-2.5%); }
+  }
+
+  /* Card under a dragged collection: accent ring + glow says "drop to group". */
+  .drop-target {
+    border-color: var(--accent);
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent),
+      0 0 26px color-mix(in srgb, var(--accent) 32%, transparent);
   }
 </style>

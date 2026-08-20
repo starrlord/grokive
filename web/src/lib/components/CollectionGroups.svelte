@@ -18,11 +18,13 @@
     selectMode = false,
     loaded = 0,   // collection items loaded so far (may trail `total` mid-load)
     total = 0,    // the collection's true item count
+    collection = null,  // the open collection — forwarded so tile deletes can offer "remove instead"
     onopen = () => {},
     ontoggleselect = () => {},
     onexport = () => {},
     onmontage = () => {},
-    onplay = () => {}
+    onplay = () => {},
+    onremovefromcollection = () => {}
   } = $props();
 
   const MAX_DEPTH = 12; // lineage-walk guard against a pathological parent chain
@@ -210,9 +212,9 @@
       </header>
       <div class="p-3">
         {#if mode === 'editorial'}
-          <EditorialList items={fam.items} {onopen} />
+          <EditorialList items={fam.items} {onopen} {collection} {onremovefromcollection} />
         {:else}
-          <JustifiedGrid items={fam.items} {targetHeight} {gap} {selectMode} {onopen} {ontoggleselect} />
+          <JustifiedGrid items={fam.items} {targetHeight} {gap} {selectMode} {onopen} {ontoggleselect} {collection} {onremovefromcollection} />
         {/if}
       </div>
     </section>
@@ -231,9 +233,9 @@
         <span class="text-xs text-muted">{grouped.ungrouped.length.toLocaleString()} item{grouped.ungrouped.length === 1 ? '' : 's'} with no shared base</span>
       </header>
       {#if mode === 'editorial'}
-        <EditorialList items={grouped.ungrouped} {onopen} />
+        <EditorialList items={grouped.ungrouped} {onopen} {collection} {onremovefromcollection} />
       {:else}
-        <JustifiedGrid items={grouped.ungrouped} {targetHeight} {gap} {selectMode} {onopen} {ontoggleselect} />
+        <JustifiedGrid items={grouped.ungrouped} {targetHeight} {gap} {selectMode} {onopen} {ontoggleselect} {collection} {onremovefromcollection} />
       {/if}
     </section>
   {/if}

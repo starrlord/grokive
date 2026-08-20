@@ -78,6 +78,9 @@ GALLERY_DIR = DATA_DIR / "gallery"
 INCREMENTAL_DIR = GALLERY_DIR / "gallery_incremental"
 MEDIA_DIR = GALLERY_DIR / "media"
 THUMBS_DIR = GALLERY_DIR / "thumbnails"
+# Lazily generated high-res covers (thumbgen.COVER_EDGE) for the big card surfaces —
+# derived cache, safe to delete; only ids actually requested as covers ever get one.
+COVERS_DIR = GALLERY_DIR / "covers"
 CURL_FILE = DATA_DIR / "grok_auth.txt"
 # Legacy filename (pre-rename); still read so existing data volumes keep working.
 LEGACY_CURL_FILE = DATA_DIR / "curl_samples.txt"
@@ -1152,6 +1155,89 @@ def thumbnails(relpath: str) -> Response:
     return send_from_directory(THUMBS_DIR, relpath, conditional=True)
 
 
+# Cover generation lives OFF the request path. A cold cache used to generate inline,
+# and a first visit to a big landing fires HUNDREDS of cover requests at once (4 mosaic
+# quadrants x every collection card) — with generation serialized, those requests pinned
+# every waitress thread (thumbs and API calls queued behind them) and the browser gave
+# up on the stalled images, leaving black cards. Now the route answers instantly (the
+# cached cover, else the 400px thumb marked no-store so the placeholder never sticks in
+# any cache) and queues the id for ONE background worker; the sharp cover is served from
+# disk on any later request.
+_cover_queue: set = set()
+_cover_wake = threading.Event()
+_cover_worker_lock = threading.Lock()
+_cover_worker_started = False
+
+
+def _generate_cover(mid: str) -> None:
+    dest = thumbgen.cover_path({"id": mid}, COVERS_DIR)
+    if dest.exists():
+        return
+    try:
+        rows = db.media_by_ids(DB_FILE, [mid]) if DB_FILE.exists() else []
+    except Exception:
+        rows = []
+    item = rows[0] if rows else None
+    rel = str((item or {}).get("local_path") or "").replace("\\", "/")
+    if not rel:
+        return
+    source = (GALLERY_DIR / rel).resolve()
+    if GALLERY_DIR.resolve() not in source.parents or not source.exists():
+        return
+    thumbgen.make_cover(source, dest, str(item.get("media_type") or "image"))
+
+
+def _cover_worker() -> None:
+    while True:
+        _cover_wake.wait()
+        _cover_wake.clear()
+        while True:
+            with _cover_worker_lock:
+                if not _cover_queue:
+                    break
+                mid = _cover_queue.pop()
+            try:
+                _generate_cover(mid)
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"cover generation failed for {mid}: {exc}")
+
+
+def _queue_cover(mid: str) -> None:
+    global _cover_worker_started
+    with _cover_worker_lock:
+        _cover_queue.add(mid)
+        if not _cover_worker_started:
+            _cover_worker_started = True
+            threading.Thread(target=_cover_worker, name="cover-gen", daemon=True).start()
+    _cover_wake.set()
+
+
+@app.get("/covers/<mid>.jpg")
+def covers(mid: str) -> Response:
+    """High-res cover for the big card surfaces (canvas cards, collection covers/heroes):
+    a thumbgen.COVER_EDGE JPEG rendered from the ORIGINAL media by a background worker,
+    cached under gallery/covers. Until it exists, the 400px thumb is served as a
+    NON-CACHEABLE placeholder — never a stall, never a broken card. Same reachability
+    gate as /media + /thumbnails."""
+    mid = str(mid)
+    if not mid or len(mid) > 100 or "\\" in mid or ".." in mid:
+        abort(404)
+    if _is_media_hidden(mid):
+        abort(404)
+    dest = thumbgen.cover_path({"id": mid}, COVERS_DIR)
+    if dest.exists():
+        return send_file(dest, conditional=True)
+    _queue_cover(mid)
+    for fallback in (thumbgen.thumb_path({"id": mid}, THUMBS_DIR), THUMBS_DIR / f"{mid}.jpg"):
+        if fallback.exists():
+            resp = send_file(fallback, conditional=False)
+            # The placeholder must not be cached AS the cover: the real one lands soon,
+            # and a cached 400px body under the /covers URL would pin the card soft.
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+    abort(404)
+
+
 @app.post("/api/sync")
 def api_sync() -> Response:
     if start_sync():
@@ -2168,9 +2254,14 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         # Never leak the password hash to the client.
         base = {k: v for k, v in coll.items() if k != "pass_hash"}
         if is_locked and not is_unlocked:
-            # Sealed card: size counts only — no thumbnails, no member ids.
+            # Sealed card: size counts only — no thumbnails, no member ids, and a
+            # REDACTED name (the real one must never reach the client while sealed —
+            # it's visible in the API response even when the card itself is hidden).
+            # Safe for the bulk-save round trip: api_collections_post replaces a sealed
+            # entry with the server record wholesale, so the placeholder can't stick.
             summaries.append({
-                **base, "ids": [], "cover_id": "", "cover": None, "covers": [],
+                **base, "name": "Locked collection",
+                "ids": [], "cover_id": "", "cover": None, "covers": [],
                 "cover_items": [], "cover_peek": None,
                 "item_count": len(media),
                 "video_count": sum(1 for it in media if it.get("media_type") == "video"),
@@ -2189,7 +2280,8 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         # Long-press peek needs the full-media href behind each cover thumb.
         # `cover_items` mirrors `covers` (same items, same order); `cover_peek` is the
         # explicit/primary cover, which may be older than the recent-4 mosaic.
-        peek = lambda it: {"thumb": it.get("thumb"), "href": it.get("href"), "media_type": it.get("media_type")}
+        # `id` lets the client request the high-res /covers/<id>.jpg tier via srcset.
+        peek = lambda it: {"id": it.get("id"), "thumb": it.get("thumb"), "href": it.get("href"), "media_type": it.get("media_type")}
         cover_pool = [it for it in recent if it.get("thumb")][:4]
         covers = [it.get("thumb") for it in cover_pool]
         videos = sum(1 for it in media if it.get("media_type") == "video")
@@ -6308,8 +6400,10 @@ def _delete_media_files(item: dict) -> None:
     if mid:
         # Thumbnails are stored sharded (thumbnails/<shard>/<id>.jpg); delete that, and
         # keep the legacy flat path as a fallback so older thumbnails are cleaned too.
+        # The lazily generated high-res cover (if this id ever rendered as one) goes too.
         targets.append(thumbgen.thumb_path({"id": mid}, THUMBS_DIR))
         targets.append(THUMBS_DIR / f"{mid}.jpg")
+        targets.append(thumbgen.cover_path({"id": mid}, COVERS_DIR))
     for p in targets:
         try:
             p.unlink(missing_ok=True)

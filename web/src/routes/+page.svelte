@@ -23,6 +23,7 @@
   import ExportOrderModal from '$lib/components/ExportOrderModal.svelte';
   import PlaylistEditor from '$lib/components/PlaylistEditor.svelte';
   import LibraryView from '$lib/components/LibraryView.svelte';
+  import CommandPalette from '$lib/components/CommandPalette.svelte';
   import MediaTypeTabs from '$lib/components/MediaTypeTabs.svelte';
   import SearchField from '$lib/components/SearchField.svelte';
   import SortSelect from '$lib/components/SortSelect.svelte';
@@ -47,6 +48,14 @@
   let page = $state(1);
   let loading = $state(false);
   let facets = $state({ tags: [], models: [], canvases: [] });
+  // The canvases LANDING list, retained separately from facets.canvases: the facet is
+  // scoped BY the active canvas while one is drilled into (it collapses to a single
+  // row), which used to leave Back with a one-card-tall page — the browser clamped the
+  // scroll to ~0 before the exit refetch could restore the full list. Keeping the last
+  // UNSCOPED list lets Back re-render the full-height grid synchronously, so the
+  // drill-exit scroll restore sticks (the same mechanism that makes collections work:
+  // aspect-ratio cards render full height with no async pop-in).
+  let canvasLanding = $state([]);
 
   let lb = $state(null); // { list, index, autoAdvance, title }
   // Id of the item the Lightbox is currently showing (via onitemchange) — feeds the
@@ -120,7 +129,7 @@
   // lexicographically; a canvas missing timestamps sorts last rather than jumping to the top.
   const shownCanvases = $derived.by(() => {
     const needle = canvasQuery.trim().toLowerCase();
-    const list = (facets.canvases || []).filter((c) => !needle || (c.name || '').toLowerCase().includes(needle));
+    const list = (canvasLanding || []).filter((c) => !needle || (c.name || '').toLowerCase().includes(needle));
     const byTime = (key) => (a, b) => (b[key] || '').localeCompare(a[key] || '');
     if (canvasSort === 'name') return [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     if (canvasSort === 'size') return [...list].sort((a, b) => (b.count || 0) - (a.count || 0));
@@ -229,12 +238,10 @@
   // post-flush read would see the already-clamped value), reset to top when
   // ENTERING a drilled view, and restore the saved offset when the drill clears
   // back to the SAME view. An exit that also switches tabs lands on unrelated
-  // content, so it doesn't restore. For COLLECTIONS the restore sticks: the
-  // landing re-renders its full height synchronously from the $collections store
-  // (aspect-ratio cards, no async pop-in). For CANVASES it's best-effort only —
-  // that landing rebuilds from facets.canvases, which the drilled-in refetch
-  // collapsed to one row, so the restore usually clamps to ~0 until the exit
-  // refetch lands (same top-of-list landing as before this fix, not a regression).
+  // content, so it doesn't restore. The restore sticks for BOTH landings because each
+  // re-renders its full height synchronously (aspect-ratio cards, no async pop-in):
+  // collections from the $collections store, canvases from canvasLanding — the retained
+  // unscoped list that the drilled-in facet refetch (one collapsed row) can't touch.
   const drillKey = $derived($activeCollectionId
     ? `c:${$activeCollectionId}`
     : ($filters.canvas ? `v:${$filters.canvas}` : ''));
@@ -266,7 +273,13 @@
   });
 
   async function refreshFacets() {
-    try { facets = await fetchFacets($filters, $activeCollectionId); } catch {}
+    // Captured with the request, not read after the await: the exit refetch races the
+    // canvas filter clearing, and only an UNSCOPED response may refresh the landing list.
+    const scoped = !!$filters.canvas;
+    try {
+      facets = await fetchFacets($filters, $activeCollectionId);
+      if (!scoped) canvasLanding = facets.canvases || [];
+    } catch {}
   }
 
   // Refetch the current media view after a Grok Imagine generation ingests new
@@ -383,7 +396,9 @@
   });
 
   function openLightbox(item, list) {
-    lb = { list, index: list.findIndex((x) => x.id === item.id), autoAdvance: false, title: '' };
+    // collectionId (set only while a collection is open — this is every grid's onopen)
+    // lets the viewer's delete confirm offer "remove from this collection" instead.
+    lb = { list, index: list.findIndex((x) => x.id === item.id), autoAdvance: false, title: '', collectionId: activeCollection?.id || '' };
   }
   function openRelatedLightbox(list, index = 0, title = '') {
     lb = { list, index, autoAdvance: false, title };
@@ -599,18 +614,22 @@
     collectionGroupName = next;
     updateCollection(activeCollection.id, { group: next });
   }
-  function removeSelectionFromCollection() {
-    if (!activeCollection || !$selection.length) return;
+  function removeIdsFromActiveCollection(ids) {
+    if (!activeCollection || !ids.length) return;
     // Drop from the visible grid immediately so the action feels instant; the reactive
     // reload (which now awaits the save) reconciles against the server afterwards.
-    const drop = new Set($selection.map(String));
+    const drop = new Set(ids.map(String));
     const before = collectionItems.length;
     collectionItems = collectionItems.filter((it) => !drop.has(String(it.id)));
     // Keep the total in step with the optimistic splice so the group-mode "fully loaded"
     // gate (loaded >= total) doesn't briefly flip false and flash its banner before the
     // reconciling refetch lands. The refetch corrects it to the true server count anyway.
     collectionTotal = Math.max(0, collectionTotal - (before - collectionItems.length));
-    removeFromCollection(activeCollection.id, $selection);
+    removeFromCollection(activeCollection.id, ids);
+  }
+  function removeSelectionFromCollection() {
+    if (!activeCollection || !$selection.length) return;
+    removeIdsFromActiveCollection($selection);
     clearSelection();
   }
   function playResolved(videos, title) {
@@ -868,16 +887,19 @@
       {:else if groupByBase}
         <CollectionGroups items={currentGridItems} mode={$mode} {targetHeight} {gap}
           selectMode={$selectMode} loaded={collectionItems.length} total={collectionTotal}
+          collection={activeCollection} onremovefromcollection={(id) => removeIdsFromActiveCollection([id])}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)}
           onplay={(videos, title) => playResolved(videos, title)}
           onexport={(videos, label) => openExportOrder(videos, label)}
           onmontage={(ids) => { movieVideoIds = ids; showMovie = true; }} />
       {:else if $mode === 'editorial'}
-        <EditorialList items={currentGridItems} onopen={openLightbox} />
+        <EditorialList items={currentGridItems} onopen={openLightbox}
+          collection={activeCollection} onremovefromcollection={(id) => removeIdsFromActiveCollection([id])} />
       {:else}
         <JustifiedGrid items={currentGridItems} {targetHeight} {gap}
           virtualize={currentGridItems.length >= 300}
           selectMode={$selectMode}
+          collection={activeCollection} onremovefromcollection={(id) => removeIdsFromActiveCollection([id])}
           onopen={openLightbox} ontoggleselect={(it) => toggleSelection(it.id)} />
       {/if}
       <div bind:this={sentinel} class="h-10"></div>
@@ -955,7 +977,12 @@
         {#each shownCanvases as c (c.id)}
           <article class="group relative overflow-hidden rounded-card border border-line bg-[var(--surface-2)]">
             <button type="button" class="relative block aspect-square w-full overflow-hidden bg-[var(--media-bg)] text-left" onclick={() => openCanvas(c)}>
-              {#if c.cover}<img src={c.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover:scale-105" />{/if}
+              <!-- srcset: the 400px grid thumb for small slots, the lazily generated
+                   /covers/<id>.jpg high-res tier once the card renders large (desktop). -->
+              {#if c.cover}<img src={c.cover} alt="" loading="lazy"
+                srcset={c.cover_id ? `${c.cover} 400w, /covers/${c.cover_id}.jpg 1280w` : undefined}
+                sizes="(min-width: 1024px) 25vw, (min-width: 640px) 33vw, 50vw"
+                class="h-full w-full object-cover object-top transition group-hover:scale-105" />{/if}
               <span class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim)] to-transparent px-3 pb-2.5 pt-8 text-[var(--media-control-ink)]">
                 <span class="block truncate text-sm font-bold" title={c.name}>{c.name}</span>
                 <span class="block text-xs opacity-80">{c.count} items · {c.videos} video</span>
@@ -1039,9 +1066,19 @@
 
 {#if lb}
   <Lightbox list={lb.list} index={lb.index} autoAdvance={lb.autoAdvance} autoSlideshow={lb.autoSlideshow} title={lb.title}
+    collectionId={lb.collectionId || ''}
     onopenrelated={openRelatedLightbox} onopencollection={enterCollection} onitemchange={(id) => (previewItemId = id)}
     onclose={() => { lb = null; previewItemId = null; }} />
 {/if}
+
+<!-- Ctrl/Cmd+K jump-to-anything. Always mounted; renders nothing until invoked. -->
+<CommandPalette
+  onopencollection={(c) => enterCollection(c.id)}
+  onplaycollection={(c, shuffle) => playCollection(c, null, { shuffle })}
+  onqueuecollection={(c) => enqueueCollectionToPlayQueue(c)}
+  onplaylist={(pl) => (editing = pl)}
+  onplayrandom={playRandomLibrary}
+  onmontage={() => { movieVideoIds = []; showMovie = true; }} />
 
 {#if editing}
   <PlaylistEditor playlist={editing} onclose={() => (editing = null)} onplay={playResolved}
