@@ -27,6 +27,7 @@ export function fetchMedia(f, page = 1, pageSize = 120, collectionId = null) {
   if (f.canvas) p.set('canvas', f.canvas);
   if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
   if (f.period && f.period !== 'all') p.set('period', f.period);
+  if (f.uncollected) p.set('uncollected', '1');
   if (collectionId) p.set('collection', collectionId);
   p.set('sort', f.sort || 'new');
   p.set('page', String(page));
@@ -47,6 +48,7 @@ export function fetchFacets(f = {}, collectionId = null) {
   if (f.canvas) p.set('canvas', f.canvas);
   if (f.mediaType && f.mediaType !== 'all') p.set('type', f.mediaType);
   if (f.period && f.period !== 'all') p.set('period', f.period);
+  if (f.uncollected) p.set('uncollected', '1');
   if (collectionId) p.set('collection', collectionId);
   return getJSON(`/api/facets?${p.toString()}`);
 }

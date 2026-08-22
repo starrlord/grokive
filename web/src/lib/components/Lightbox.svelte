@@ -25,7 +25,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { fade, fly } from 'svelte/transition';
-  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, lightboxChrome, collections, filters, activeCollectionId, removeFromCollection, deleteMembershipNote } from '$lib/state.js';
+  import { favorites, toggleFavorite, removeMedia, deleted, sendToImagine, toggleBasket, basketMembers, togglePlayQueue, playQueueMembers, queueImageForMontage, captionVideoHeight, slideSeconds, setSlideSeconds, lightboxChrome, collections, filters, activeCollectionId, removeFromCollection, deleteMembershipNote } from '$lib/state.js';
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
@@ -479,6 +479,18 @@
             aria-label={basketMembers.has(item.id) ? 'Remove from montage queue' : 'Add to montage queue'} aria-pressed={basketMembers.has(item.id)}
             onclick={() => toggleBasket(item.id)}>
             <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </button>
+        {/if}
+        {#if item.media_type === 'video'}
+          <!-- Add this video to the cross-library Play Queue — the sequential-playback
+               sibling of the montage queue beside it. Stays open (no close()) so you can
+               keep browsing and queueing; lives in the collapsible cluster like the rest.
+               Every video qualifies (montages play fine — they just can't re-enter a montage). -->
+          <button class="glass grid h-10 w-10 place-items-center rounded-lg {playQueueMembers.has(item.id) ? 'text-[var(--accent)]' : ''}"
+            title={playQueueMembers.has(item.id) ? 'In play queue — click to remove' : 'Add to play queue'}
+            aria-label={playQueueMembers.has(item.id) ? 'Remove from play queue' : 'Add to play queue'} aria-pressed={playQueueMembers.has(item.id)}
+            onclick={() => togglePlayQueue(item.id)}>
+            <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
           </button>
         {/if}
         {#if item.media_type === 'video' && item.subtitles}

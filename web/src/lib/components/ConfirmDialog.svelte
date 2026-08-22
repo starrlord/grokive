@@ -4,8 +4,9 @@
 
   // `note` is an optional emphasized context line under the message (e.g. "It's also in
   // 2 other collections"). `altLabel`/`onalt` add an optional safe-alternative action
-  // (e.g. Remove from collection instead of Delete) rendered full-width ABOVE the
-  // Cancel/confirm row, so the non-destructive path is the most prominent target.
+  // (e.g. Remove from collection instead of Delete); with it, the buttons render as a
+  // uniform full-width stack — safe alt (accent) / destructive (outline) / Cancel — so
+  // the non-destructive path stays the most prominent target and sizes stay consistent.
   let {
     title = 'Are you sure?',
     message = '',
@@ -41,11 +42,19 @@
   {#if note}<p class="mb-5 rounded-lg bg-[var(--surface-2)] px-3 py-2 text-sm font-semibold leading-relaxed">{note}</p>{/if}
   <div class="flex flex-col gap-2">
     {#if altLabel}
+      <!-- Safe-alternative layout: a uniform stack of three equal full-width buttons
+           (action-sheet convention) instead of a full-width CTA over a ragged half-row.
+           Exactly ONE saturated block — the recommended safe action is accent-solid on
+           top, the destructive path is a quiet danger-outline, Cancel is the neutral
+           floor — so the sizes are consistent and the hierarchy reads at a glance. -->
       <Button variant="primary" size="lg" class="w-full" onclick={onalt}>{altLabel}</Button>
+      <Button variant="danger-outline" size="lg" class="w-full" onclick={onconfirm}>{confirmLabel}</Button>
+      <Button variant="secondary" size="lg" class="w-full" onclick={oncancel}>Cancel</Button>
+    {:else}
+      <div class="flex gap-2">
+        <Button variant="secondary" size="lg" class="flex-1" onclick={oncancel}>Cancel</Button>
+        <Button variant={danger ? 'danger' : 'primary'} size="lg" class="flex-1 shadow-lg" onclick={onconfirm}>{confirmLabel}</Button>
+      </div>
     {/if}
-    <div class="flex gap-2">
-      <Button variant="secondary" size="lg" class="flex-1" onclick={oncancel}>Cancel</Button>
-      <Button variant={danger ? 'danger' : 'primary'} size="lg" class="flex-1 shadow-lg" onclick={onconfirm}>{confirmLabel}</Button>
-    </div>
   </div>
 </Modal>

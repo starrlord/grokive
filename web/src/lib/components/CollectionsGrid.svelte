@@ -130,9 +130,11 @@
   });
   const topEntries = $derived.by(() => {
     const grouped = new Set(groupEntries.map((g) => g.group_key));
+    // Nested collections live inside their parent (the drilled-in view's shelf) — the
+    // landing shows only roots so sub-folders don't clutter or duplicate the grid.
     const ungrouped = collectionsList
       .map((c, index) => ({ ...c, store_index: index }))
-      .filter((c) => !grouped.has(groupKey(c.group)));
+      .filter((c) => !c.parent_id && !grouped.has(groupKey(c.group)));
     return [...ungrouped, ...groupEntries];
   });
   const activeMembers = $derived.by(() => {
@@ -598,8 +600,9 @@
 {/snippet}
 
 {#if confirming}
+  {@const childCount = collectionsList.filter((c) => c.parent_id === confirming.id).length}
   <ConfirmDialog title="Delete collection?"
-    message={`"${confirming.name}" will be removed. The media files stay in your library.`}
+    message={`"${confirming.name}"${childCount ? ` and its ${childCount} sub-collection${childCount === 1 ? '' : 's'}` : ''} will be removed. The media files stay in your library.`}
     confirmLabel="Delete"
     onconfirm={() => { removeCollection(confirming.id); confirming = null; }}
     oncancel={() => (confirming = null)} />

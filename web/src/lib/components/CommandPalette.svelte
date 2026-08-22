@@ -82,7 +82,9 @@
       : [...usable].sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')).slice(0, 6);
     for (const c of colls) {
       const s = q ? score(q, c.name) : 100;
-      if (s >= 0) out.push({ id: `c:${c.id}`, type: 'collection', s: s + 10, label: c.name, hint: `${c.item_count ?? c.ids?.length ?? 0} items`, run: () => onopencollection(c) });
+      // Nested collections read as "Parent › Child" so their context is visible here.
+      const parent = c.parent_id ? usable.find((p) => p.id === c.parent_id) : null;
+      if (s >= 0) out.push({ id: `c:${c.id}`, type: 'collection', s: s + 10, label: parent ? `${parent.name} › ${c.name}` : c.name, hint: `${c.item_count ?? c.ids?.length ?? 0} items`, run: () => onopencollection(c) });
     }
     const pls = q ? ($playlists || []) : ($playlists || []).slice(0, 3);
     for (const pl of pls) {

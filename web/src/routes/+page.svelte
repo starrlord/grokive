@@ -8,9 +8,9 @@
   import {
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
-    loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters,
-    collections, collectionGroups, activeCollectionId, updateCollection, removeFromCollection, collectionsSettled, ensureMoviePolling, movieChip,
-    galleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
+    loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters, toggleUncollected,
+    collections, collectionGroups, activeCollectionId, updateCollection, removeFromCollection, removeCollection, collectionsSettled, ensureMoviePolling, movieChip,
+    galleryReload, requestGalleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
     playQueue, enqueuePlayQueue, shuffled
   } from '$lib/state.js';
   import TopBar from '$lib/components/TopBar.svelte';
@@ -28,6 +28,8 @@
   import SearchField from '$lib/components/SearchField.svelte';
   import SortSelect from '$lib/components/SortSelect.svelte';
   import CollectionPickerModal from '$lib/components/CollectionPickerModal.svelte';
+  import NestedCollectionModal from '$lib/components/NestedCollectionModal.svelte';
+  import CollectionLockModal from '$lib/components/CollectionLockModal.svelte';
   import GenerateMovie from '$lib/components/GenerateMovie.svelte';
   import FiltersModal from '$lib/components/FiltersModal.svelte';
   import PlaySplitButton from '$lib/components/PlaySplitButton.svelte';
@@ -78,6 +80,11 @@
   let canvasQuery = $state('');
   let canvasSort = $state('updated'); // updated (newest item) | recent (newest canvas) | name | size
   let showCollectionPicker = $state(false);
+  let showNestedModal = $state(false); // "Add to Nested Collection" from the SelectBar
+  // Sub-collection shelf actions. Children never render on the Collections landing, so
+  // the shelf tiles must carry the lock and delete affordances the landing cards have.
+  let childLockModal = $state(null); // { collection, mode } -> CollectionLockModal
+  let confirmingChild = $state(null); // sub-collection pending delete confirmation
   let groupByBase = $state(false); // collection view: cluster items by their base image
   let showMovie = $state(false);
   let movieVideoIds = $state([]); // video ids fed to the Montage panel (selection or a collection)
@@ -107,6 +114,14 @@
   // loaded/visible items can be acted on, so unloaded ones are unaffected.
   const displayTotal = $derived(Math.max(displayItems.length, total - (items.length - displayItems.length)));
   const activeCollection = $derived(($collections || []).find((c) => c.id === $activeCollectionId) || null);
+  // Nested collections: sub-collections of the drilled-in collection (the shelf), and
+  // the parent of a drilled-in CHILD (breadcrumb + parent-aware Back). One level deep.
+  const childCollections = $derived(($collections || [])
+    .filter((c) => c.parent_id && c.parent_id === $activeCollectionId)
+    .sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')));
+  const parentCollection = $derived(activeCollection?.parent_id
+    ? ($collections || []).find((c) => c.id === activeCollection.parent_id) || null
+    : null);
   const existingCollectionGroups = $derived.by(() => {
     const byKey = {};
     for (const c of $collections || []) {
@@ -792,10 +807,19 @@
         onplayplaylist={playPlaylist} oneditplaylist={(pl) => (editing = pl)} />
     {:else if $filters.view === 'collections' && activeCollection}
       <div class="mb-3 flex flex-wrap items-center gap-2">
-        <button type="button" class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)]" onclick={() => ($activeCollectionId = null)}>
+        <!-- Inside a nested collection, Back climbs to the parent (the landing is one more
+             Back away); a breadcrumb chip names the parent as an explicit jump target. -->
+        <button type="button" class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-sm font-semibold transition hover:border-[var(--accent)]" onclick={() => ($activeCollectionId = parentCollection?.id || null)}>
           <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
           Back
         </button>
+        {#if parentCollection}
+          <button type="button" class="inline-flex min-w-0 shrink items-center gap-1 rounded-lg border border-line px-2.5 py-2 text-sm font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink"
+            title={`Up to "${parentCollection.name}"`} onclick={() => ($activeCollectionId = parentCollection.id)}>
+            <span class="max-w-36 truncate">{parentCollection.name}</span>
+            <span aria-hidden="true" class="opacity-60">›</span>
+          </button>
+        {/if}
         <!-- Title-styled name (transparent until hovered/focused) with a count pill snug
              beside it — reads as a heading on one line, not an empty form box. The input
              auto-hugs its text via a hidden grid "sizer" span (cross-browser, unlike
@@ -819,16 +843,20 @@
               aria-label="Collection name" title="Rename collection" bind:value={collectionName} maxlength="80" onblur={saveCollectionName} onkeydown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
           </label>
           <span class="shrink-0 rounded-full border border-line bg-[var(--surface-2)] px-2.5 py-0.5 text-sm font-semibold text-muted tabular-nums" title={`${collectionTotal.toLocaleString()} items`}>{collectionTotal.toLocaleString()}</span>
-          <button type="button"
-            class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-sm font-semibold transition hover:border-[var(--accent)] {collectionGroupName ? 'text-ink' : 'text-muted'}"
-            title={collectionGroupName ? `Group: ${collectionGroupName}` : 'Add this collection to a group'}
-            aria-label="Collection group" aria-expanded={groupEditorOpen} aria-controls="collection-group-editor"
-            onclick={() => (groupEditorOpen = !groupEditorOpen)}>
-            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
-            {#if collectionGroupName}<span class="max-w-24 truncate">{collectionGroupName}</span>{/if}
-          </button>
+          <!-- Nested collections live inside their parent, never in a landing group —
+               so a child gets no group chip (the server strips a child's group anyway). -->
+          {#if !activeCollection.parent_id}
+            <button type="button"
+              class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-sm font-semibold transition hover:border-[var(--accent)] {collectionGroupName ? 'text-ink' : 'text-muted'}"
+              title={collectionGroupName ? `Group: ${collectionGroupName}` : 'Add this collection to a group'}
+              aria-label="Collection group" aria-expanded={groupEditorOpen} aria-controls="collection-group-editor"
+              onclick={() => (groupEditorOpen = !groupEditorOpen)}>
+              <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              {#if collectionGroupName}<span class="max-w-24 truncate">{collectionGroupName}</span>{/if}
+            </button>
+          {/if}
         </div>
-        {#if groupEditorOpen}
+        {#if groupEditorOpen && !activeCollection.parent_id}
           <!-- Transient group editor: opens focused so the keyboard is up in one tap,
                saves on Enter/blur, then puts itself away. -->
           <div id="collection-group-editor" class="flex w-full items-center sm:max-w-sm">
@@ -877,13 +905,84 @@
         </div>
       </div>
 
-      {#if currentGridItems.length === 0}
+      {#if childCollections.length}
+        <!-- Sub-collections shelf: nested collections render as folder tiles above the
+             parent's grid. The nest modal MOVES items in by default (untickable), so
+             the grid below is what's not yet filed into a sub-collection. -->
+        <div class="mb-4">
+          <div class="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2a1 1 0 0 0-.8-.4h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></svg>
+            <span>Sub-collections</span>
+            <span class="tabular-nums">{childCollections.length}</span>
+          </div>
+          <div class="flex gap-3 overflow-x-auto pb-1.5" style="scrollbar-width: thin">
+            {#each childCollections as child (child.id)}
+              {@const sealedChild = child.locked && !child.unlocked}
+              <div class="group/tile relative w-44 shrink-0 overflow-hidden rounded-card border border-line bg-[var(--surface-2)] transition-colors hover:border-[var(--accent)] focus-within:border-[var(--accent)]">
+                <button type="button" class="block w-full text-left"
+                  aria-label={sealedChild ? `Unlock sub-collection ${child.name}` : `Open sub-collection ${child.name}`}
+                  onclick={() => (sealedChild ? (childLockModal = { collection: child, mode: 'unlock' }) : enterCollection(child.id))}>
+                  <span class="relative block aspect-[4/3] w-full overflow-hidden bg-[var(--media-bg)]">
+                    {#if sealedChild}
+                      <span class="grid h-full w-full place-items-center text-muted">
+                        <svg viewBox="0 0 24 24" class="h-8 w-8 opacity-70" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      </span>
+                    {:else if child.covers?.length > 1}
+                      <span class="grid h-full w-full grid-cols-2 grid-rows-2 gap-0.5">
+                        {#each child.covers.slice(0, 4) as cover (cover)}
+                          <img src={cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover/tile:scale-[1.04]" />
+                        {/each}
+                      </span>
+                    {:else if child.cover}
+                      <img src={child.cover} alt="" loading="lazy" class="h-full w-full object-cover object-top transition group-hover/tile:scale-[1.04]" />
+                    {:else}
+                      <span class="grid h-full w-full place-items-center text-xs text-muted">Empty</span>
+                    {/if}
+                    <span class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-2.5 pb-2 pt-8 text-[var(--media-control-ink)]">
+                      <span class="block truncate text-sm font-extrabold tracking-tight">{child.name}</span>
+                      <span class="block text-[11px] font-medium opacity-70">{sealedChild ? 'Locked' : `${child.item_count ?? child.ids?.length ?? 0} item${(child.item_count ?? child.ids?.length ?? 0) === 1 ? '' : 's'}`}</span>
+                    </span>
+                  </span>
+                </button>
+                <!-- Tile actions (hover / focus / touch): lock and delete — the landing card
+                     affordances, since children never appear there. Hidden while sealed. -->
+                <div class="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition group-hover/tile:opacity-100 group-focus-within/tile:opacity-100 pointer-coarse:opacity-100">
+                  {#if !child.locked}
+                    <button type="button" class="grid h-7 w-7 place-items-center rounded-md border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                      title="Lock this sub-collection with a password" aria-label={`Lock sub-collection ${child.name}`}
+                      onclick={() => (childLockModal = { collection: child, mode: 'set' })}>
+                      <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    </button>
+                  {:else if child.unlocked}
+                    <button type="button" class="grid h-7 w-7 place-items-center rounded-md border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                      title="Manage lock (re-lock now or remove the password)" aria-label={`Manage lock for ${child.name}`}
+                      onclick={() => (childLockModal = { collection: child, mode: 'manage' })}>
+                      <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+                    </button>
+                  {/if}
+                  {#if !sealedChild}
+                    <button type="button" class="grid h-7 w-7 place-items-center rounded-md border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--danger-hover)] hover:bg-[var(--danger-hover)] hover:text-white"
+                      title="Delete sub-collection" aria-label={`Delete sub-collection ${child.name}`}
+                      onclick={() => (confirmingChild = child)}>
+                      <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6"/><path d="M10 11v6M14 11v6"/></svg>
+                    </button>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      {#if currentGridItems.length === 0 && !childCollections.length}
         <div class="grid place-items-center rounded-card border border-dashed border-line py-24 text-center text-muted">
           <div>
             <p class="mb-1 text-lg font-bold text-ink">This collection is empty</p>
             <p class="text-sm">Select media from Recent or All Media to add it here.</p>
           </div>
         </div>
+      {:else if currentGridItems.length === 0}
+        <p class="py-8 text-center text-sm text-muted">Everything here is filed into sub-collections.</p>
       {:else if groupByBase}
         <CollectionGroups items={currentGridItems} mode={$mode} {targetHeight} {gap}
           selectMode={$selectMode} loaded={collectionItems.length} total={collectionTotal}
@@ -1015,6 +1114,18 @@
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={resetAll}>Reset filters ✕</button>
         {/if}
         <MediaTypeTabs class="ml-auto" />
+        {#if $filters.view === 'archive'}
+          <!-- Archive triage filter: only items in NO collection or sub-collection —
+               "what have I archived but never filed anywhere?". Server-side (the
+               `uncollected` param folds every collection's ids into the exclusion set)
+               so pagination and the count stay honest across the whole archive. -->
+          <button type="button" aria-pressed={$filters.uncollected}
+            class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-semibold transition {$filters.uncollected ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line hover:border-[var(--accent)]'}"
+            title="Show only items that aren't in any collection or sub-collection" onclick={toggleUncollected}>
+            <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="m9.5 10.5 5 5"/><path d="m14.5 10.5-5 5"/></svg>
+            <span class="hidden sm:inline">Uncollected</span>
+          </button>
+        {/if}
         <SortSelect />
         <!-- Primary click plays the view in its current sort; the caret adds "Play random",
              which shuffles the same filtered/searched set (not the whole library — that's
@@ -1034,6 +1145,7 @@
             <p class="mb-1 text-lg font-bold text-ink">Nothing here yet</p>
             <p class="text-sm">
               {#if $filters.view === 'favorites'}Tap the ♥ on any item to add it.
+              {:else if $filters.view === 'archive' && $filters.uncollected}Every archived item is already in a collection.
               {:else if $filters.view === 'archive'}Archived items stay saved but are hidden from Recent.
               {:else}Try adjusting your search or filters.{/if}
             </p>
@@ -1058,6 +1170,7 @@
     onplay={playSelection}
     onreorderexport={reorderSelectionExport}
     oncollections={() => (showCollectionPicker = true)}
+    onnested={() => (showNestedModal = true)}
     onmovie={() => { movieVideoIds = montageSelectionIds; if (selectionHasImage) montageMode.set('picture-video'); showMovie = true; }}
     onbasket={enqueueSelectionToBasket}
     onplayqueue={enqueueSelectionToPlayQueue}
@@ -1091,6 +1204,25 @@
 
 {#if showCollectionPicker}
   <CollectionPickerModal ids={$selection} currentCollection={activeCollection} onclose={() => (showCollectionPicker = false)} />
+{/if}
+
+{#if showNestedModal && activeCollection}
+  <NestedCollectionModal ids={$selection} parent={activeCollection}
+    previewThumbs={$selection.map((id) => byId.get(id)?.thumb).filter(Boolean).slice(0, 4)}
+    onclose={() => (showNestedModal = false)} />
+{/if}
+
+{#if childLockModal}
+  <CollectionLockModal collection={childLockModal.collection} mode={childLockModal.mode}
+    onclose={() => (childLockModal = null)} ondone={() => { loadCollections(); requestGalleryReload(); }} />
+{/if}
+
+{#if confirmingChild}
+  <ConfirmDialog title="Delete sub-collection?"
+    message={`"${confirmingChild.name}" will be removed from "${activeCollection?.name || 'this collection'}". The media files stay in your library.`}
+    confirmLabel="Delete"
+    onconfirm={() => { removeCollection(confirmingChild.id); confirmingChild = null; }}
+    oncancel={() => (confirmingChild = null)} />
 {/if}
 
 {#if confirmingCanvas}

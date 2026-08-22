@@ -1895,6 +1895,13 @@ def _clean_collection(entry: dict) -> dict | None:
     group = _clean_group_name(entry.get("group"))
     if group:
         out["group"] = group
+    # Nested collections: an optional pointer at a parent collection in the same file.
+    # Kept here (the whitelist choke point) or every write path would silently strip it.
+    # Validity (parent exists, parent is a root, no group on children) is enforced by
+    # _normalize_collection_parents, which needs the whole list.
+    parent_id = str(entry.get("parent_id") or "")[:64]
+    if parent_id and parent_id != out["id"]:
+        out["parent_id"] = parent_id
     # Password-lock state rides through every write. It's server-authoritative: the
     # bulk /api/collections POST re-supplies it from disk, and the dedicated lock
     # endpoints set it — so a normal client save can never forge or clear a lock here.
@@ -1925,7 +1932,34 @@ def _load_collections(strict: bool = False) -> list[dict]:
             c = _clean_collection(entry)
             if c:
                 clean.append(c)
-    return clean
+    return _normalize_collection_parents(clean)
+
+
+def _normalize_collection_parents(collections: list[dict]) -> list[dict]:
+    """Repair nested-collection pointers in place: a dangling/cyclic/deep parent_id
+    demotes the collection to a root — it never deletes anything. ONE level only (a
+    child can never itself be a parent), and children carry no group of their own
+    (they live inside their parent, never on the landing or in a collection group).
+    A parent that vanished by any means silently promotes its children to top level."""
+    by_id: dict[str, dict] = {}
+    for c in collections:
+        by_id.setdefault(str(c.get("id")), c)
+    for c in collections:
+        pid = str(c.get("parent_id") or "")
+        if pid and (pid not in by_id or by_id[pid] is c):
+            c.pop("parent_id", None)
+    # Snapshot AFTER the dangling pass: in a chain A→B→(missing), B just became a root,
+    # so A legitimately keeps its pointer; a true chain A→B→C (or a cycle) still reads
+    # B as a child here and demotes A. Evaluating against the snapshot (not live state)
+    # keeps a cycle from surviving as whichever link happened to be visited last.
+    child_ids = {str(c.get("id")) for c in collections if c.get("parent_id")}
+    for c in collections:
+        pid = str(c.get("parent_id") or "")
+        if pid and pid in child_ids:
+            c.pop("parent_id", None)
+        if c.get("parent_id"):
+            c.pop("group", None)
+    return collections
 
 
 def _clean_group_record(entry: dict) -> dict | None:
@@ -2061,10 +2095,24 @@ def _locked_maps() -> tuple[dict[str, frozenset], dict[str, frozenset], dict[str
                     _locked_cache["groups"],
                     _locked_cache["group_collections"])
     collections = _load_collections()
+    # Nested collections: a lock on a parent must cover its children's media (and a
+    # locked GROUP must cover member collections' children) — children carry no group
+    # and no lock of their own unless individually locked, so without this union their
+    # items would leak into All Media / search / direct file URLs while the parent is
+    # a vault. One level only (normalized on load), so a single child map suffices.
+    child_media: dict[str, set[str]] = {}
+    child_cids: dict[str, set[str]] = {}
+    for coll in collections:
+        pid = str(coll.get("parent_id") or "")
+        if pid:
+            child_media.setdefault(pid, set()).update(str(i) for i in coll.get("ids", []))
+            child_cids.setdefault(pid, set()).add(str(coll.get("id")))
     collection_locks: dict[str, frozenset] = {}
     for coll in collections:
         if coll.get("locked") and coll.get("pass_hash"):
-            collection_locks[str(coll.get("id"))] = frozenset(str(i) for i in coll.get("ids", []))
+            cid = str(coll.get("id"))
+            collection_locks[cid] = frozenset(
+                {str(i) for i in coll.get("ids", [])} | child_media.get(cid, set()))
     lock_records = {str(rec.get("name")): rec for rec in _load_groups().get("groups", [])
                     if rec.get("locked") and rec.get("pass_hash")}
     group_locks: dict[str, frozenset] = {}
@@ -2074,8 +2122,11 @@ def _locked_maps() -> tuple[dict[str, frozenset], dict[str, frozenset], dict[str
         cids: set[str] = set()
         for coll in collections:
             if _clean_group_name(coll.get("group")).casefold() == name.casefold():
-                cids.add(str(coll.get("id")))
+                mid = str(coll.get("id"))
+                cids.add(mid)
+                cids.update(child_cids.get(mid, set()))
                 ids.update(str(i) for i in coll.get("ids", []))
+                ids.update(child_media.get(mid, set()))
         group_locks[name] = frozenset(ids)
         group_collections[name] = frozenset(cids)
     with _locked_cache_lock:
@@ -2318,6 +2369,30 @@ def _sealed_group_collection_ids() -> set[str]:
     return out
 
 
+def _sealed_parent_ids(collections: list[dict]) -> set[str]:
+    """Ids of collections currently sealed for this session — individually locked and
+    not unlocked, or a member of a sealed group. Used to gate their nested children."""
+    unlocked = _session_unlocked()
+    sealed_group_cids = _sealed_group_collection_ids()
+    out: set[str] = set()
+    for c in collections:
+        cid = str(c.get("id"))
+        if cid in sealed_group_cids or (c.get("locked") and c.get("pass_hash") and cid not in unlocked):
+            out.add(cid)
+    return out
+
+
+def _sealed_lineage_collection_ids(collections: list[dict]) -> set[str]:
+    """Ids of collections nested under a SEALED parent. Their existence — name, covers,
+    member ids — must not reach the client while the parent is a vault, so they are
+    omitted from GET entirely and their server records preserved wholesale on POST
+    (the same treatment sealed-group members already get)."""
+    sealed = _sealed_parent_ids(collections)
+    if not sealed:
+        return set()
+    return {str(c.get("id")) for c in collections if str(c.get("parent_id") or "") in sealed}
+
+
 def _collection_group_summaries(collections: list[dict]) -> list[dict]:
     counts: dict[str, int] = {}
     for coll in collections:
@@ -2349,7 +2424,9 @@ def _collection_group_summaries(collections: list[dict]) -> list[dict]:
 def api_collections_get() -> Response:
     """Return saved mixed-media collections with lightweight display summaries."""
     collections = _load_collections()
-    sealed_cids = _sealed_group_collection_ids()
+    # Children of a sealed parent are omitted entirely (not even a redacted placeholder —
+    # a sub-collection's existence under a locked parent is itself information).
+    sealed_cids = _sealed_group_collection_ids() | _sealed_lineage_collection_ids(collections)
     visible = [c for c in collections if str(c.get("id")) not in sealed_cids]
     return jsonify(collections=_collection_summaries(visible), groups=_collection_group_summaries(collections))
 
@@ -2374,6 +2451,13 @@ def api_collections_post() -> Response:
     unlocked = _session_unlocked()
     sealed_group_names = {name.casefold() for name in _sealed_group_names()}
     sealed_group_cids = _sealed_group_collection_ids()
+    # Nested children of a sealed parent are invisible to this client (omitted from GET),
+    # so treat them exactly like sealed-group members: wholesale-keep the server record
+    # when present, re-inject when absent — a client that never saw them can't delete
+    # them by omission. Reparenting into/out of a sealed parent is refused outright.
+    sealed_parents = _sealed_parent_ids(existing_list)
+    sealed_lineage_cids = _sealed_lineage_collection_ids(existing_list)
+    protected_cids = sealed_group_cids | sealed_lineage_cids
     clean = []
     seen_payload_ids: set[str] = set()
     for entry in incoming[:1000]:
@@ -2390,9 +2474,13 @@ def api_collections_post() -> Response:
         if ((prior_group_key in sealed_group_names and incoming_group_key != prior_group_key)
                 or (incoming_group_key in sealed_group_names and incoming_group_key != prior_group_key)):
             return jsonify(ok=False, error="Unlock the collection group before changing its members."), 403
+        incoming_parent = str(entry.get("parent_id") or "")[:64]
+        prior_parent = str(prior.get("parent_id") or "") if prior else ""
+        if incoming_parent != prior_parent and (incoming_parent in sealed_parents or prior_parent in sealed_parents):
+            return jsonify(ok=False, error="Unlock the collection before changing what's nested inside it."), 403
         if incoming_group:
             entry = {**entry, "group": _canonical_group_name(incoming_group, existing_list, _load_groups())}
-        if prior and cid in sealed_group_cids:
+        if prior and cid in protected_cids:
             entry = prior
         elif prior and prior.get("locked") and prior.get("pass_hash"):
             if cid in unlocked:
@@ -2405,11 +2493,11 @@ def api_collections_post() -> Response:
         if coll:
             clean.append(coll)
     reinjected = [c for c in existing_list
-                  if str(c.get("id")) in sealed_group_cids and str(c.get("id")) not in seen_payload_ids]
+                  if str(c.get("id")) in protected_cids and str(c.get("id")) not in seen_payload_ids]
     if len(clean) + len(reinjected) > 1000:
         return jsonify(ok=False, error="Too many collections to preserve hidden group members safely."), 400
     clean.extend(reinjected)
-    _atomic_write_json(COLLECTIONS_FILE, clean)
+    _atomic_write_json(COLLECTIONS_FILE, _normalize_collection_parents(clean))
     return jsonify(ok=True, count=len(clean))
 
 
@@ -2772,6 +2860,10 @@ def api_import_commit() -> Response:
             return jsonify(ok=False, error="Unlock this collection before importing into it."), 403
         if _clean_group_name(target.get("group")).casefold() in {g.casefold() for g in _sealed_group_names()}:
             return jsonify(ok=False, error="Unlock this collection's group before importing into it."), 403
+        # A nested collection under a sealed parent is invisible to the client — refuse it
+        # as an import target the same way a sealed collection itself is refused.
+        if target_id in _sealed_lineage_collection_ids(collections):
+            return jsonify(ok=False, error="Unlock this collection's parent before importing into it."), 403
 
     with _imports_lock:
         records = _imports.pop(import_id, None)
@@ -3712,9 +3804,14 @@ def _auto_candidate_ids(coll_ids: list) -> list[str]:
     so the picker's counts describe exactly the pool a render would use."""
     if coll_ids:
         wanted = {str(c) for c in coll_ids}
+        collections = _load_collections()
+        by_id = {str(c.get("id")): c for c in collections}
+        # A nested collection inherits its parent's privacy: children of a locked
+        # parent never enter a pool either (session-agnostic, like the check below).
         ids, seen = [], set()
-        for coll in _load_collections():
-            if coll["id"] in wanted and not coll.get("locked"):
+        for coll in collections:
+            parent = by_id.get(str(coll.get("parent_id") or ""))
+            if coll["id"] in wanted and not coll.get("locked") and not (parent and parent.get("locked")):
                 for mid in coll["ids"]:
                     if mid not in seen:
                         seen.add(mid)
@@ -3987,8 +4084,11 @@ def api_movie_resolutions() -> Response:
         try:
             omap = db.video_orientation_map(DB_FILE)
             colls: dict = {}
-            for coll in _load_collections():
-                if coll.get("locked"):
+            chip_collections = _load_collections()
+            chip_by_id = {str(c.get("id")): c for c in chip_collections}
+            for coll in chip_collections:
+                parent = chip_by_id.get(str(coll.get("parent_id") or ""))
+                if coll.get("locked") or (parent and parent.get("locked")):
                     continue
                 counts = {"landscape": 0, "portrait": 0, "square": 0}
                 for mid in coll["ids"]:
@@ -5112,6 +5212,17 @@ def _period_range(period: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _all_collected_ids() -> set[str]:
+    """Union of EVERY collection's media ids — nested sub-collections included (they
+    are ordinary records in the same flat list), locked collections too: this set is
+    only ever used to EXCLUDE ("uncollected" filter), so nothing hidden can leak
+    through it, and an item filed only in a vault is still correctly 'collected'."""
+    out: set[str] = set()
+    for coll in _load_collections():
+        out.update(str(i) for i in coll.get("ids", []))
+    return out
+
+
 @app.get("/api/media")
 def api_media() -> Response:
     """Paginated, filtered, full-text-searchable media for the new SPA."""
@@ -5127,6 +5238,11 @@ def api_media() -> Response:
         else:
             collection_ids = ["__grokive_missing_collection__"]
     start, end = _period_range(request.args.get("period", "all"))
+    # "Uncollected" rides the hidden-exclusion path: fold every collection's ids into
+    # the not-in set. Meaningless while scoped to a collection, so ignored there.
+    hidden = _hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None)
+    if request.args.get("uncollected") in ("1", "true") and not collection_id:
+        hidden = hidden | _all_collected_ids()
     result = db.query_media(
         DB_FILE,
         view=request.args.get("view", "recent"),
@@ -5142,7 +5258,7 @@ def api_media() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
+        hidden=hidden,
         start=start,
         end=end,
     )
@@ -5163,6 +5279,10 @@ def api_facets() -> Response:
         else:
             collection_ids = ["__grokive_missing_collection__"]
     start, end = _period_range(request.args.get("period", "all"))
+    # Same "uncollected" fold as /api/media so facet counts match the filtered grid.
+    facet_hidden = _hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None)
+    if request.args.get("uncollected") in ("1", "true") and not collection_id:
+        facet_hidden = facet_hidden | _all_collected_ids()
     return jsonify(db.facets(
         DB_FILE,
         view=request.args.get("view", "recent"),
@@ -5175,7 +5295,7 @@ def api_facets() -> Response:
         favorites=favorites,
         stashed=stashed,
         collection_ids=collection_ids,
-        hidden=_hidden_media_ids(collection_ids if (collection_id and collection_id in _session_unlocked()) else None),
+        hidden=facet_hidden,
         start=start,
         end=end,
     ))

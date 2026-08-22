@@ -106,6 +106,7 @@ export const filters = writable({
   canvas: null,
   mediaType: 'all',
   period: 'all', // all | hour1 | hour4 | hour8 | today | yesterday | last7 | last14 | last30 | month | year
+  uncollected: false, // Archive-view toggle: only items in NO collection or sub-collection
   sort: 'new'
 });
 
@@ -127,6 +128,7 @@ export function setView(view) {
       resolutions: changed ? [] : f.resolutions,
       mediaType: changed ? 'all' : f.mediaType,
       period: changed ? 'all' : f.period,
+      uncollected: changed ? false : f.uncollected,
       canvas: null
     };
   });
@@ -143,7 +145,7 @@ export function searchAllMedia(query) {
   activeCollectionId.set(null);
   filters.update((f) => ({
     ...f, view: 'all', canvas: null, query,
-    tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all'
+    tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all', uncollected: false
   }));
 }
 
@@ -189,14 +191,17 @@ export function setPeriod(period) {
   filters.update((f) => ({ ...f, period }));
 }
 export function clearFilters() {
-  filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
+  filters.update((f) => ({ ...f, query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all', uncollected: false }));
 }
 // Full reset, including the active view -> back to Recent.
 export function resetAll() {
-  filters.update((f) => ({ ...f, view: 'recent', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all' }));
+  filters.update((f) => ({ ...f, view: 'recent', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all', uncollected: false }));
+}
+export function toggleUncollected() {
+  filters.update((f) => ({ ...f, uncollected: !f.uncollected }));
 }
 export function hasActiveFilters(f) {
-  return !!(f.query || f.tags.length || f.models.length || f.resolutions.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.view !== 'recent');
+  return !!(f.query || f.tags.length || f.models.length || f.resolutions.length || f.canvas || f.mediaType !== 'all' || f.period !== 'all' || f.uncollected || f.view !== 'recent');
 }
 
 // --- Library: favorites + archive (stored as stashed for backward compatibility)
@@ -411,6 +416,12 @@ const _chipPos = (v) => {
 };
 export const basketChipPos = writable(_chipPos(LS('ga.basketChipPos', null)));
 basketChipPos.subscribe((v) => persist('ga.basketChipPos', v));
+
+// Same drag-position preference for the Play Queue chip — a sibling store with its
+// own key so each chip remembers its own dropped spot independently. Null = default
+// CSS anchors (which include stacking above the basket chip); see PlayQueueChip.
+export const playQueueChipPos = writable(_chipPos(LS('ga.pqChipPos', null)));
+playQueueChipPos.subscribe((v) => persist('ga.pqChipPos', v));
 
 // Per-card membership mirror — same per-key reactive trick as selectionMembers, so
 // toggling one card only re-renders that card, not every visible cell.
@@ -665,7 +676,10 @@ export function updateCollection(id, patch) {
   persistCollections();
 }
 export function removeCollection(id) {
-  collections.update((c) => c.filter((coll) => coll.id !== id));
+  // Deleting a parent removes its nested sub-collections too (records only — the media
+  // stays in the library, and in any other collections it belongs to). One level deep,
+  // so a direct-children filter is the whole cascade.
+  collections.update((c) => c.filter((coll) => coll.id !== id && coll.parent_id !== id));
   persistCollections();
 }
 export function addToCollection(id, ids) {

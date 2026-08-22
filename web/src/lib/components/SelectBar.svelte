@@ -13,10 +13,11 @@
 
   // montageIds: selected sources eligible for a montage — videos AND still images (queuing
   // an image enters picture-video mode). videoIds stays video-only for Play/Playlist/Export.
-  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, onreorderexport = () => {}, oncollections = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {}, onplayqueue = () => {} } = $props();
+  let { videoIds = [], imageIds = [], montageIds = [], selectableIds = [], collection = null, onplay = () => {}, onreorderexport = () => {}, oncollections = () => {}, onnested = () => {}, onremovefromcollection = () => {}, onmovie = () => {}, onbasket = () => {}, onplayqueue = () => {} } = $props();
   let name = $state('');
   let busy = $state(false);
   let confirmingDelete = $state(false);
+  let confirmingRemove = $state(false); // "Remove from Collection" now confirms too — one stray tap shouldn't unfile a selection
 
   // Both dropdowns are position:fixed so they escape the dock's overflow-x clip —
   // which means they have to be placed by hand. `left: 50%` pinned them to the
@@ -146,7 +147,16 @@
         {#if collection}<span class="btn-word">Move/Add</span>{/if}
       </button>
       {#if collection}
-        <button class="select-btn" onclick={() => onremovefromcollection()} title="Remove from Collection" aria-label="Remove from Collection">
+        <!-- Nested collections are one level deep: the button hides inside a child
+             (collection.parent_id set) so you can't nest a sub-sub-collection. -->
+        {#if !collection.parent_id}
+          <button class="select-btn" onclick={() => onnested()} disabled={!n}
+                  title={`Add to a nested collection inside "${collection.name}"`} aria-label="Add to Nested Collection">
+            <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2a1 1 0 0 0-.8-.4h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></svg>
+            <span class="btn-word">Nest</span>
+          </button>
+        {/if}
+        <button class="select-btn" onclick={() => (confirmingRemove = true)} disabled={!n} title="Remove from Collection" aria-label="Remove from Collection">
           <svg viewBox="0 0 24 24" class="mobile-only-icon h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/><path d="M9 13h6"/></svg>
           <span class="btn-word">Remove</span>
         </button>
@@ -217,6 +227,18 @@
     </div>
   </div>
 </div>
+
+{#if confirmingRemove}
+  <!-- Non-destructive confirm (danger=false): the files stay put, only this collection's
+       membership changes — but an unprompted removal after one stray tap still hurts,
+       especially since the dock's button positions shift as features land. The delete
+       dialog's "Remove from this collection" alt stays direct — it's already a confirm. -->
+  <ConfirmDialog title={`Remove ${n} item${n === 1 ? '' : 's'} from "${collection?.name || 'this collection'}"?`}
+    message="They stay in your library and in any other collections — this only takes them out of this one."
+    confirmLabel="Remove" danger={false}
+    onconfirm={() => { confirmingRemove = false; onremovefromcollection(); }}
+    oncancel={() => (confirmingRemove = false)} />
+{/if}
 
 {#if confirmingDelete}
   <ConfirmDialog title={`Delete ${n} item${n === 1 ? '' : 's'}?`}

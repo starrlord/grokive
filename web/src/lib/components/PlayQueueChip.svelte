@@ -9,7 +9,7 @@
   // (it reads `basket` purely for that layout offset); both relocate to the top on phones.
   import { fly } from 'svelte/transition';
   import {
-    playQueue, basket, basketChipPos, clearPlayQueue, togglePlayQueue, shufflePlayQueue, addPlaylist
+    playQueue, basket, basketChipPos, playQueueChipPos, clearPlayQueue, togglePlayQueue, shufflePlayQueue, addPlaylist
   } from '$lib/state.js';
   import { mediaByIds } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
@@ -22,8 +22,9 @@
   const count = $derived(ids.length);
   // Stack above the Montage basket chip only when it's actually showing AND still in
   // its default slot ($basketChipPos null — the chip is draggable), so an absent or
-  // relocated basket doesn't leave this chip floating over an empty gap.
-  const stacked = $derived($basket.length > 0 && !$basketChipPos);
+  // relocated basket doesn't leave this chip floating over an empty gap. Moot once
+  // THIS chip has been dragged somewhere (its inline position wins anyway).
+  const stacked = $derived($basket.length > 0 && !$basketChipPos && !$playQueueChipPos);
 
   let open = $state(false);
   let items = $state([]);
@@ -67,15 +68,81 @@
   }
 
   function onKey(e) { if (e.key === 'Escape' && open) open = false; }
+
+  // --- Drag-to-move ----------------------------------------------------------
+  // Same machinery as MontageBasketChip: the dropped spot lives in state.js
+  // `playQueueChipPos` as viewport FRACTIONS (0..1 of the space the chip can
+  // occupy) — persisted per-device, so it survives reloads and stays
+  // proportionally placed across resizes/rotation. Null -> the CSS default
+  // anchors (incl. stacking above the basket chip) apply.
+  const pos = $derived($playQueueChipPos);
+  let vw = $state(typeof window === 'undefined' ? 0 : window.innerWidth);
+  let vh = $state(typeof window === 'undefined' ? 0 : window.innerHeight);
+  let chipEl = $state(null);
+  let chipW = $state(0), chipH = $state(0);
+  let dragging = $state(false);
+  let suppressClick = false;
+  let start = null; // pointer + chip origin at pointerdown
+
+  const placed = $derived.by(() => {
+    if (!pos || !vw || !vh || !chipW || !chipH) return null;
+    const x = pos.fx * Math.max(0, vw - chipW);
+    const y = pos.fy * Math.max(0, vh - chipH);
+    return { x, y, right: pos.fx > 0.5, up: pos.fy > 0.5 };
+  });
+  // Anchor the wrap by the chip corner nearest the closest viewport edge so the
+  // panel grows toward open space, and cap the wrap's width so the panel can
+  // never extend past the viewport (it shrinks instead — max-width: 100%).
+  const wrapStyle = $derived.by(() => {
+    if (!placed) return '';
+    const hpos = placed.right
+      ? `left:auto;right:${Math.round(vw - placed.x - chipW)}px;max-width:${Math.round(placed.x + chipW)}px;`
+      : `left:${Math.round(placed.x)}px;right:auto;max-width:${Math.round(vw - placed.x - 12)}px;`;
+    const vpos = placed.up
+      ? `top:auto;bottom:${Math.round(vh - placed.y - chipH)}px;`
+      : `top:${Math.round(placed.y)}px;bottom:auto;`;
+    return hpos + vpos;
+  });
+
+  function dragStart(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const r = chipEl.getBoundingClientRect();
+    start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top };
+    chipEl.setPointerCapture?.(e.pointerId);
+  }
+  function dragMove(e) {
+    if (!start) return;
+    const dx = e.clientX - start.x, dy = e.clientY - start.y;
+    if (!dragging && Math.hypot(dx, dy) < 6) return; // still a tap until it travels
+    dragging = true;
+    const maxX = Math.max(0, vw - chipW), maxY = Math.max(0, vh - chipH);
+    const x = Math.min(Math.max(0, start.left + dx), maxX);
+    const y = Math.min(Math.max(0, start.top + dy), maxY);
+    playQueueChipPos.set({ fx: maxX ? x / maxX : 0, fy: maxY ? y / maxY : 0 });
+  }
+  function dragEnd() {
+    if (dragging) {
+      // A click fires right after pointerup on a drag — it must not toggle the panel.
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 0);
+    }
+    dragging = false;
+    start = null;
+  }
+  function onChipClick() {
+    if (suppressClick) return;
+    open = !open;
+  }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} bind:innerWidth={vw} bind:innerHeight={vh} />
 
 {#if count}
   {#if open}
     <button type="button" class="pq-scrim" aria-label="Close play queue" onclick={() => (open = false)}></button>
   {/if}
-  <div class="pq-wrap" class:open class:stacked transition:fly={{ y: 16, duration: 200 }}>
+  <div class="pq-wrap" class:open class:stacked class:custom={!!placed} class:panel-down={placed && !placed.up} class:anchor-right={!!placed?.right}
+    style={wrapStyle} transition:fly={{ y: 16, duration: 200 }}>
     {#if open}
       <div class="pq-panel" role="dialog" aria-label="Play queue">
         <div class="pq-head">
@@ -132,8 +199,10 @@
       </div>
     {/if}
 
-    <button type="button" class="pq-chip" onclick={() => (open = !open)} aria-expanded={open}
-      title="Play queue — {count} video{count === 1 ? '' : 's'}">
+    <button type="button" bind:this={chipEl} bind:clientWidth={chipW} bind:clientHeight={chipH}
+      class="pq-chip" class:grabbing={dragging} onclick={onChipClick} aria-expanded={open}
+      onpointerdown={dragStart} onpointermove={dragMove} onpointerup={dragEnd} onpointercancel={dragEnd}
+      title="Play queue — {count} video{count === 1 ? '' : 's'} · drag to move">
       <span class="pq-chip-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/><path d="m16 12 5 3-5 3v-6Z"/></svg>
       </span>
@@ -175,7 +244,11 @@
     gap: 0.4rem;
     min-height: 2.5rem;
     padding: 0.4rem 0.85rem 0.4rem 0.55rem;
+    touch-action: none; /* the chip pans itself — without this, touch drags scroll the page */
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .pq-chip.grabbing { cursor: grabbing; }
   .pq-chip:hover,
   .pq-wrap.open .pq-chip { border-color: var(--accent); }
 
@@ -378,4 +451,11 @@
        status-chip slot); otherwise take the basket's slot. */
     .pq-wrap.stacked { top: calc(56px + max(0.5rem, env(safe-area-inset-top)) + 6.5rem); }
   }
+
+  /* User-dragged position: inline left/top/right/bottom out-specificity everything;
+     these two-class rules out-specificity the phone media query's flex flip so the
+     panel opens away from whichever vertical half the chip sits in. */
+  .pq-wrap.custom { flex-direction: column; } /* chip in bottom half -> panel above */
+  .pq-wrap.custom.panel-down { flex-direction: column-reverse; } /* top half -> panel below */
+  .pq-wrap.custom.anchor-right { align-items: flex-end; } /* right half -> panel grows leftward */
 </style>

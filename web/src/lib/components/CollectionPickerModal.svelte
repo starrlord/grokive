@@ -15,7 +15,11 @@
   // Sentinel for the "New group…" dropdown row. Real group names are user-typed trimmed
   // text, so a NUL character can never collide with one.
   const NEW_GROUP = '\u0000';
-  let groupChoice = $state(''); // '' = no group | existing group name | NEW_GROUP
+  let groupChoice = $state(''); // '' = no group | existing group name | NEW_GROUP | NEST_PREFIX+parentId
+  // Prefix sentinel for "Nest inside <collection>" rows: value = NEST_PREFIX + collection id.
+  // Same reasoning as NEW_GROUP — a control char can't appear in a typed group name — and
+  // it survives trim() (U+0001 isn't whitespace), so the last-used memory can store it too.
+  const NEST_PREFIX = String.fromCharCode(1);
   let newGroup = $state('');
   let newGroupInput = $state(null);
   let archiveAfter = $state(true);
@@ -49,7 +53,14 @@
     if (!clean) return '';
     return existingGroups.find((g) => g.toLowerCase() === clean.toLowerCase()) || clean;
   };
+  const byId = $derived(new Map(($collections || []).map((c) => [c.id, c])));
   const displayName = (c) => {
+    // A nested collection reads as "Parent › Child" so it stays findable as an
+    // add-target from anywhere; grouped roots keep their "Group / Name" label.
+    if (c.parent_id) {
+      const parent = byId.get(c.parent_id);
+      if (parent) return `${parent.name} › ${c.name}`;
+    }
     const group = String(c.group || '').trim();
     return group ? `${group} / ${c.name}` : c.name;
   };
@@ -58,6 +69,12 @@
     .filter((c) => !isSealed(c))
     .filter((c) => !currentCollection || c.id !== currentCollection.id)
   );
+  // Root (top-level, unsealed) collections offered as "Nest inside" targets for a NEW
+  // collection — one level deep, so children can't be parents, and a sealed vault can't
+  // be nested into (the server would 403 it anyway). Alphabetical: it's a pick-list.
+  const rootParents = $derived(($collections || [])
+    .filter((c) => !c.parent_id && !isSealed(c))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || '')));
   // Most-recently-touched first (updated_at bumps when items are added/removed or the
   // collection is renamed) — the collection you're actively filling stays at the top,
   // instead of wherever it sits in the stored order. Same comparator as the grid's
@@ -83,9 +100,17 @@
       if (existingGroups.includes(seed)) { groupChoice = seed; newGroup = ''; }
       else { groupChoice = NEW_GROUP; newGroup = seed; }
     } else {
-      const remembered = canonicalGroup(loadLastGroup());
-      groupChoice = existingGroups.includes(remembered) ? remembered : '';
-      newGroup = '';
+      const raw = loadLastGroup();
+      if (raw.startsWith(NEST_PREFIX)) {
+        // Last create was nested — reselect that parent if it's still a valid target;
+        // a deleted/locked/now-nested parent falls back to No group, never a dead option.
+        groupChoice = rootParents.some((c) => c.id === raw.slice(1)) ? raw : '';
+        newGroup = '';
+      } else {
+        const remembered = canonicalGroup(raw);
+        groupChoice = existingGroups.includes(remembered) ? remembered : '';
+        newGroup = '';
+      }
     }
   });
 
@@ -111,12 +136,19 @@
   function create() {
     const clean = name.trim();
     if (!clean || !selected.length) return;
-    const group = groupChoice === NEW_GROUP ? canonicalGroup(newGroup) : groupChoice;
-    saveLastGroup(group); // '' (No group) clears the memory
+    // A "Nest inside" choice makes the new collection a sub-collection of that parent;
+    // group and parent are mutually exclusive by construction (one dropdown, one answer),
+    // matching the server model (children carry no group). A parent deleted since the
+    // modal opened falls back to a plain root collection rather than failing.
+    const parentId = groupChoice.startsWith(NEST_PREFIX) ? groupChoice.slice(1) : '';
+    const parent = parentId ? byId.get(parentId) : null;
+    const group = parent ? '' : (groupChoice === NEW_GROUP ? canonicalGroup(newGroup) : groupChoice);
+    saveLastGroup(parent ? NEST_PREFIX + parent.id : group); // '' (No group) clears the memory
+    const patch = parent ? { parent_id: parent.id } : (group ? { group } : {});
     const move = !!currentCollection && removeAfter;
-    if (move) addCollectionAndRemove(clean, selected, group ? { group } : {}, currentCollection.id);
-    else addCollection(clean, selected, group ? { group } : {});
-    finish(group ? `${group} / ${clean}` : clean, move);
+    if (move) addCollectionAndRemove(clean, selected, patch, currentCollection.id);
+    else addCollection(clean, selected, patch);
+    finish(parent ? `${parent.name} › ${clean}` : (group ? `${group} / ${clean}` : clean), move);
   }
 
   function addExisting(c) {
@@ -159,6 +191,13 @@
                 <option value={group}>{group}</option>
               {/each}
               <option value={NEW_GROUP}>New group…</option>
+              {#if rootParents.length}
+                <optgroup label="Nest inside">
+                  {#each rootParents as p (p.id)}
+                    <option value={NEST_PREFIX + p.id}>{p.name}</option>
+                  {/each}
+                </optgroup>
+              {/if}
             </select>
           {/if}
           <Button class="text-sm" disabled={!name.trim() || !selected.length} onclick={create}>Create</Button>
