@@ -110,7 +110,7 @@
   let msg = $state('');
   let msgClass = $state('');
   let authRequired = $state(false);
-  // The 11-theme gallery lives behind a "Change" disclosure instead of dominating
+  // The 14-theme gallery lives behind a "Change" disclosure instead of dominating
   // the pane — Appearance shows the current theme, the picker opens in-place.
   let pickingTheme = $state(false);
   let pickingAccounts = $state(false);

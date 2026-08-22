@@ -113,6 +113,18 @@
   --chip-line: color-mix(in srgb, var(--line) 72%, var(--accent-2) 28%);
   --chip-ink: color-mix(in srgb, var(--accent-2) 55%, var(--ink) 45%);
   --folder-hover: color-mix(in srgb, var(--surface-solid) 85%, var(--accent-2) 15%);
+  /* Atmosphere + texture hooks — per-theme, all OFF by default so the existing
+     palettes render exactly as before. --atmosphere paints a fixed full-viewport
+     backdrop behind the page (glow blooms / vignette / dot grid — see body::before);
+     --grain is the opacity of a fixed film-grain tile over it (0 = off; 0.03–0.06
+     reads as premium, more reads as dirty). --accent-grad / --cta-shadow dress the
+     PRIMARY call-to-action only (.cta-primary: Button primary, Sync, Sign in) with a
+     gradient fill + luminous ring on themes that opt in; flat --accent elsewhere. */
+  --atmosphere: none;
+  --atmosphere-mask: none;   /* optional fade for the atmosphere layer (e.g. a dot grid that dissolves downward) */
+  --grain: 0;
+  --accent-grad: none;
+  --cta-shadow: none;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -147,6 +159,7 @@
   --line: #243550;
   --accent: #22d3ee;
   --accent-2: #84cc16;
+  --on-accent: #03101f;   /* cyan fills need dark ink (white was ~1.8:1) */
   --overlay: rgb(3 7 18 / 0.72);
   --overlay-strong: rgb(3 7 18 / 0.78);
   --lightbox-bg: rgb(2 6 18 / 0.94);
@@ -306,6 +319,7 @@
   --line: #30333a;
   --accent: #7dd3c7;
   --accent-2: #f3d6a3;
+  --on-accent: #0a0f0e;   /* mint fills need dark ink (white was ~1.75:1) */
   --overlay: rgb(5 6 8 / 0.72);
   --overlay-strong: rgb(5 6 8 / 0.80);
   --lightbox-bg: rgb(4 5 7 / 0.94);
@@ -359,6 +373,7 @@
   --line: #254337;
   --accent: #34d399;
   --accent-2: #c084fc;
+  --on-accent: #04100d;   /* jade fills need dark ink (white was ~1.9:1) */
   --overlay: rgb(2 10 8 / 0.72);
   --overlay-strong: rgb(2 10 8 / 0.80);
   --lightbox-bg: rgb(1 8 6 / 0.94);
@@ -412,6 +427,7 @@
   --line: #41322c;
   --accent: #ff9f7a;
   --accent-2: #76e4f7;
+  --on-accent: #1a0c06;   /* peach fills need dark ink (white was ~2:1) */
   --overlay: rgb(12 7 5 / 0.72);
   --overlay-strong: rgb(12 7 5 / 0.80);
   --lightbox-bg: rgb(9 5 4 / 0.94);
@@ -465,6 +481,7 @@
   --line: #2d3d4f;
   --accent: #a7f3ff;
   --accent-2: #b8f7d4;
+  --on-accent: #061019;   /* pale-cyan fills need dark ink (white was ~1.2:1); matches --info-ink */
   --overlay: rgb(3 7 12 / 0.72);
   --overlay-strong: rgb(3 7 12 / 0.80);
   --lightbox-bg: rgb(2 6 10 / 0.94);
@@ -507,6 +524,477 @@
   --surface-highlight: rgb(167 243 255 / 0.08);
   --spinner-track: rgb(243 251 255 / 0.30);
 }
+/* Nebula Bloom: true-black violet with a magenta nebula bloom — the "AI dashboard"
+   look. Glassy near-black cards, hairline rims, a violet→magenta→pink gradient CTA
+   with a luminous ring, mint-green as the secondary, and a fixed atmosphere of two
+   corner blooms + a faint top light-leak under 4.5% film grain. */
+:root[data-theme="nebula"] {
+  --bg: #0a0612;
+  --surface: rgb(18 11 31 / 0.74);
+  --surface-solid: #120b1f;
+  --surface-2: #1a1130;
+  --ink: #f3eeff;
+  --muted: #a79bc2;
+  --line: #2a2140;
+  --accent: #c44dff;
+  --accent-2: #3ce3a4;
+  --accent-grad: linear-gradient(135deg, #8b5cf6 0%, #c44dff 55%, #ec4899 100%);
+  --cta-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 0 0 1px rgb(196 77 255 / 0.35), 0 8px 24px -8px rgb(236 72 153 / 0.55);
+  --atmosphere:
+    radial-gradient(62vmax 48vmax at 6% -8%, rgb(139 92 246 / 0.30), transparent 62%),
+    radial-gradient(56vmax 46vmax at 102% 108%, rgb(217 70 239 / 0.26), transparent 62%),
+    radial-gradient(120% 60% at 50% -20%, rgb(255 255 255 / 0.03), transparent 60%);
+  --grain: 0.05;
+  --overlay: rgb(6 3 14 / 0.72);
+  --overlay-strong: rgb(6 3 14 / 0.80);
+  --lightbox-bg: rgb(5 2 11 / 0.94);
+  --media-bg: #06030d;
+  --media-placeholder: rgb(20 12 36 / 0.74);
+  --media-badge-bg: rgb(10 5 20 / 0.78);
+  --media-control-bg: rgb(26 17 48 / 0.66);
+  --media-control-bg-hover: rgb(44 28 78 / 0.86);
+  --media-play-bg: rgb(30 19 56 / 0.74);
+  --selection-control-bg: rgb(26 17 48 / 0.64);
+  --media-control-border: rgb(216 180 254 / 0.18);
+  --media-control-border-hover: rgb(196 77 255 / 0.52);
+  --media-scrim: rgb(8 4 18 / 0.88);
+  --media-scrim-strong: rgb(6 3 14 / 0.93);
+  --lightbox-scrim-start: rgb(8 4 18 / 0.70);
+  --lightbox-scrim-mid: rgb(34 20 70 / 0.34);
+  --code-bg: rgb(216 180 254 / 0.10);
+  --input-code-bg: rgb(8 4 18 / 0.44);
+  --favorite: #ff5ca8;
+  --danger: #fb7185;
+  --danger-hover: #e11d48;
+  --danger-ink: #fda4af;
+  --danger-ink-soft: #fecdd3;
+  --danger-bg: rgb(251 113 133 / 0.12);
+  --danger-bg-strong: rgb(251 113 133 / 0.17);
+  --danger-border: rgb(251 113 133 / 0.42);
+  --danger-border-strong: rgb(251 113 133 / 0.56);
+  --success: #34d399;
+  --success-solid: #10a66f;
+  --success-ink: #6ee7b7;
+  --success-bg: rgb(52 211 153 / 0.11);
+  --success-border: rgb(52 211 153 / 0.42);
+  --log-ink: #bbf7d0;
+  --info: #8b5cf6;
+  --info-ink: #ffffff;
+  --shadow: 0 24px 66px rgb(4 2 12 / 0.62);
+  --shadow-dock: 0 22px 58px rgb(4 2 12 / 0.58);
+  --shadow-drawer: 8px 0 46px rgb(4 2 12 / 0.62);
+  --surface-tint: #07040f;
+  --surface-highlight: rgb(255 255 255 / 0.07);
+  --spinner-track: rgb(243 238 255 / 0.30);
+}
+/* Onyx Brass: OLED near-black monochrome with one signature amber-brass accent (dark
+   ink on the fill), an icy-steel secondary, and an instrument-panel texture — a fine
+   dot grid that dissolves downward under a warm top light-leak, plus 3% grain. */
+:root[data-theme="onyx"] {
+  --bg: #080808;
+  --surface: rgb(16 16 17 / 0.78);
+  --surface-solid: #101011;
+  --surface-2: #171718;
+  --ink: #eeebe6;
+  --muted: #8f8b85;
+  --line: #212122;
+  --accent: #ffb224;
+  --accent-2: #9db9ea;
+  --on-accent: #1a1000;
+  --accent-grad: linear-gradient(135deg, #ffc96a 0%, #ffb224 50%, #ff9a3c 100%);
+  --cta-shadow: inset 0 1px 0 rgb(255 255 255 / 0.35), 0 0 0 1px rgb(255 178 36 / 0.32), 0 8px 22px -8px rgb(255 178 36 / 0.45);
+  --atmosphere:
+    radial-gradient(90% 55% at 50% -12%, rgb(255 178 36 / 0.11), transparent 62%),
+    radial-gradient(rgb(255 255 255 / 0.065) 1px, transparent 1.2px) 0 0 / 22px 22px;
+  --atmosphere-mask: linear-gradient(180deg, #000 0%, #000 28%, transparent 78%);
+  --grain: 0.035;
+  --overlay: rgb(0 0 0 / 0.72);
+  --overlay-strong: rgb(0 0 0 / 0.80);
+  --lightbox-bg: rgb(0 0 0 / 0.94);
+  --media-bg: #030303;
+  --media-placeholder: rgb(18 18 18 / 0.74);
+  --media-badge-bg: rgb(6 6 6 / 0.78);
+  --media-control-bg: rgb(22 22 23 / 0.68);
+  --media-control-bg-hover: rgb(36 36 38 / 0.86);
+  --media-play-bg: rgb(24 24 25 / 0.74);
+  --selection-control-bg: rgb(22 22 23 / 0.66);
+  --media-control-border: rgb(255 255 255 / 0.14);
+  --media-control-border-hover: rgb(255 178 36 / 0.50);
+  --media-scrim: rgb(0 0 0 / 0.88);
+  --media-scrim-strong: rgb(0 0 0 / 0.93);
+  --lightbox-scrim-start: rgb(0 0 0 / 0.70);
+  --lightbox-scrim-mid: rgb(24 24 25 / 0.34);
+  --code-bg: rgb(255 178 36 / 0.10);
+  --input-code-bg: rgb(0 0 0 / 0.44);
+  --favorite: #ff6b8a;
+  --danger: #ff6b6b;
+  --danger-hover: #e04848;
+  --danger-ink: #ff9b9b;
+  --danger-ink-soft: #ffcaca;
+  --danger-bg: rgb(255 107 107 / 0.12);
+  --danger-bg-strong: rgb(255 107 107 / 0.17);
+  --danger-border: rgb(255 107 107 / 0.42);
+  --danger-border-strong: rgb(255 107 107 / 0.56);
+  --success: #5ed7a6;
+  --success-solid: #22a874;
+  --success-ink: #9af0cd;
+  --success-bg: rgb(94 215 166 / 0.11);
+  --success-border: rgb(94 215 166 / 0.42);
+  --log-ink: #c9f5e2;
+  --info: #6ea2ff;
+  --info-ink: #07101f;
+  --shadow: 0 24px 66px rgb(0 0 0 / 0.66);
+  --shadow-dock: 0 22px 58px rgb(0 0 0 / 0.60);
+  --shadow-drawer: 8px 0 46px rgb(0 0 0 / 0.66);
+  --surface-tint: #050505;
+  --surface-highlight: rgb(255 255 255 / 0.06);
+  --spinner-track: rgb(238 235 230 / 0.30);
+}
+/* Garnet Velvet: deep wine-black with a raspberry-rose accent and a brass secondary —
+   boutique / velvet-rope mood. Danger shifts orange-red and the favorite heart goes
+   gold so neither is mistaken for the rose accent. Atmosphere: a low rose glow, a
+   brass light-leak top-right, and a soft vignette, under 5% velvet grain. */
+:root[data-theme="garnet"] {
+  --bg: #130a0e;
+  --surface: rgb(28 16 20 / 0.78);
+  --surface-solid: #1c1014;
+  --surface-2: #261519;
+  --ink: #f6ecee;
+  --muted: #b39aa2;
+  --line: #33212a;
+  --accent: #e0527f;
+  --accent-2: #e0b15e;
+  --accent-grad: linear-gradient(135deg, #f0668f 0%, #d9426f 55%, #a8284e 100%);
+  --cta-shadow: inset 0 1px 0 rgb(255 255 255 / 0.22), 0 0 0 1px rgb(224 82 127 / 0.35), 0 8px 22px -8px rgb(224 82 127 / 0.50);
+  --atmosphere:
+    radial-gradient(80vmax 50vmax at 50% 112%, rgb(224 82 127 / 0.17), transparent 60%),
+    radial-gradient(50vmax 40vmax at 100% -10%, rgb(224 177 94 / 0.10), transparent 60%),
+    radial-gradient(120% 100% at 50% 40%, transparent 55%, rgb(0 0 0 / 0.45) 100%);
+  --grain: 0.055;
+  --overlay: rgb(10 4 7 / 0.72);
+  --overlay-strong: rgb(10 4 7 / 0.80);
+  --lightbox-bg: rgb(8 3 5 / 0.94);
+  --media-bg: #090406;
+  --media-placeholder: rgb(30 16 21 / 0.76);
+  --media-badge-bg: rgb(14 6 9 / 0.78);
+  --media-control-bg: rgb(38 21 27 / 0.68);
+  --media-control-bg-hover: rgb(58 31 40 / 0.86);
+  --media-play-bg: rgb(42 23 30 / 0.74);
+  --selection-control-bg: rgb(38 21 27 / 0.66);
+  --media-control-border: rgb(255 190 210 / 0.18);
+  --media-control-border-hover: rgb(224 82 127 / 0.50);
+  --media-scrim: rgb(10 4 7 / 0.88);
+  --media-scrim-strong: rgb(8 3 5 / 0.93);
+  --lightbox-scrim-start: rgb(10 4 7 / 0.70);
+  --lightbox-scrim-mid: rgb(42 23 30 / 0.34);
+  --code-bg: rgb(224 177 94 / 0.10);
+  --input-code-bg: rgb(14 6 9 / 0.44);
+  --favorite: #f2c46d;
+  --danger: #ff7a59;
+  --danger-hover: #e25b3a;
+  --danger-ink: #ffa58c;
+  --danger-ink-soft: #ffd0c2;
+  --danger-bg: rgb(255 122 89 / 0.12);
+  --danger-bg-strong: rgb(255 122 89 / 0.17);
+  --danger-border: rgb(255 122 89 / 0.42);
+  --danger-border-strong: rgb(255 122 89 / 0.56);
+  --success: #7bd3a8;
+  --success-solid: #2f9f6e;
+  --success-ink: #a9ebc9;
+  --success-bg: rgb(123 211 168 / 0.11);
+  --success-border: rgb(123 211 168 / 0.42);
+  --log-ink: #d2f5e3;
+  --info: #e0b15e;
+  --info-ink: #1f1405;
+  --shadow: 0 24px 66px rgb(6 2 4 / 0.64);
+  --shadow-dock: 0 22px 58px rgb(6 2 4 / 0.60);
+  --shadow-drawer: 8px 0 46px rgb(6 2 4 / 0.64);
+  --surface-tint: #0b0508;
+  --surface-highlight: rgb(255 210 220 / 0.07);
+  --spinner-track: rgb(246 236 238 / 0.30);
+}
+/* Baud Phosphor: a powered-up CRT — P1 green phosphor accent, P3 amber sidecar, olive-black
+   tube glass. The ONE theme that is a texture system rather than a glow wash: 3px scanlines,
+   tube vignette, green bloom, a 9px VGA text-cell ghost grid and a burnt-in C:\GROKIVE>_ prompt
+   in the bottom-left, under 4.5% phosphor grain — all behind the page. Chrome wears the era as
+   jewelry (body text stays Inter): the authentic IBM VGA 9×16 bitmap face on the wordmark /
+   boot line / login / lightbox counter, C:\> prompt + blinking block cursor, Turbo Vision
+   double-line frames, ░ scrollbars, Norton-Commander hover bars, BBS ">>" toasts (errors end
+   in "Abort, Retry, Fail?"), an ANSI 16-colour ruler under the top bar, inverse-video
+   selection, keycap buttons that press in, slashed-zero tabular numerals. Dark ink on the
+   phosphor fill (11.5:1); danger stays red (dark ink 5.4:1). Every blink is a single glyph. */
+@font-face {
+  /* "Web437 IBM VGA 9x16" — The Ultimate Oldschool PC Font Pack v2.2 by VileR (int10h.org),
+     CC BY-SA 4.0 (see web/static/fonts/LICENSE-Web437.txt). Fetched lazily: only themes whose
+     rules reference the family ever download it. Used at 16/24px multiples so pixels stay crisp. */
+  font-family: 'Web437 IBM VGA';
+  src: url('/fonts/Web437_IBM_VGA_9x16.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+:root[data-theme="phosphor"] {
+  --bg: #0b0e0a;
+  --surface: rgb(18 24 16 / 0.76);
+  --surface-solid: #121810;
+  --surface-2: #1a2217;
+  --ink: #e3eed8;
+  --muted: #93a688;
+  --line: #243021;
+  --accent: #5ef06a;
+  --accent-2: #ffb020;
+  --on-accent: #07210d;
+  --accent-grad: linear-gradient(180deg, #8dff96 0%, #5ef06a 55%, #3dd650 100%);
+  --cta-shadow: inset 0 1px 0 rgb(255 255 255 / 0.34), 0 0 0 1px rgb(94 240 106 / 0.42), 0 0 18px -2px rgb(94 240 106 / 0.55), 0 8px 22px -10px rgb(94 240 106 / 0.60);
+  /* atmosphere (top layer first): scanlines · burn-in prompt ghost · tube vignette ·
+     green bloom · amber side-monitor leak · 9px VGA text-cell ghost grid */
+  --atmosphere:
+    repeating-linear-gradient(180deg, rgb(0 0 0 / 0.17) 0 1px, transparent 1px 3px),
+    url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='36'%3E%3Ctext x='0' y='27' font-family='Consolas,Menlo,DejaVu Sans Mono,monospace' font-size='24' fill='%235ef06a' fill-opacity='0.075'%3EC:%5CGROKIVE%3E_%3C/text%3E%3C/svg%3E") left 26px bottom 22px / auto no-repeat,
+    radial-gradient(120% 95% at 50% 46%, transparent 54%, rgb(0 0 0 / 0.60) 100%),
+    radial-gradient(85% 50% at 50% -10%, rgb(94 240 106 / 0.13), transparent 62%),
+    radial-gradient(55% 42% at 102% 104%, rgb(255 176 32 / 0.075), transparent 60%),
+    repeating-linear-gradient(90deg, rgb(170 255 160 / 0.022) 0 1px, transparent 1px 9px);
+  --grain: 0.045;
+  --overlay: rgb(2 4 2 / 0.72);
+  --overlay-strong: rgb(2 4 2 / 0.80);
+  --lightbox-bg: rgb(2 4 2 / 0.94);
+  --media-bg: #050705;
+  --media-placeholder: rgb(14 20 12 / 0.72);
+  --media-badge-bg: rgb(6 9 5 / 0.80);
+  --media-control-bg: rgb(14 20 12 / 0.70);
+  --media-control-bg-hover: rgb(28 40 24 / 0.88);
+  --media-play-bg: rgb(10 14 9 / 0.76);
+  --selection-control-bg: rgb(14 20 12 / 0.66);
+  --media-control-border: rgb(200 255 190 / 0.16);
+  --media-control-border-hover: rgb(94 240 106 / 0.55);
+  --media-control-ink: #f2fbe9;
+  --media-control-ink-muted: rgb(242 251 233 / 0.88);
+  --media-scrim: rgb(3 5 3 / 0.86);
+  --media-scrim-strong: rgb(3 5 3 / 0.92);
+  --lightbox-scrim-start: rgb(0 0 0 / 0.70);
+  --lightbox-scrim-mid: rgb(10 14 9 / 0.30);
+  --code-bg: rgb(94 240 106 / 0.10);
+  --input-code-bg: rgb(0 0 0 / 0.46);
+  --favorite: #ff6ad5;
+  --danger: #ff5449;
+  --danger-hover: #f0574b;
+  --danger-ink: #ff8f86;
+  --danger-ink-soft: #ffc0bb;
+  --danger-bg: rgb(255 84 73 / 0.12);
+  --danger-bg-strong: rgb(255 84 73 / 0.18);
+  --danger-border: rgb(255 84 73 / 0.42);
+  --danger-border-strong: rgb(255 84 73 / 0.58);
+  --success: #2ec48a;
+  --success-solid: #1fae72;
+  --success-ink: #7fe7bb;
+  --success-bg: rgb(46 196 138 / 0.11);
+  --success-border: rgb(46 196 138 / 0.42);
+  --log-ink: #bdf5b0;
+  --info: #45d4ea;
+  --info-ink: #04161a;
+  --shadow: 0 22px 60px rgb(0 0 0 / 0.68);
+  --shadow-dock: 0 20px 54px rgb(0 0 0 / 0.62);
+  --shadow-drawer: 8px 0 46px rgb(0 0 0 / 0.68);
+  --surface-tint: #050705;
+  --surface-highlight: rgb(190 255 170 / 0.07);
+  --spinner-track: rgb(227 238 216 / 0.30);
+  /* theme-local helpers */
+  --retro-mono: 'IBM Plex Mono', 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --retro-display: 'Web437 IBM VGA', var(--retro-mono);
+  --retro-glow: 0 0 8px rgb(94 240 106 / 0.45);
+  font-variant-numeric: tabular-nums slashed-zero;   /* terminal numerals everywhere */
+  scrollbar-color: color-mix(in srgb, var(--accent) 45%, var(--line)) var(--bg);
+}
+/* CRT-glass corners, not pills — and they beat Editorial's 18px (double-attribute specificity). */
+:root[data-theme="phosphor"],
+:root[data-theme="phosphor"][data-mode="editorial"] {
+  --radius: 6px;
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 4px;
+  --r-xl: 6px;
+  --r-2xl: 8px;
+}
+/* motion: one compositor-only 9s breathe on the tube + hard-step cursors (real DOS cadence) */
+:root[data-theme="phosphor"] body::before { animation: phosphor-breathe 9s ease-in-out infinite; }
+@keyframes phosphor-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.92; } }
+@keyframes crt-cursor { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="phosphor"] body::before,
+  :root[data-theme="phosphor"] .wordmark::after,
+  :root[data-theme="phosphor"] .status-info .status-dot,
+  :root[data-theme="phosphor"] .crt-cursor { animation: none; }
+}
+/* inverse video */
+:root[data-theme="phosphor"] ::selection { background: var(--accent); color: var(--on-accent); text-shadow: none; }
+/* focus = phosphor halo */
+:root[data-theme="phosphor"] :is(button, a, input, select, textarea, summary, [role="button"]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px rgb(94 240 106 / 0.14), 0 0 16px rgb(94 240 106 / 0.30);
+}
+/* scrollbars: ░ dithered track, square thumb */
+:root[data-theme="phosphor"]::-webkit-scrollbar-track,
+:root[data-theme="phosphor"] ::-webkit-scrollbar-track {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(45deg, rgb(147 166 136 / 0.14) 25%, transparent 25%, transparent 75%, rgb(147 166 136 / 0.14) 75%),
+    linear-gradient(45deg, rgb(147 166 136 / 0.14) 25%, transparent 25%, transparent 75%, rgb(147 166 136 / 0.14) 75%);
+  background-size: 4px 4px;
+  background-position: 0 0, 2px 2px;
+}
+:root[data-theme="phosphor"]::-webkit-scrollbar-thumb,
+:root[data-theme="phosphor"] ::-webkit-scrollbar-thumb {
+  border-radius: 0;
+  background: color-mix(in srgb, var(--accent) 45%, var(--line));
+  border: 2px solid var(--bg);
+}
+:root[data-theme="phosphor"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+/* top bar = the title bar of a TUI window, with an ANSI 16-colour ruler along its bottom edge */
+:root[data-theme="phosphor"] .glass {
+  border-color: color-mix(in srgb, var(--line) 70%, var(--accent) 30%);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 16%, transparent);
+}
+:root[data-theme="phosphor"] header.topbar {
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 28%, transparent), 0 1px 0 rgb(0 0 0 / 0.60);
+}
+:root[data-theme="phosphor"] header.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  pointer-events: none;
+  opacity: 0.55;
+  background: linear-gradient(90deg,
+    #000000 0 6.25%, #0000aa 0 12.5%, #00aa00 0 18.75%, #00aaaa 0 25%, #aa0000 0 31.25%, #aa00aa 0 37.5%, #aa5500 0 43.75%, #aaaaaa 0 50%,
+    #555555 0 56.25%, #5555ff 0 62.5%, #55ff55 0 68.75%, #55ffff 0 75%, #ff5555 0 81.25%, #ff55ff 0 87.5%, #ffff55 0 93.75%, #ffffff 0 100%);
+}
+/* wordmark: C:\>GROKIVE▌ in the VGA bitmap face at its native 16px, blinking block cursor */
+:root[data-theme="phosphor"] .wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  font-family: var(--retro-display);
+  font-weight: 400;
+  font-size: 1rem;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: var(--retro-glow);
+}
+:root[data-theme="phosphor"] .wordmark::before { content: 'C:\\>'; color: var(--muted); text-shadow: none; margin-right: 0.1em; }
+:root[data-theme="phosphor"] .wordmark::after { content: '\258C'; margin-left: 0.12em; animation: crt-cursor 1.06s steps(1, end) infinite; }
+:root[data-theme="phosphor"] .wordmark:hover::after { color: var(--accent-2); }
+@media (max-width: 639px) { :root[data-theme="phosphor"] .wordmark::before { content: none; } }
+/* global search = the command line */
+:root[data-theme="phosphor"] header.topbar input[type=search] {
+  font-family: var(--retro-mono);
+  font-size: 0.875rem;
+  caret-color: var(--accent);
+  border-radius: var(--r-md);
+  background-color: color-mix(in srgb, var(--bg) 70%, var(--surface-2));
+  box-shadow: inset 0 1px 0 rgb(0 0 0 / 0.50);
+}
+:root[data-theme="phosphor"] header.topbar input[type=search]::placeholder { color: color-mix(in srgb, var(--muted) 78%, var(--accent)); }
+:root[data-theme="phosphor"] header.topbar input[type=search]:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+  box-shadow: 0 0 0 3px rgb(94 240 106 / 0.16), 0 0 14px rgb(94 240 106 / 0.25);
+}
+/* status pill → [ ▌ READY ]; the block cursor blinks while a job runs */
+:root[data-theme="phosphor"] .status-btn {
+  border-radius: var(--r-md);
+  font-family: var(--retro-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--bg) 60%, var(--surface-2));
+}
+:root[data-theme="phosphor"] .status-btn::before { content: '['; color: var(--muted); margin-right: -0.15rem; }
+:root[data-theme="phosphor"] .status-btn::after { content: ']'; color: var(--muted); margin-left: -0.15rem; }
+:root[data-theme="phosphor"] .status-dot { border-radius: 1px; width: 0.42rem; height: 0.7rem; }
+:root[data-theme="phosphor"] .status-success .status-dot { box-shadow: 0 0 8px var(--success-solid); }
+:root[data-theme="phosphor"] .status-danger .status-dot { box-shadow: 0 0 8px var(--danger); }
+:root[data-theme="phosphor"] .status-info .status-dot { box-shadow: 0 0 8px var(--info); animation: crt-cursor 1.06s steps(1, end) infinite; }
+/* top-bar buttons = keycaps with a dark bottom edge that press IN (never touches the active accent fill) */
+:root[data-theme="phosphor"] .topbar-action:not(.topbar-action-active),
+:root[data-theme="phosphor"] .topbar-workspace:not(.topbar-workspace-active) {
+  background: color-mix(in srgb, var(--bg) 50%, var(--surface-2));
+  box-shadow: inset 0 1px 0 var(--surface-highlight), inset 0 -2px 0 rgb(0 0 0 / 0.45);
+}
+:root[data-theme="phosphor"] .topbar-action:active,
+:root[data-theme="phosphor"] .topbar-workspace:active,
+:root[data-theme="phosphor"] .status-btn:active { transform: translateY(1px); box-shadow: inset 0 1px 0 rgb(0 0 0 / 0.40); }
+/* panels: Turbo Vision double-line frame; the login card also lights the tube behind it */
+:root[data-theme="phosphor"] .panel {
+  border-color: color-mix(in srgb, var(--line) 60%, var(--accent) 40%);
+  box-shadow: var(--shadow), inset 0 0 0 3px var(--surface-solid), inset 0 0 0 4px color-mix(in srgb, var(--line) 55%, var(--accent) 45%);
+}
+:root[data-theme="phosphor"] form.panel {
+  box-shadow: var(--shadow), inset 0 0 0 3px var(--surface-solid), inset 0 0 0 4px color-mix(in srgb, var(--line) 55%, var(--accent) 45%), 0 0 90px -24px rgb(94 240 106 / 0.40);
+}
+:root[data-theme="phosphor"] form.panel h1 { font-family: var(--retro-display); font-weight: 400; font-size: 1.5rem; letter-spacing: 0; text-transform: uppercase; color: var(--accent); text-shadow: var(--retro-glow); }
+:root[data-theme="phosphor"] form.panel p, :root[data-theme="phosphor"] form.panel label { font-family: var(--retro-mono); }
+:root[data-theme="phosphor"] form.panel input { font-family: var(--retro-mono); caret-color: var(--accent); }
+:root[data-theme="phosphor"] form.panel button[type=submit] { font-family: var(--retro-mono); letter-spacing: 0.12em; text-transform: uppercase; }
+/* toasts: BBS lines  >> message  on an amber rail; errors end in the DOS question */
+:root[data-theme="phosphor"] .toast {
+  border-radius: var(--r-md);
+  font-family: var(--retro-mono);
+  font-weight: 500;
+  font-size: 0.8125rem;
+  background: color-mix(in srgb, var(--bg) 40%, var(--surface-solid));
+  border: 1px solid color-mix(in srgb, var(--line) 50%, var(--accent-2) 50%);
+  border-left: 3px solid var(--accent-2);
+  box-shadow: var(--shadow), 0 0 22px -8px rgb(255 176 32 / 0.45);
+}
+:root[data-theme="phosphor"] .toast::before { content: '>>'; color: var(--accent-2); font-weight: 700; letter-spacing: -0.05em; }
+:root[data-theme="phosphor"] .toast[data-type="error"] { border-color: color-mix(in srgb, var(--line) 50%, var(--danger) 50%); border-left-color: var(--danger); box-shadow: var(--shadow), 0 0 22px -8px rgb(255 84 73 / 0.45); }
+:root[data-theme="phosphor"] .toast[data-type="error"]::before { content: 'ERR'; color: var(--danger-ink); }
+:root[data-theme="phosphor"] .toast[data-type="error"]::after { content: 'Abort, Retry, Fail?'; margin-left: 0.25rem; color: var(--muted); white-space: nowrap; }
+/* sidebar section titles: » TAGS on a ═══ double rule (marker out of flow, layout untouched) */
+:root[data-theme="phosphor"] .collapsible-title {
+  position: relative;
+  padding-left: 0.9rem;
+  font-family: var(--retro-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  border-bottom: 3px double color-mix(in srgb, var(--line) 70%, var(--muted) 30%);
+}
+:root[data-theme="phosphor"] .collapsible-title::before { content: '\BB'; position: absolute; left: 0; color: var(--accent-2); text-shadow: 0 0 6px rgb(255 176 32 / 0.45); }
+:root[data-theme="phosphor"] .collapsible-title[aria-expanded="false"]::before { color: var(--muted); text-shadow: none; }
+/* select dock: Norton Commander function-key bar */
+:root[data-theme="phosphor"] .select-dock {
+  border-radius: var(--r-lg);
+  border-color: color-mix(in srgb, var(--line) 55%, var(--accent) 45%);
+  background: color-mix(in srgb, var(--bg) 55%, var(--surface-solid));
+  box-shadow: var(--shadow-dock), inset 0 1px 0 var(--surface-highlight), 0 0 0 1px rgb(0 0 0 / 0.60), 0 0 28px -10px rgb(94 240 106 / 0.35);
+}
+/* grid tiles: phosphor edge on hover (the NC "current file" bar) */
+:root[data-theme="phosphor"] .card-frame { transition: box-shadow 160ms ease; }
+:root[data-theme="phosphor"] .card-frame:hover,
+:root[data-theme="phosphor"] .card-frame:focus-within { box-shadow: 0 0 0 1px rgb(94 240 106 / 0.55), 0 0 22px -6px rgb(94 240 106 / 0.45); }
+/* primary CTA: halation grows on hover */
+:root[data-theme="phosphor"] .cta-primary:hover { box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.34), 0 0 0 1px rgb(94 240 106 / 0.60), 0 0 26px -2px rgb(94 240 106 / 0.70), 0 8px 22px -10px rgb(94 240 106 / 0.60); }
+/* lightbox counter: [0042/0128] in the VGA face */
+:root[data-theme="phosphor"] .lightbox-counter { font-family: var(--retro-display); font-size: 1rem; letter-spacing: 0; color: var(--accent); text-shadow: var(--retro-glow); border-radius: var(--r-md); }
+/* kbd: Model-M keycaps */
+:root[data-theme="phosphor"] kbd {
+  font-family: var(--retro-mono);
+  border-radius: 2px;
+  border-color: var(--line-bright);
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-solid));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 2px 0 color-mix(in srgb, var(--bg) 40%, var(--line)), 0 0 0 1px rgb(0 0 0 / 0.50);
+}
+/* boot line (+layout, theme-gated): GROKIVE.SYS · 640K OK · loading library ▌ */
+:root[data-theme="phosphor"] .boot-line { font-family: var(--retro-display); font-size: 1rem; color: var(--accent); text-shadow: var(--retro-glow); letter-spacing: 0; }
+:root[data-theme="phosphor"] .crt-cursor { animation: crt-cursor 1.06s steps(1, end) infinite; }
+/* theme picker: every other theme is previewed "through the tube" */
+:root[data-theme="phosphor"] .theme-swatch { position: relative; }
+:root[data-theme="phosphor"] .theme-swatch::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(180deg, rgb(0 0 0 / 0.28) 0 1px, transparent 1px 3px); }
 :root[data-theme="light"] {
   --bg: #f6f5f2;
   --surface: #ffffffcc;
@@ -550,6 +1038,43 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+/* Theme atmosphere: two fixed, click-through layers parked BEHIND the page
+   (z-index -1 in the root stacking context, above the canvas bg). ::before carries
+   the theme's glow/vignette/grid backdrop, ::after a tiled SVG film grain. Static
+   images on their own compositor layer — no repaint on scroll, no backdrop-filter —
+   and .glass chrome (top bar, lightbox controls) blurs them through naturally.
+   Themes that don't opt in paint nothing here (none / opacity 0). */
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+body::before {
+  background: var(--atmosphere);
+  -webkit-mask-image: var(--atmosphere-mask);
+  mask-image: var(--atmosphere-mask);
+}
+body::after {
+  opacity: var(--grain);
+  /* White speckle whose alpha is a contrast-boosted noise channel (alpha = 1.6·R − 0.3):
+     crisp, sparse grain that stays readable on hi-DPI rather than the mushy mid-grey
+     feTurbulence emits by default. baseFrequency 0.65 ≈ 1.5px grains at 1×. */
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1.6 0 0 0 -0.3'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23g)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+/* Primary CTA dressing (see the --accent-grad / --cta-shadow hooks above). Lives in
+   the components layer so a co-located utility (e.g. Login's shadow-lg) still wins. */
+@layer components {
+  .cta-primary {
+    background-image: var(--accent-grad);
+    box-shadow: var(--cta-shadow);
+  }
+}
+/* Branded text selection — accent-tinted, ink stays readable on every palette. */
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; }

@@ -1,5 +1,6 @@
 <script>
   import { login } from '$lib/api.js';
+  import { theme } from '$lib/state.js';
 
   let { onLoggedIn = () => {} } = $props();
   let username = $state('');
@@ -28,7 +29,7 @@
     <div class="mb-6 text-center">
       <div class="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-xl bg-[var(--accent)] text-2xl font-black text-[var(--on-accent)] shadow-lg">◆</div>
       <h1 class="text-xl font-extrabold tracking-tight">Grokive</h1>
-      <p class="mt-1 text-sm text-muted">Sign in to continue</p>
+      <p class="mt-1 text-sm text-muted">{$theme === 'phosphor' ? 'CONNECT 2400 · NODE 1 · login:' : 'Sign in to continue'}</p>
     </div>
 
     <label class="mb-1 block text-xs font-semibold uppercase tracking-wider text-muted" for="ga-user">Username</label>
@@ -42,8 +43,8 @@
     {#if error}<p class="mb-3 text-sm text-[var(--danger-ink)]">{error}</p>{/if}
 
     <button type="submit" disabled={busy}
-      class="w-full rounded-lg bg-[var(--accent)] py-2.5 font-bold text-[var(--on-accent)] shadow-lg transition hover:opacity-90 disabled:opacity-60">
-      {busy ? 'Signing in…' : 'Sign in'}
+      class="cta-primary w-full rounded-lg bg-[var(--accent)] py-2.5 font-bold text-[var(--on-accent)] shadow-lg transition hover:opacity-90 disabled:opacity-60">
+      {busy ? ($theme === 'phosphor' ? 'Connecting…' : 'Signing in…') : ($theme === 'phosphor' ? 'Logon ↵' : 'Sign in')}
     </button>
   </form>
 </div>

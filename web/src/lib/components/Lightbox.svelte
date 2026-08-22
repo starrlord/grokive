@@ -1,5 +1,5 @@
 <script module>
-  import { loadVolume, saveVolume } from '$lib/state.js';
+  import { loadVolume, saveVolume, theme } from '$lib/state.js';
   // Beat-montage preset id -> human label, shown in the info panel for montages.
   const STYLE_LABELS = { classic: 'Classic', cinematic: 'Cinematic', moody: 'Moody', musicvideo: 'Music Video' };
   // One AudioContext shared across all lightbox opens — browsers cap how many you
@@ -547,7 +547,7 @@
          pointer-events-none so it never shadows a tap on the stage below; fades out
          a couple seconds after each clip starts so it clears captions and the frame. -->
     <div class="lightbox-counter glass pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 rounded-full px-3 py-1 text-xs text-muted transition-opacity duration-300 {counterVisible ? 'opacity-100' : 'opacity-0'}" style="bottom: max(0.75rem, env(safe-area-inset-bottom));">
-      {[title, `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
+      {[title, $theme === 'phosphor' ? `[${String(i + 1).padStart(String(liveList.length).length, '0')}/${liveList.length}]` : `${i + 1} / ${liveList.length}`].filter(Boolean).join('  ·  ')}
     </div>
 
     <!-- Slideshow pace control (shown only while a slideshow runs). A −/＋ stepper, not a

@@ -80,7 +80,7 @@ Grokive is a free, self-hosted archiver that keeps your Grok Imagine library ent
 - **Favorites, Archive, and All Media:** ♥ items into Favorites; archive items to hide them from Recent while keeping them available in Archive, All Media, Collections, and Canvases.
 - **Delete:** permanently remove an item (file + thumbnail + subtitles) from a thumbnail, the viewer, or in bulk via select mode. The confirm warns when an item also belongs to collections, and inside a collection offers **Remove from this collection** as the safe alternative to deleting. Deleted IDs are blocklisted in `deleted_ids.json` so future syncs never re-download them.
 - **Backup & Restore:** download a single portable `.zip` of all your *records and config* — the media index/metadata, favorites/archive, collections, playlists, Prompt Studio prompts/scenes/personas, and settings — from **Config → Backup & Restore**, and restore it later on this or another machine. The media files themselves aren't bundled (they're large and re-syncable). Secrets (API keys, Grok session) are excluded by default; tick *Include secrets* for a full machine migration. Restore validates the archive, snapshots your current state to `backups/` first, and rebuilds the index automatically.
-- **Ten themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
+- **Fourteen themes** — Violet (default) plus Obsidian Aurora, Cobalt Mirage, Neon Nocturne, Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Nebula Bloom, Onyx Brass, Garnet Velvet, Baud Phosphor (retro CRT/BBS), Classic, and Light — and **layouts** (Grid, Editorial), switchable in Config.
 - Self-hosted and local-first: core media storage, browsing, sync state, and metadata stay on your own hardware. Optional integrations only call the endpoints you configure, such as Whisper, OpenAI, OpenRouter, or another OpenAI-compatible server.
 
 ## Run As A Docker Container (Unraid / self-hosted)
@@ -282,9 +282,18 @@ Flask API (`/api/media`, `/api/facets`, …). Highlights:
 - **Canvases:** browse canvas cards, drill into a canvas without leaving the Canvases tab, and use Back to return to the canvas grid.
 - **Justified photo grid** with infinite scroll and lazy thumbnails (*Grid* mode), or a
   prompt-forward **Editorial** layout — switch in Config.
-- **Themes:** ten palettes — Violet (default), Obsidian Aurora, Cobalt Mirage, Neon Nocturne,
-  Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Classic, and Light (Config →
-  Appearance), each previewed as a gradient swatch. The ☾/☀ button quick-toggles light.
+- **Themes:** fourteen palettes — Violet (default), Obsidian Aurora, Cobalt Mirage, Neon Nocturne,
+  Graphite Atelier, Rainforest Noir, Ember Glass, Arctic Alloy, Nebula Bloom, Onyx Brass,
+  Garnet Velvet, Baud Phosphor, Classic, and Light (Config → Appearance), each previewed as a
+  gradient swatch. Nebula/Onyx/Garnet add a fixed atmosphere (glow blooms / dot grid / vignette)
+  with film grain and a gradient primary CTA. **Baud Phosphor** is a retro-computing theme — a
+  powered-up CRT (scanlines, tube vignette, phosphor bloom, a burnt-in `C:\GROKIVE>_`) with
+  MS-DOS / BBS nuances: the `C:\>GROKIVE▌` wordmark in the authentic IBM VGA 9×16 face with a
+  blinking cursor, a BIOS boot line, a BBS logon screen, `>>` toasts (errors end in
+  "Abort, Retry, Fail?"), Turbo Vision double-line frames, ░ scrollbars, an ANSI 16-colour ruler,
+  inverse-video selection and `[0042/0128]` lightbox counters. The VGA web font is "Web437 IBM VGA
+  9x16" by VileR / int10h.org (CC BY-SA 4.0, see `web/static/fonts/LICENSE-Web437.txt`). The ☾/☀
+  button quick-toggles light.
 - **Search & filters:** full-text prompt/tag/model search in the top bar; a searchable
   **tag-cloud** modal (*Browse all tags*); media-type, model, resolution, and **time-period**
   filters (last hour … this year, from the Display popover); sort by newest, oldest, largest,

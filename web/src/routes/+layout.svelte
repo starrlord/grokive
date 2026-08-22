@@ -44,7 +44,9 @@
 </script>
 
 {#if !checked}
-  <div class="grid min-h-[100dvh] place-items-center text-sm text-muted">Loading…</div>
+  <div class="grid min-h-[100dvh] place-items-center text-sm text-muted">
+    {#if $theme === 'phosphor'}<span class="boot-line">GROKIVE.SYS · 640K OK · loading library <span class="crt-cursor" aria-hidden="true">▌</span></span>{:else}Loading…{/if}
+  </div>
 {:else if !authed}
   <Login onLoggedIn={() => (authed = true)} />
 {:else}

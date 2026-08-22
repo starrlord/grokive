@@ -17,7 +17,7 @@
   const VARIANTS = {
     // Solid variants carry a transparent border so every variant shares box metrics —
     // without it, bordered and borderless buttons in the same row/stack differ by 2px.
-    primary: 'border border-transparent bg-[var(--accent)] font-bold text-[var(--on-accent)] enabled:hover:brightness-110 enabled:active:brightness-95',
+    primary: 'cta-primary border border-transparent bg-[var(--accent)] font-bold text-[var(--on-accent)] enabled:hover:brightness-110 enabled:active:brightness-95',
     secondary: 'border border-line font-semibold enabled:hover:bg-[var(--surface-2)]',
     danger: 'border border-transparent bg-[var(--danger)] font-bold text-[var(--on-accent)] enabled:hover:bg-[var(--danger-hover)]',
     // Destructive-but-not-shouting: red border + red text, tint on hover — the SelectBar's

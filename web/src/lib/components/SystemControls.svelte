@@ -204,7 +204,7 @@
     <span class="truncate">{logLabel}</span>
   </button>
   <span class="mx-0.5 hidden h-6 w-px self-center bg-line md:block" aria-hidden="true"></span>
-  <button class="rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
+  <button class="cta-primary rounded-lg border border-transparent bg-[var(--accent)] px-3 py-1.5 text-sm font-semibold text-[var(--on-accent)] transition enabled:hover:brightness-110 enabled:active:brightness-95 disabled:opacity-50" onclick={doSync} disabled={status.running}>Sync</button>
   <Popover align="right" ariaLabel="Settings" title="Settings"
     triggerClass="grid h-9 w-9 place-items-center rounded-lg border border-line bg-[var(--surface-2)] text-base transition hover:border-[var(--accent)]">
     {#snippet trigger()}<span aria-hidden="true">⚙</span>{/snippet}

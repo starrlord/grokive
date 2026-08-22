@@ -32,6 +32,10 @@ export const THEMES = [
   { id: 'rainforest', label: 'Rainforest Noir', preview: ['#06100d', '#10201a', '#34d399', '#c084fc'] },
   { id: 'ember', label: 'Ember Glass', preview: ['#100d0c', '#1d1816', '#ff9f7a', '#76e4f7'] },
   { id: 'arctic', label: 'Arctic Alloy', preview: ['#070b10', '#111923', '#a7f3ff', '#b8f7d4'] },
+  { id: 'nebula', label: 'Nebula Bloom', preview: ['#0a0612', '#120b1f', '#c44dff', '#3ce3a4'] },
+  { id: 'onyx', label: 'Onyx Brass', preview: ['#080808', '#101011', '#ffb224', '#9db9ea'] },
+  { id: 'garnet', label: 'Garnet Velvet', preview: ['#130a0e', '#1c1014', '#e0527f', '#e0b15e'] },
+  { id: 'phosphor', label: 'Baud Phosphor', preview: ['#0b0e0a', '#121810', '#5ef06a', '#ffb020'] },
   { id: 'classic', label: 'Classic', preview: ['#0c0d0a', '#161711', '#8b5cf6', '#4bb3a8'] },
   { id: 'light', label: 'Light', preview: ['#f6f5f2', '#ffffff', '#7c3aed', '#4bb3a8'] }
 ];

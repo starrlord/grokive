@@ -90,11 +90,11 @@
   <div class="flex flex-wrap items-center gap-2 sm:gap-3">
     <!-- Mobile/tablet menu: opens the filter drawer; desktop sidebar is always visible. -->
     <button type="button" class="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-line bg-[var(--surface-2)] text-lg lg:hidden" aria-label="Open menu" title="Menu" onclick={onmenu}>☰</button>
-    <button type="button" class="shrink-0 text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show recent media" onclick={resetAll}>Grokive</button>
+    <button type="button" class="wordmark shrink-0 text-lg font-extrabold tracking-tight hover:opacity-80" title="Reset — show recent media" onclick={resetAll}>Grokive</button>
 
     <div class="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1 sm:max-w-[520px]">
       <SearchField bind:value={q} oninput={onInput} onkeydown={onSearchKey} onclear={clearSearch}
-        placeholder="Search prompts, tags, models…" wrapperClass="w-full"
+        placeholder={$theme === 'phosphor' ? '> dir prompts, tags, models /s' : 'Search prompts, tags, models…'} wrapperClass="w-full"
         inputClass="rounded-full border border-line bg-[var(--surface-2)] py-2 pl-4 pr-10 text-sm outline-none placeholder:text-muted" />
     </div>
 

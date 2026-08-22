@@ -17,8 +17,8 @@
      class="pointer-events-none fixed inset-x-0 bottom-0 z-[90] flex flex-col items-center gap-2 px-3 transition-[padding] duration-200"
      style="padding-bottom: {pad}">
   {#each $toasts as t (t.id)}
-    <button type="button" onclick={() => dismiss(t.id)} title="Dismiss"
-      class="panel pointer-events-auto flex max-w-[min(92vw,28rem)] items-center gap-2.5 rounded-full px-4 py-2.5 text-left text-sm font-semibold"
+    <button type="button" onclick={() => dismiss(t.id)} title="Dismiss" data-type={t.type}
+      class="toast panel pointer-events-auto flex max-w-[min(92vw,28rem)] items-center gap-2.5 rounded-full px-4 py-2.5 text-left text-sm font-semibold"
       in:fly={{ y: 24, duration: 200 }} out:fade={{ duration: 150 }}>
       {#if t.type === 'success'}
         <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 text-[var(--success-ink)]" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
