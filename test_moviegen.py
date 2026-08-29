@@ -686,6 +686,97 @@ def test_motion_cache_purge_on_delete():
     print("  motion-cache purge: entry dropped on delete, idempotent, missing-safe OK")
 
 
+def test_long_clip_is_drawn_from_its_whole_length():
+    # A minutes-long clip used to contribute the same second or two over and over:
+    # top_windows() offered only its 3 strongest (clustered) moments for every cut.
+    # candidate_windows() adds a best-window per stratum and the span-reuse penalty
+    # rotates through them, so the long clip's shots come from all over it.
+    import random as _random
+    fps = 8.0
+    rng = _random.Random(3)
+    long_samples = [0.2 + 0.4 * rng.random() for _ in range(int(120 * fps))]
+    long_samples[int(50 * fps)] = 1.0            # one global peak
+    short_samples = [0.2 + 0.4 * rng.random() for _ in range(int(10 * fps))]
+    curves = [_curve_samples("long", 120.0, long_samples, fps),
+              _curve_samples("short", 10.0, short_samples, fps)]
+    beats = [m.Beat(time=i * 0.5, is_downbeat=(i % 4 == 0), energy=0.9, section_id=0)
+             for i in range(128)]
+    grid = m.BeatGrid(duration=64.0, tempo=120.0, beats=beats,
+                      sections=[m.Section(0, 0.0, 64.0, 0.9)])
+    edl = m.plan_cuts(grid, curves, tightness=1.0, target_duration=None)
+    ins = sorted(e.in_point for e in edl.entries if e.clip_id == "long")
+    assert len(ins) >= 20, len(ins)
+    assert ins[-1] - ins[0] >= 0.6 * 120.0, (ins[0], ins[-1])
+    buckets = {int(t // 4.0) for t in ins}
+    assert len(buckets) >= 10, sorted(buckets)
+    # Every candidate window still respects the clip (no out-of-range in_points).
+    assert all(0.0 <= e.in_point and e.out_point <= 120.0 + 1e-6
+               for e in edl.entries if e.clip_id == "long")
+    print(f"  long-clip spread: {len(ins)} shots over {ins[0]:.1f}-{ins[-1]:.1f}s, "
+          f"{len(buckets)} distinct 4s regions OK")
+
+
+def test_candidate_windows_scale_with_clip_length():
+    fps = 8.0
+    short = _curve("s", 15.0, 2.0, fps)
+    long_ = _curve("l", 120.0, 50.0, fps)
+    n_short = len(short.candidate_windows(0.5))
+    n_long = len(long_.candidate_windows(0.5))
+    assert n_short <= m.TOP_WINDOWS_K + 3, n_short           # 15s -> 3 strata
+    assert n_long >= m.TOP_WINDOWS_K + 20, n_long            # 120s -> capped strata
+    # Strongest windows still lead the list (test_peak_alignment relies on it).
+    assert long_.candidate_windows(0.5)[0] == long_.top_windows(0.5, 1)[0]
+    # Stratified starts are spread across the clip, not clustered at the peak.
+    starts = sorted(w[2] for w in long_.candidate_windows(0.5))
+    assert starts[0] < 10.0 and starts[-1] > 100.0, (starts[0], starts[-1])
+    print(f"  candidate windows: 15s clip -> {n_short}, 120s clip -> {n_long} OK")
+
+
+def test_robust_norm_is_percentile_based():
+    raw = [1.0] * 200 + [100.0]                     # one outlier spike
+    peak = m._curve_from_raw("p", m.Path("/tmp/p.mp4"), raw, 25.125, 0.0)
+    robust = m._curve_from_raw("r", m.Path("/tmp/r.mp4"), raw, 25.125, 0.0,
+                               robust_norm=True)
+    assert abs(sorted(peak.samples)[100] - 0.01) < 1e-9       # squashed by the spike
+    assert abs(sorted(robust.samples)[100] - 1.0) < 1e-9      # p99 of the body = 1.0
+    assert max(robust.samples) == 1.0                         # spike clamped
+    # Default path is byte-identical to before (classic + autopick rely on it).
+    assert max(peak.samples) == 1.0 and peak.samples == [s / 100.0 for s in raw]
+    assert all(m.PRESETS[p].get("robust_norm") for p in ("cinematic", "moody",
+                                                        "musicvideo", "picvideo"))
+    assert not m.PRESETS["classic"].get("robust_norm")
+    print("  robust_norm: p99-normalized, spike clamped, classic untouched OK")
+
+
+def test_footage_share_scales_screen_time_with_clip_length():
+    # Count-based overuse gives a 120s clip and a 10s clip the same shot budget; the
+    # footage-weighted share (enhanced presets) sizes the budget by length, so the
+    # long clip earns most of the timeline instead of an even split.
+    import random as _random
+    fps = 8.0
+    rng = _random.Random(11)
+    long_c = _curve_samples("long", 120.0, [0.3 + 0.4 * rng.random() for _ in range(int(120 * fps))], fps)
+    short_c = _curve_samples("short", 10.0, [0.3 + 0.4 * rng.random() for _ in range(int(10 * fps))], fps)
+    beats = [m.Beat(time=i * 0.5, is_downbeat=(i % 4 == 0), energy=0.9, section_id=0)
+             for i in range(160)]
+    grid = m.BeatGrid(duration=80.0, tempo=120.0, beats=beats,
+                      sections=[m.Section(0, 0.0, 80.0, 0.9)])
+
+    def long_share(**kw) -> float:
+        edl = m.plan_cuts(grid, [long_c, short_c], tightness=1.0, target_duration=None,
+                          overuse_w=1.0, overuse_p=2.0, **kw)
+        return sum(e.duration for e in edl.entries if e.clip_id == "long") / edl.timeline_duration
+
+    even = long_share()
+    weighted = long_share(footage_share=True)
+    assert weighted > even + 0.1, (even, weighted)
+    assert weighted >= 0.6, weighted
+    assert all(m.PRESETS[p].get("footage_share") for p in ("cinematic", "moody",
+                                                          "musicvideo", "picvideo"))
+    assert not m.PRESETS["classic"].get("footage_share")
+    print(f"  footage share: long clip {even:.0%} of timeline (even) -> {weighted:.0%} (weighted) OK")
+
+
 if __name__ == "__main__":
     print("cut planner golden tests")
     test_tiling_invariant()
@@ -720,4 +811,8 @@ if __name__ == "__main__":
     test_beat_cache_prune_lru()
     test_motion_diff_cache_roundtrip_no_decode()
     test_motion_cache_purge_on_delete()
+    test_long_clip_is_drawn_from_its_whole_length()
+    test_candidate_windows_scale_with_clip_length()
+    test_robust_norm_is_percentile_based()
+    test_footage_share_scales_screen_time_with_clip_length()
     print("all passed")

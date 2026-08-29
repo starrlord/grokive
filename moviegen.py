@@ -82,6 +82,28 @@ RECENT_K = 2              # don't reuse a clip within this many cuts
 ENERGY_SMOOTH = 5         # beats; smooths per-beat energy so a build reads as a ramp
 TOP_WINDOWS_K = 3         # candidate motion windows per clip to choose among
 TOP_CANDIDATES_K = 3      # top-scoring clips to choose among when exploring
+# Long-clip coverage. top_windows() alone offers a clip's few strongest moments for
+# EVERY cut — on a minutes-long clip those all sit around one global peak, so the
+# montage replayed the same second or two of it over and over (a 146s clip: 20 shots
+# from 3.5s of footage). Two levers: (1) candidate windows are ALSO drawn per
+# WINDOW_STRATUM_S stratum of the clip (best window in each, capped), so a long clip
+# offers moments from its whole length; (2) footage a clip already contributed is
+# penalized on reuse (overlap with its used spans, padded so an adjacent window
+# reads as the same moment) — which makes the planner rotate through them.
+WINDOW_STRATUM_S = 4.0    # one stratified candidate window per this many seconds of clip
+WINDOW_STRATA_MAX = 24    # cap on stratified candidates per clip (bounds planner cost)
+SPAN_REUSE_PAD_S = 0.75   # a candidate this close to used footage counts as the same moment
+W_SPAN_REUSE = 0.7        # penalty at full overlap with used footage (~W_RECENT)
+# robust_norm presets normalize a clip's motion curve by this percentile instead of
+# its single max frame-diff: a long clip has more chances to contain one outlier
+# spike, and peak-normalizing to it made all its real motion read as weak (mean 0.20
+# vs 0.60 for a 15s clip), starving it of loud passages. Clamped to 1.0 above.
+NORM_PERCENTILE = 0.99
+# footage_share presets measure a clip's "overuse" as timeline seconds it has filled
+# vs. a budget proportional to its LENGTH (timeline x duration / total footage),
+# instead of shot count vs. an equal split. A 146s clip alongside 15s clips then gets
+# ~10x their budget, so it keeps winning slots — held ones included — long after the
+# short clips have spent their share. Off (count-based) for classic.
 
 # Overall-progress weighting so the bar doesn't stall on the slow stage.
 STAGE_WEIGHTS = {"analyzing_audio": 0.10, "analyzing_motion": 0.45,
@@ -114,6 +136,10 @@ AUTOPICK_STAGE_ORDER = ["analyzing_audio", "selecting", "analyzing_motion",
 #                 (scale-to-fill + centre-crop so the frame is edge-to-edge, no bars)
 #   push_in       slow centred Ken-Burns zoom across long held shots (fraction; 0 = off)
 #   punch         centred zoom hit on drop beats, easing back to 1.0 (fraction; 0 = off)
+#   robust_norm   normalize motion curves by NORM_PERCENTILE rather than the peak
+#                 frame (fairer to long / real-camera clips; classic keeps peak-norm)
+#   footage_share overuse budget proportional to clip length, not an equal split
+#                 (a long clip earns proportionally more screen time; classic: off)
 #
 # How a good beat montage is actually built (cf. the `mugen` generator + editing
 # craft): the *cuts* carry it — hold through builds, burst on the drop — and
@@ -135,7 +161,8 @@ PRESETS: dict[str, dict] = {
                   # Squaring the ratio and raising the weight keeps reuse mild up to a clip's
                   # fair share, then steep past it — forcing the planner to spread across the
                   # whole library. See overuse_p in plan_cuts.
-                  "overuse_w": 1.0, "overuse_p": 2.0,
+                  "overuse_w": 1.0, "overuse_p": 2.0, "robust_norm": True,
+                  "footage_share": True,
                   # Reserve the most-cinematic clip for the strongest drop, and ramp the
                   # held shots leading into it down to 0.35x (tension -> release). Classic/
                   # moody never set these keys, so they + the golden tests are byte-for-byte
@@ -143,7 +170,8 @@ PRESETS: dict[str, dict] = {
                   "hero_shot": True, "breakdown_slowmo": 0.35},
     "moody":     {"enhanced_analysis": True,  "rhythm": "phrase",  "motion_weight": 0.0,
                   "transitions": "accents", "fill": "fit",   "push_in": 0.12, "punch": 0.0,
-                  "overuse_w": W_OVERUSE, "overuse_p": 1.0},
+                  "overuse_w": W_OVERUSE, "overuse_p": 1.0, "robust_norm": True,
+                  "footage_share": True},
     # "musicvideo" (UI: "Music Video") — the high-energy PMV/velocity-edit style:
     # cinematic's cover-framed, motion-favouring, library-spreading base PLUS sub-beat
     # "machine-gun" cutting (onset-driven flurries in loud passages, see machine_gun in
@@ -153,7 +181,8 @@ PRESETS: dict[str, dict] = {
                    "transitions": "accents", "fill": "cover", "push_in": 0.06, "punch": 0.22,
                    "overuse_w": 1.0, "overuse_p": 2.0, "scene_aware": True,
                    "machine_gun": True, "grade": "neon", "flash": 0.05,
-                   "rgb_split": 0.006, "shake": 0.04,
+                   "rgb_split": 0.006, "shake": 0.04, "robust_norm": True,
+                   "footage_share": True,
                    # The PMV slow-mo-into-the-drop + hero slam, same ramp as cinematic.
                    # Only fires when the song has a quiet held pocket before the drop —
                    # the machine-gunned loud sections have no slowable held shots, so on a
@@ -172,7 +201,8 @@ PRESETS: dict[str, dict] = {
                   "transitions": "accents", "fill": "cover", "push_in": 0.06, "punch": 0.22,
                   "overuse_w": 1.0, "overuse_p": 2.0, "scene_aware": True,
                   "machine_gun": True, "grade": "neon", "flash": 0.05,
-                  "rgb_split": 0.006, "shake": 0.04,
+                  "rgb_split": 0.006, "shake": 0.04, "robust_norm": True,
+                  "footage_share": True,
                   "hero_shot": True, "breakdown_slowmo": 0.35,
                   "allow_stills": True},
 }
@@ -475,6 +505,37 @@ class MotionCurve:
             if len(chosen) >= k:
                 break
         return [(mean, self._peak_time(i, i + n), i / fps) for mean, i in chosen]
+
+    def candidate_windows(self, length: float) -> list[tuple[float, float, float]]:
+        """The planner's candidate set for a ``length``-second shot: ``top_windows``
+        (the strongest moments always lead) PLUS the best window inside each
+        WINDOW_STRATUM_S stratum of the clip, so a long clip offers moments from
+        its whole length rather than only the cluster around its global peak.
+        Same (mean_motion, peak_time, window_start) tuples; duplicates dropped."""
+        wins = self.top_windows(length, TOP_WINDOWS_K)
+        fps = self.fps_analyzed
+        n = max(1, round(length * fps))
+        total = len(self.samples)
+        if fps <= 0 or total <= n:
+            return wins
+        k = int(_clamp(self.duration // WINDOW_STRATUM_S, 1, WINDOW_STRATA_MAX))
+        if k <= 1:
+            return wins
+        seen = {round(w[2] * fps) for w in wins}
+        last = total - n
+        for s in range(k):
+            lo = min(last, (total * s) // k)
+            hi = min(last, (total * (s + 1)) // k - 1)
+            if hi < lo:
+                continue
+            best_i = max(range(lo, hi + 1),
+                         key=lambda i: self._prefix[i + n] - self._prefix[i])
+            if best_i in seen:
+                continue
+            seen.add(best_i)
+            mean = (self._prefix[best_i + n] - self._prefix[best_i]) / n
+            wins.append((mean, self._peak_time(best_i, best_i + n), best_i / fps))
+        return wins
 
     def _peak_time(self, lo: int, hi: int) -> float:
         if not self.samples:
@@ -1156,14 +1217,19 @@ def detect_head_trim(src: Path, *, hwaccel_decode: bool = False) -> float:
 
 
 def _curve_from_raw(clip_id: str, src: Path, raw: list[float],
-                    duration: float, head: float) -> MotionCurve:
+                    duration: float, head: float, *,
+                    robust_norm: bool = False) -> MotionCurve:
     """Head-trim + peak-normalize RAW diffs into a MotionCurve — the pure-math
     tail of ``analyze_motion``, split out so cached raw diffs (see the motion-diff
     cache below) and a fresh decode produce bit-identical curves. Auto-pick uses
     it too, so its features come from exactly the pipeline's own processing.
     ``head`` is detect_head_trim's verdict for the clip (cached alongside the
     diffs): the card's samples are dropped so the curve, its windows/scene cuts,
-    and normalization all live in trimmed clip time."""
+    and normalization all live in trimmed clip time.
+
+    ``robust_norm`` divides by the NORM_PERCENTILE diff (clamping to 1.0) instead
+    of the single max frame — see the tunable. Default off: classic (and Auto
+    Montage's features, which must match the cached curves) keep peak-norm."""
     samples = list(raw)
     if head > 0 and duration - head >= HEAD_MIN_REMAIN_S:
         samples = samples[round(head * ANALYSIS_FPS):]
@@ -1171,7 +1237,12 @@ def _curve_from_raw(clip_id: str, src: Path, raw: list[float],
     else:
         head = 0.0
     peak = max(samples) if samples else 0.0
-    if peak > 0:
+    if robust_norm and peak > 0:
+        ordered = sorted(samples)
+        ref = ordered[min(len(ordered) - 1, int(NORM_PERCENTILE * len(ordered)))]
+        peak = ref if ref > 0 else peak
+        samples = [min(1.0, s / peak) for s in samples]
+    elif peak > 0:
         samples = [s / peak for s in samples]
     return MotionCurve(clip_id=clip_id, src_path=str(src), duration=duration,
                        fps_analyzed=float(ANALYSIS_FPS), samples=samples,
@@ -1179,7 +1250,8 @@ def _curve_from_raw(clip_id: str, src: Path, raw: list[float],
 
 
 def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool,
-                   cache_dir: Path | None = None) -> MotionCurve:
+                   cache_dir: Path | None = None, *,
+                   robust_norm: bool = False) -> MotionCurve:
     """Per-frame motion curve via CPU frame-differencing.
 
     Decodes the clip to a downscaled grayscale raw-video stream at ANALYSIS_FPS,
@@ -1193,7 +1265,9 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool,
 
     ``cache_dir`` (the shared motion_cache) short-circuits the decode with the
     clip's cached RAW diffs and head trim; normalization always re-runs on top,
-    so a hit is bit-identical to a fresh analysis."""
+    so a hit is bit-identical to a fresh analysis. ``robust_norm`` is the
+    preset's normalization choice (see _curve_from_raw) — the cache stores RAW
+    diffs, so both flavours share one entry."""
     raw = duration = head = None
     if cache_dir is not None:
         hit = _load_motion_diffs(src, cache_dir)
@@ -1205,7 +1279,7 @@ def analyze_motion(clip_id: str, src: Path, hwaccel_decode: bool,
         head = detect_head_trim(src, hwaccel_decode=hwaccel_decode)
         if cache_dir is not None:
             _save_motion_diffs(src, cache_dir, raw, duration, head)
-    return _curve_from_raw(clip_id, src, raw, duration, head)
+    return _curve_from_raw(clip_id, src, raw, duration, head, robust_norm=robust_norm)
 
 
 # --------------------------------------------------------------------------- #
@@ -1669,6 +1743,19 @@ def _accent_times(grid: BeatGrid, T: float) -> list[tuple[float, bool]]:
     return kept
 
 
+def _span_reuse(spans: list[tuple[float, float]], start: float, length: float) -> float:
+    """Fraction (0..1) of a candidate window — padded SPAN_REUSE_PAD_S each side,
+    so a window butting up against used footage still reads as the same moment —
+    already covered by spans this clip contributed. Scaled by W_SPAN_REUSE."""
+    if not spans:
+        return 0.0
+    a, b = start - SPAN_REUSE_PAD_S, start + length + SPAN_REUSE_PAD_S
+    covered = 0.0
+    for u0, u1 in spans:
+        covered += max(0.0, min(b, u1) - max(a, u0))
+    return min(1.0, covered / max(b - a, 1e-6))
+
+
 def _hero_clip(curves: list[MotionCurve], length: float) -> str | None:
     """The single most cinematic clip to reserve for the drop: the one whose best
     motion window (over a ``length``-second span) has the highest mean motion.
@@ -1891,7 +1978,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
               machine_gun: bool = False, scene_aware: bool = False,
               overuse_w: float = W_OVERUSE, overuse_p: float = 1.0,
               forced_speech: list[SpeechMoment] | None = None,
-              hero_shot: bool = False, breakdown_slowmo: float = 0.0) -> EDL:
+              hero_shot: bool = False, breakdown_slowmo: float = 0.0,
+              footage_share: bool = False) -> EDL:
     """Turn a beat grid + motion curves into an ordered cut list.
 
     ``rhythm="density"`` (default): cut density tracks the song's *local* energy
@@ -1903,7 +1991,13 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     Each interval is filled by a clip whose actual rendered window scores highest:
     motion (scaled by ``motion_weight`` — set 0 to let the song's local energy
     pick calm shots in calm passages), a match between the clip's energy and the
-    song's local energy, beat-alignment of the motion peak, minus recency/overuse.
+    song's local energy, beat-alignment of the motion peak, minus recency/overuse,
+    minus a penalty for re-cutting footage that clip already contributed (its
+    candidates come from ``MotionCurve.candidate_windows``, so a long clip is
+    drawn from its whole length rather than one moment — see WINDOW_STRATUM_S).
+    ``footage_share`` sizes each clip's overuse budget by its length instead of
+    an equal split (see the tunable block), so a long clip earns proportionally
+    more of the timeline; off, overuse is shot count vs. an equal share.
 
     ``seed`` enables exploration: instead of always taking the single best clip
     and window, it samples among the top few (weighted by score), so successive
@@ -2032,9 +2126,16 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
     entries: list[EDLEntry] = []
     recent: list[str] = []
     use_count: dict[str, int] = {c.clip_id: 0 for c in curves}
+    used_spans: dict[str, list[tuple[float, float]]] = {c.clip_id: [] for c in curves}
     head_by_id = {c.clip_id: c.head_offset for c in curves}
     n_intervals = max(1, len(boundaries) - 1)
     max_uses = max(1, -(-n_intervals // len(curves)))  # ceil
+    # footage_share: budget in timeline seconds, proportional to clip length.
+    timeline_total = max(1e-6, boundaries[-1] - boundaries[0])
+    total_footage = max(1e-6, sum(c.duration for c in curves))
+    share_budget = {c.clip_id: max(1e-6, timeline_total * c.duration / total_footage)
+                    for c in curves}
+    used_secs: dict[str, float] = {c.clip_id: 0.0 for c in curves}
 
     # Cinematic-only (gated, default-off, density rhythm). Anchor BOTH features to the
     # single strongest drop: reserve the most-cinematic clip for the drop interval, and
@@ -2075,6 +2176,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
             recent.append(cid)
             if cid in use_count:
                 use_count[cid] += 1
+                used_secs[cid] += d
+                used_spans[cid].append((fm.in_point, fm.in_point + d))
             continue
         e_local = energy_at(b0)
         anchors = beat_anchors(b0, b1)
@@ -2090,10 +2193,13 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
             # overuse_p == 1.0 this is exactly the original soft penalty (classic/moody,
             # byte-for-byte unchanged); cinematic raises both for real coverage.
             recent_pen = W_RECENT if c.clip_id in recent[-RECENT_K:] else 0.0
-            overuse_ratio = use_count[c.clip_id] / max_uses
+            if footage_share:
+                overuse_ratio = used_secs[c.clip_id] / share_budget[c.clip_id]
+            else:
+                overuse_ratio = use_count[c.clip_id] / max_uses
             overuse_pen = overuse_w * (overuse_ratio ** overuse_p
                                        if overuse_p != 1.0 else overuse_ratio)
-            for _, peak, window_start in c.top_windows(d, TOP_WINDOWS_K):
+            for _, peak, window_start in c.candidate_windows(d):
                 for anchor_offset, anchor_bonus in anchors:
                     desired = peak - anchor_offset
                     in_point = _clamp(desired, 0.0, max(0.0, c.duration - d))
@@ -2107,7 +2213,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
                              + anchor_bonus
                              - W_WINDOW_FIT * window_fit
                              - recent_pen
-                             - overuse_pen)
+                             - overuse_pen
+                             - W_SPAN_REUSE * _span_reuse(used_spans[c.clip_id], in_point, d))
                     if scene_aware:
                         # mugen-style rejection: avoid dead footage and shots that
                         # cut across a hidden internal scene change.
@@ -2148,6 +2255,8 @@ def plan_cuts(grid: BeatGrid, curves: list[MotionCurve], *,
         ))
         recent.append(c.clip_id)
         use_count[c.clip_id] += 1
+        used_secs[c.clip_id] += d
+        used_spans[c.clip_id].append((in_point, in_point + d))
 
     if transitions == "accents":
         _assign_accent_transitions(grid, curves, entries, explore, rng)
@@ -2758,6 +2867,7 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
     fill = cfg.get("fill", "fit")
     push_in = float(cfg.get("push_in", 0.0))
     punch = float(cfg.get("punch", 0.0))
+    robust_norm = bool(cfg.get("robust_norm", False))
     machine_gun = bool(cfg.get("machine_gun", False))
     scene_aware = bool(cfg.get("scene_aware", False))
     grade = GRADES.get(cfg.get("grade") or "", "")
@@ -2888,7 +2998,7 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
                     curve = _still_curve(str(idx), Path(src))
                 else:
                     curve = analyze_motion(str(idx), Path(src), hwaccel_decode,
-                                           cache_dir=cache_dir)
+                                           cache_dir=cache_dir, robust_norm=robust_norm)
                 if curve.duration > 0 and curve.samples:
                     results[idx] = curve
             except Exception:
@@ -2959,7 +3069,8 @@ def generate(*, video_paths: list[Path], song_path: Path | None, options: dict,
                         overuse_p=float(cfg.get("overuse_p", 1.0)),
                         forced_speech=forced_speech,
                         hero_shot=bool(cfg.get("hero_shot", False)),
-                        breakdown_slowmo=float(cfg.get("breakdown_slowmo", 0.0)))
+                        breakdown_slowmo=float(cfg.get("breakdown_slowmo", 0.0)),
+                        footage_share=bool(cfg.get("footage_share", False)))
     # Match Cut with NO song: the clips' own audio becomes the soundtrack. With a song
     # the music is the track instead (mixing both is a future call).
     keep_audio = (mode == "matchcut" and song_path is None
