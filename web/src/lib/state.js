@@ -622,6 +622,16 @@ export async function loadCollections() {
 function persistCollections() {
   collectionsSaved = saveCollections(get(collections));
 }
+// A change inside a nested sub-collection is a change to its parent too: stamp the
+// parent's updated_at alongside the child's, so "Recently updated" (the landing lists
+// only roots) and every other most-recent-first list reflect it. `ids` are the
+// collections just modified; one level of nesting, so no recursion.
+function touchParents(list, ids, stamp) {
+  const touched = new Set((ids || []).filter(Boolean));
+  const parents = new Set(list.filter((c) => touched.has(c.id) && c.parent_id).map((c) => c.parent_id));
+  if (!parents.size) return list;
+  return list.map((c) => (parents.has(c.id) && !touched.has(c.id) ? { ...c, updated_at: stamp } : c));
+}
 function uniqueIds(ids) {
   const seen = new Set();
   const out = [];
@@ -645,7 +655,7 @@ export function addCollection(name, ids = [], patch = {}) {
     updated_at: created,
     ...patch
   };
-  collections.update((c) => [coll, ...c]);
+  collections.update((c) => touchParents([coll, ...c], [coll.id], created));
   persistCollections();
   return coll.id;
 }
@@ -662,21 +672,22 @@ export function addCollectionAndRemove(name, ids = [], patch = {}, sourceId = ''
     updated_at: created,
     ...patch
   };
-  collections.update((c) => [
+  collections.update((c) => touchParents([
     coll,
     ...c.map((existing) => {
       if (!sourceId || existing.id !== sourceId) return existing;
       const next = (existing.ids || []).filter((mid) => !remove.has(String(mid)));
       return { ...existing, ids: next, cover_id: remove.has(String(existing.cover_id)) ? (next[0] || '') : existing.cover_id, updated_at: today() };
     })
-  ]);
+  ], [coll.id, sourceId], created));
   persistCollections();
   return coll.id;
 }
 export function updateCollection(id, patch) {
-  collections.update((c) => c.map((coll) => (
-    coll.id === id ? { ...coll, ...patch, updated_at: today() } : coll
-  )));
+  const stamp = today();
+  collections.update((c) => touchParents(c.map((coll) => (
+    coll.id === id ? { ...coll, ...patch, updated_at: stamp } : coll
+  )), [id], stamp));
   persistCollections();
 }
 export function removeCollection(id) {
@@ -689,37 +700,40 @@ export function removeCollection(id) {
 export function addToCollection(id, ids) {
   const incoming = uniqueIds(ids);
   if (!incoming.length) return;
-  collections.update((c) => c.map((coll) => {
+  const stamp = today();
+  collections.update((c) => touchParents(c.map((coll) => {
     if (coll.id !== id) return coll;
     const next = uniqueIds([...(coll.ids || []), ...incoming]);
-    return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: today() };
-  }));
+    return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: stamp };
+  }), [id], stamp));
   persistCollections();
 }
 export function addToCollectionAndRemove(id, ids, sourceId = '') {
   const incoming = uniqueIds(ids);
   if (!incoming.length) return;
   const remove = new Set(incoming.map(String));
-  collections.update((c) => c.map((coll) => {
+  const stamp = today();
+  collections.update((c) => touchParents(c.map((coll) => {
     if (coll.id === id) {
       const next = uniqueIds([...(coll.ids || []), ...incoming]);
-      return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: today() };
+      return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: stamp };
     }
     if (sourceId && coll.id === sourceId) {
       const next = (coll.ids || []).filter((mid) => !remove.has(String(mid)));
-      return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: today() };
+      return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: stamp };
     }
     return coll;
-  }));
+  }), [id, sourceId], stamp));
   persistCollections();
 }
 export function removeFromCollection(id, ids) {
   const remove = new Set((ids || []).map(String));
-  collections.update((c) => c.map((coll) => {
+  const stamp = today();
+  collections.update((c) => touchParents(c.map((coll) => {
     if (coll.id !== id) return coll;
     const next = (coll.ids || []).filter((mid) => !remove.has(String(mid)));
-    return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: today() };
-  }));
+    return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: stamp };
+  }), [id], stamp));
   persistCollections();
 }
 export function setCollectionCover(id, mediaId) {

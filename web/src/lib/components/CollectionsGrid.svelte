@@ -66,8 +66,26 @@
   const mediaCount = (c) => c.item_count ?? c.ids?.length ?? 0;
   const collectionsList = $derived($collections || []);
   const collectionGroupList = $derived($collectionGroups || []);
+  // A parent's "last updated" is the newest of itself and its nested sub-collections —
+  // the landing shows only roots, so without this roll-up adding clips to a sub-folder
+  // never moved its parent under "Recently updated" (the mutators also stamp the parent
+  // now; this covers stamps written before that and any other writer). Same idea as
+  // the group roll-up below. Children keep their own stamps.
+  const rolledList = $derived.by(() => {
+    const newestChild = new Map();
+    for (const c of collectionsList) {
+      if (!c.parent_id) continue;
+      const stamp = c.updated_at || c.created_at || '';
+      if (stamp > (newestChild.get(c.parent_id) || '')) newestChild.set(c.parent_id, stamp);
+    }
+    if (!newestChild.size) return collectionsList;
+    return collectionsList.map((c) => {
+      const child = newestChild.get(c.id);
+      return child && child > (c.updated_at || c.created_at || '') ? { ...c, updated_at: child } : c;
+    });
+  });
   const groupEntries = $derived.by(() => {
-    const collections = collectionsList;
+    const collections = rolledList;
     const serverGroups = collectionGroupList;
     const byKey = new Map();
     const groupNames = new Map();
@@ -132,14 +150,14 @@
     const grouped = new Set(groupEntries.map((g) => g.group_key));
     // Nested collections live inside their parent (the drilled-in view's shelf) — the
     // landing shows only roots so sub-folders don't clutter or duplicate the grid.
-    const ungrouped = collectionsList
+    const ungrouped = rolledList
       .map((c, index) => ({ ...c, store_index: index }))
       .filter((c) => !c.parent_id && !grouped.has(groupKey(c.group)));
     return [...ungrouped, ...groupEntries];
   });
   const activeMembers = $derived.by(() => {
     const key = groupKey(activeGroup);
-    return collectionsList
+    return rolledList
       .map((c, index) => ({ ...c, store_index: index }))
       .filter((c) => groupKey(c.group) === key);
   });
