@@ -259,17 +259,34 @@ export const movieStatus = () => getJSON('/api/movie/status');
 export async function dismissMovie() {
   try { await fetch('/api/movie/dismiss', { method: 'POST' }); } catch { /* best-effort */ }
 }
-export async function commitMovie() {
-  const res = await fetch('/api/movie/commit', { method: 'POST' });
+// `take` (a job id) picks which finished take to file; default: the newest.
+export async function commitMovie(take = '') {
+  const res = await fetch('/api/movie/commit', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ take })
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Could not add the movie to your gallery.');
   return data; // { ok, id, collection_id, already? }
 }
+// Queue more takes of the current session: another style (`preset`), every
+// not-yet-rendered style (`all`), or the same style with a fresh seed (`newSeed`).
+export async function restyleMovie({ preset = null, all = false, newSeed = false } = {}) {
+  const res = await fetch('/api/movie/restyle', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preset, all, new_seed: newSeed })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Could not start another take (HTTP ${res.status}).`);
+  return data; // { ok, job_ids, already? }
+}
 // `v` (the job id) busts the browser cache — the result path is otherwise the
 // same URL for every render, so a new movie would re-serve the cached old one.
-export function movieResultUrl(download = false, v = '') {
+// `take` selects which finished take to serve (default: the active/newest).
+export function movieResultUrl(download = false, v = '', take = '') {
   const p = new URLSearchParams();
   if (download) p.set('download', '1');
+  if (take) p.set('take', take);
   if (v) p.set('v', v);
   const qs = p.toString();
   return `/api/movie/result${qs ? `?${qs}` : ''}`;

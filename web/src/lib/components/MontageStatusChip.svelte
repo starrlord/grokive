@@ -15,6 +15,8 @@
   // The chip is global and outlives the panel, so the job's own mode (echoed by
   // /api/movie/status) is the only thing that can label it correctly.
   const noun = $derived(chip?.mode === 'matchcut' || chip?.mode === 'match' ? 'Match cut' : 'Montage');
+  // Takes: a session may hold several finished renders (other styles / seeds).
+  const readyCount = $derived((chip?.takes || []).filter((t) => t.status === 'done' && t.result).length);
 </script>
 
 {#if chip}
@@ -34,10 +36,10 @@
           </svg>
           <span class="chip-pct">{pct}</span>
         </span>
-        <span class="chip-text"><strong>Rendering {noun.toLowerCase()}</strong><small>{chip.detail || 'Working…'}</small></span>
+        <span class="chip-text"><strong>Rendering {noun.toLowerCase()}</strong><small>{chip.detail || 'Working…'}{#if chip.queued} · {chip.queued} queued{/if}</small></span>
       {:else if chip.status === 'done'}
         <span class="chip-icon ok" aria-hidden="true">▶</span>
-        <span class="chip-text"><strong>{noun} ready</strong><small>Tap to view &amp; save</small></span>
+        <span class="chip-text"><strong>{readyCount > 1 ? `${readyCount} takes ready` : `${noun} ready`}</strong><small>{readyCount > 1 ? 'Tap to compare & save' : 'Tap to view & save'}</small></span>
       {:else}
         <span class="chip-icon err" aria-hidden="true">!</span>
         <span class="chip-text"><strong>{noun} failed</strong><small>Tap for details</small></span>

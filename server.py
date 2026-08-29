@@ -107,7 +107,7 @@ DB_FILE = DATA_DIR / "index.db"
 # disposable read-model rebuilt from metadata.json). Keyed by prompt-text hash so a
 # reindex never discards the embedding work and only new prompts get embedded.
 PROMPT_DB_FILE = DATA_DIR / "prompt_studio.db"
-MOVIE_DIR = DATA_DIR / "movie_tmp"  # working dir + last "Generate Movie" output
+MOVIE_DIR = DATA_DIR / "movie_tmp"  # Generate Movie session: song + takes/ (finished renders) + work/ (scratch)
 # Motion Match Cut's per-clip descriptor cache. DELIBERATELY a sibling of MOVIE_DIR,
 # not inside it: every render wipes MOVIE_DIR, and this must survive so a second
 # render over the same clips skips analysis (measured ~150x faster on a hit). Purely
@@ -3649,7 +3649,21 @@ _movie = {
     "committing": False,   # a commit is in-flight (guards against double-commit)
     "committed_id": None,  # the gallery media id once committed
     "acknowledged": False, # user dealt with the finished result (dismissed/committed/discarded)
+    # Takes (Aug 2026). One Generate Movie SESSION (the clips + song + settings) can
+    # render several TAKES — the same inputs in another style, or the same style with a
+    # fresh seed — and keep every finished MP4 side by side for comparison. The
+    # top-level fields above mirror the ACTIVE take (the one rendering, else the latest
+    # started) so the chip/panel poll keeps working unchanged; `takes` carries the rest.
+    "session": None,       # {paths, song_path, song, options, mode, auto_pick, allow_stills, styles, base_seed, source_ids}
+    "takes": [],           # [{job_id, preset, seed, status, progress, stage_progress, detail, error, result, committed, committing, committed_id, started_at, finished_at}]
+    "draining": False,     # a queue-drainer thread is alive (renders takes one at a time)
 }
+
+# Styles a beat session can be re-rendered in. Picture & Video sessions carry still
+# images, which only the picvideo preset admits; a match cut has no style at all.
+_BEAT_STYLES = ["classic", "cinematic", "moody", "musicvideo"]
+_PRESET_LABELS = {"classic": "Classic", "cinematic": "Cinematic", "moody": "Moody",
+                  "musicvideo": "Music Video", "picvideo": "Picture & Video"}
 
 _SONG_EXTS = {"mp3", "wav", "flac", "m4a", "aac", "ogg", "opus"}
 BEAT_MONTAGE_COLLECTION = "beat-montage"
@@ -3663,6 +3677,86 @@ def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, de
         _movie["progress"] = round(float(overall), 4)
         _movie["stage_progress"] = round(float(stage_progress), 4)
         _movie["detail"] = detail
+        take = _active_take_locked()
+        if take is not None:
+            take["status"] = status
+            take["progress"] = _movie["progress"]
+            take["stage_progress"] = _movie["stage_progress"]
+            take["detail"] = detail
+
+
+def _active_take_locked() -> dict | None:
+    """The take the top-level mirror describes (caller holds _movie_lock)."""
+    jid = _movie.get("job_id")
+    return next((t for t in _movie["takes"] if t["job_id"] == jid), None)
+
+
+def _take_public(t: dict) -> dict:
+    """A take for the status poll: everything but the result's server path."""
+    r = t.get("result")
+    return {**{k: v for k, v in t.items() if k != "result"},
+            "result": ({k: v for k, v in r.items() if k != "path"} if r else None)}
+
+
+def _take_commit_meta(take: dict, sess: dict) -> dict:
+    """Provenance for a committed take: the session's inputs + this take's style/seed."""
+    opts = sess.get("options") or {}
+    return {
+        "name": opts.get("name"), "song": sess.get("song"), "mode": sess.get("mode") or "beat",
+        "seed": take.get("seed"), "tightness": opts.get("tightness"), "fps": opts.get("fps"),
+        "preset": take.get("preset"), "let_clips_speak": opts.get("let_clips_speak"),
+        "speak_moments": opts.get("speak_moments"),
+        "source_ids": sess.get("source_ids") or [], "auto_pick": bool(sess.get("auto_pick")),
+    }
+
+
+def _enqueue_take_locked(preset: str, seed) -> str:
+    """Append a queued take to the session (caller holds _movie_lock) and flag the
+    job slot busy so a concurrent /generate is refused. Returns its job id."""
+    take = {
+        "job_id": secrets.token_hex(8), "preset": preset, "seed": seed,
+        "status": "queued", "progress": 0.0, "stage_progress": 0.0, "detail": "Queued…",
+        "error": None, "result": None, "committed": False, "committing": False,
+        "committed_id": None, "started_at": None, "finished_at": None,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _movie["takes"].append(take)
+    _movie["running"] = True
+    _movie["acknowledged"] = False
+    return take["job_id"]
+
+
+def _start_drainer() -> None:
+    """Make sure a drainer thread is working the take queue (no-op if one is)."""
+    with _movie_lock:
+        if _movie.get("draining"):
+            return
+        _movie["draining"] = True
+    threading.Thread(target=_drain_takes, daemon=True).start()
+
+
+def _drain_takes() -> None:
+    """Render queued takes one at a time (the render is NVENC/CPU-bound, and the
+    server only ever ran one montage at once). Exits when the queue is empty."""
+    try:
+        while True:
+            with _movie_lock:
+                take = next((t for t in _movie["takes"] if t["status"] == "queued"), None)
+                if take is None or not _movie.get("session"):
+                    _movie["running"] = False
+                    _movie["draining"] = False
+                    return
+                sess = dict(_movie["session"])
+                take["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                _movie.update(job_id=take["job_id"], status="queued", progress=0.0,
+                              stage_progress=0.0, detail="Queued…", error=None, result=None,
+                              started_at=take["started_at"], finished_at=None,
+                              committed=False, committing=False, committed_id=None)
+            _render_take(take, sess)
+    finally:
+        with _movie_lock:
+            _movie["running"] = False
+            _movie["draining"] = False
 
 
 # Absolute path to this repo's moviegen.py. The render runs as `python moviegen.py
@@ -3672,42 +3766,35 @@ def _movie_progress(status: str, overall: float, stage_progress: float = 0.0, de
 _MOVIEGEN_PY = str(Path(moviegen.__file__).resolve())
 
 
-def _purge_movie_scratch(keep: Path) -> None:
-    """Drop everything in MOVIE_DIR except ``keep`` (the finished movie) — the per-cut
-    segments, video_only.mp4, edl.json, the uploaded song and the stderr log. Called
-    after a successful render so the bulk of the scratch (the segments) is freed at
-    once instead of lingering until the next generation wipes the dir. Best-effort:
-    never raises into the worker, and only the finished movie is preserved (still
-    needed for preview / download / commit)."""
-    try:
-        keep = keep.resolve()
-        for entry in MOVIE_DIR.iterdir():
-            if entry.resolve() == keep:
-                continue
-            try:
-                if entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    entry.unlink()
-            except OSError:
-                pass
-    except OSError:
-        pass
+def _render_take(take: dict, sess: dict) -> None:
+    """Drive one take's render in a separate process and mirror its streamed progress
+    into the shared job state. The child reads a JSON spec on stdin and emits
+    newline-delimited JSON (progress / result / error) on stdout; its stderr is
+    captured to a log so an OOM/segfault before any message still yields a reason.
 
-
-def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, options: dict) -> None:
-    """Drive one montage render in a separate process and mirror its streamed
-    progress into the shared job state. The child reads a JSON spec on stdin and
-    emits newline-delimited JSON (progress / result / error) on stdout; its stderr
-    is captured to a log so an OOM/segfault before any message still yields a reason."""
-    out_path = MOVIE_DIR / f"movie_{job_id}.mp4"
+    Each take renders in a fresh ``work/`` scratch dir (wiped before and after) and
+    its finished MP4 is moved into ``takes/``, so earlier takes and the session's
+    song survive — the point of takes is comparing them side by side."""
+    job_id = take["job_id"]
+    options = dict(sess.get("options") or {})
+    options["preset"] = take["preset"]
+    options["seed"] = take["seed"]
+    paths = [Path(p) for p in sess.get("paths") or []]
+    song_path = Path(sess["song_path"]) if sess.get("song_path") else None
+    work = MOVIE_DIR / "work"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    takes_dir = MOVIE_DIR / "takes"
+    takes_dir.mkdir(parents=True, exist_ok=True)
+    out_path = work / f"movie_{job_id}.mp4"
+    final_path = takes_dir / f"movie_{job_id}.mp4"
     spec = {
         "video_paths": [str(p) for p in paths],
         # None in match-cut mode with no song. MUST stay None rather than str(None),
         # which would reach the child as the literal path "None".
         "song_path": (str(song_path) if song_path else None),
         "options": options,
-        "work_dir": str(MOVIE_DIR),
+        "work_dir": str(work),
         "out_path": str(out_path),
         "video_encode_args": _video_encode_args(CRF),
         "hwaccel_decode": _use_nvenc(),
@@ -3716,7 +3803,7 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, option
         "motion_cache_dir": str(MOTION_CACHE_DIR),
         "beat_cache_dir": str(BEAT_CACHE_DIR),
     }
-    stderr_log = MOVIE_DIR / "worker_stderr.log"
+    stderr_log = MOVIE_DIR / f"worker_stderr_{job_id}.log"
     result = None
     error = None
     returncode = None
@@ -3748,18 +3835,24 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, option
             returncode = proc.wait()
 
         if result is not None:
+            shutil.move(str(out_path), str(final_path))
+            name = options.get("name") or "movie"
+            # One file name per style so a downloaded set of takes doesn't collide.
+            suffix = f"-{take['preset']}" if (sess.get("mode") or "beat") != "matchcut" else ""
+            res = {"path": str(final_path), "filename": f"{name}{suffix}.mp4", **result}
             with _movie_lock:
-                _movie["result"] = {
-                    "path": str(out_path),
-                    "filename": f"{options.get('name') or 'movie'}.mp4",
-                    **result,
-                }
+                take["result"] = res
+                take["error"] = None
+                _movie["result"] = res
             _movie_progress("done", 1.0, 1.0, "Done")
-            # The final movie is assembled — the per-cut segments and other intermediates
-            # are now dead weight, so reclaim that space immediately (keep only the movie
-            # for preview/download/commit). On error we fall through and keep everything,
-            # including the stderr log, for diagnostics.
-            _purge_movie_scratch(keep=out_path)
+            # The final movie is assembled — the per-cut segments and other
+            # intermediates are dead weight, so reclaim that space now. On error
+            # the scratch is kept (with the stderr log) for diagnostics.
+            shutil.rmtree(work, ignore_errors=True)
+            try:
+                stderr_log.unlink()
+            except OSError:
+                pass
         else:
             # No result line: the child raised (error set) or was killed before it
             # could report (OOM/segfault). Prefer its own message, then the kill
@@ -3779,21 +3872,27 @@ def _movie_worker(job_id: str, paths: list[Path], song_path: Path | None, option
             # this lives, and it's in-memory — so a failure the user reports after a
             # restart is otherwise undiagnosable (the scratch dir keeps stderr, but a
             # clean RuntimeError from the planner never reaches stderr at all).
-            _log(f"montage render failed ({options.get('mode') or 'beat'}, "
+            _log(f"montage render failed ({options.get('mode') or 'beat'} / {take['preset']}, "
                  f"{len(paths)} clips): {str(error)[:300]}")
             with _movie_lock:
+                take["status"] = "error"
+                take["error"] = str(error)[:400]
+                take["detail"] = "Generation failed"
                 _movie["status"] = "error"
-                _movie["error"] = str(error)[:400]
+                _movie["error"] = take["error"]
                 _movie["detail"] = "Generation failed"
     except Exception as exc:  # pragma: no cover - defensive
         with _movie_lock:
+            take["status"] = "error"
+            take["error"] = str(exc)[:400]
+            take["detail"] = "Generation failed"
             _movie["status"] = "error"
-            _movie["error"] = str(exc)[:400]
+            _movie["error"] = take["error"]
             _movie["detail"] = "Generation failed"
     finally:
         with _movie_lock:
-            _movie["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            _movie["running"] = False
+            take["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            _movie["finished_at"] = take["finished_at"]
 
 
 def _auto_candidate_ids(coll_ids: list) -> list[str]:
@@ -4007,38 +4106,83 @@ def api_movie_generate() -> Response:
         "auto_pick": auto_pick,
     }
 
+    # Which other styles this session can be re-rendered in (see /api/movie/restyle).
+    styles = ([] if mode == "matchcut" else (["picvideo"] if allow_stills else list(_BEAT_STYLES)))
     with _movie_lock:
         if _movie["running"]:
             return jsonify(ok=False, error="A movie is already being generated."), 409
-        job_id = secrets.token_hex(8)
-        # Fresh working dir so a previous render's segments/output can't leak in.
+        # A NEW session: wipe the previous one's takes, song and scratch so nothing
+        # can leak in. (Re-rendering the SAME inputs in another style is /restyle.)
         shutil.rmtree(MOVIE_DIR, ignore_errors=True)
         MOVIE_DIR.mkdir(parents=True, exist_ok=True)
-        # No song is legitimate in match-cut mode — the render is then silent.
+        # No song is legitimate in match-cut mode — the render is then silent. The
+        # song is kept for the whole session so later takes never need a re-upload.
         song_path = None
         if song is not None:
             song_path = MOVIE_DIR / f"song.{ext}"
             song.save(str(song_path))
-        _movie.update(running=True, job_id=job_id, status="queued", progress=0.0,
-                      stage_progress=0.0, detail="Queued…", error=None, result=None,
-                      started_at=time.strftime("%Y-%m-%d %H:%M:%S"), finished_at=None,
+        _movie.update(running=False, job_id=None, status="idle", progress=0.0,
+                      stage_progress=0.0, detail="", error=None, result=None,
+                      started_at=None, finished_at=None,
                       committed=False, committing=False, committed_id=None, acknowledged=False,
-                      commit_meta={
-                          "name": options["name"],
+                      commit_meta=None, takes=[],
+                      session={
+                          "paths": [str(p) for p in paths],
+                          "song_path": (str(song_path) if song_path else None),
                           "song": (song.filename if song is not None else None),
-                          "mode": mode,
-                          "seed": options["seed"], "tightness": options["tightness"],
-                          "fps": options["fps"], "preset": options["preset"],
-                          "let_clips_speak": options["let_clips_speak"],
-                          "speak_moments": options["speak_moments"],
+                          "options": options, "mode": mode, "auto_pick": auto_pick,
+                          "allow_stills": allow_stills, "styles": styles,
+                          "base_seed": options["seed"],
                           # Auto-pick pools can be thousands of ids; the status
                           # endpoint echoes source_ids every poll, so keep them
                           # out and flag the mode instead.
                           "source_ids": [] if auto_pick else [str(i) for i in ids],
-                          "auto_pick": auto_pick,
                       })
-    threading.Thread(target=_movie_worker, args=(job_id, paths, song_path, options), daemon=True).start()
+        job_id = _enqueue_take_locked(preset, options["seed"])
+    _start_drainer()
     return jsonify(ok=True, job_id=job_id), 202
+
+
+@app.post("/api/movie/restyle")
+def api_movie_restyle() -> Response:
+    """Queue more TAKES of the current session — the same clips, song and settings
+    in another style (``preset``), every not-yet-rendered style at once (``all``),
+    or the same style with a fresh seed (``new_seed``). Styles share the session's
+    seed so a comparison isolates the style; nothing is re-uploaded or re-analyzed
+    (the beat + motion caches carry the analysis). JSON body; returns the queued
+    ``job_ids`` — a duplicate (same style + seed already rendered) returns that
+    take with ``already``."""
+    body = request.get_json(silent=True) or {}
+    preset = (body.get("preset") or "").strip()
+    want_all = bool(body.get("all"))
+    new_seed = bool(body.get("new_seed"))
+    with _movie_lock:
+        sess = _movie.get("session")
+        takes = _movie["takes"]
+        if not sess or not takes:
+            return jsonify(ok=False, error="No montage to restyle — generate one first."), 409
+        styles = list(sess.get("styles") or [])
+        live = [t for t in takes if t["status"] != "error"]
+        if want_all:
+            have = {t["preset"] for t in live}
+            presets = [s for s in styles if s not in have]
+            if not presets:
+                return jsonify(ok=True, job_ids=[], already=True)
+            job_ids = [_enqueue_take_locked(s, sess.get("base_seed")) for s in presets]
+        else:
+            if not preset:
+                preset = (live or takes)[-1]["preset"]
+            if styles and preset not in styles:
+                return jsonify(ok=False, error=f"'{preset}' isn't a style this montage can use."), 400
+            if not styles and preset != takes[-1]["preset"]:
+                return jsonify(ok=False, error="A match cut has no styles — try another take instead."), 400
+            seed = secrets.randbelow(1_000_000_000) if new_seed else sess.get("base_seed")
+            dup = next((t for t in live if t["preset"] == preset and t["seed"] == seed), None)
+            if dup is not None:
+                return jsonify(ok=True, job_ids=[dup["job_id"]], already=True)
+            job_ids = [_enqueue_take_locked(preset, seed)]
+    _start_drainer()
+    return jsonify(ok=True, job_ids=job_ids), 202
 
 
 @app.post("/api/movie/motioncache")
@@ -4137,8 +4281,11 @@ def api_movie_status() -> Response:
     # so reading those nested dicts after the shallow copy is safe.
     with _movie_lock:
         snap = dict(_movie)
-    r = snap["result"]
-    meta = snap["commit_meta"] or {}
+        takes = [_take_public(t) for t in _movie["takes"]]
+        active = _active_take_locked()
+        active_pub = _take_public(active) if active else None
+    sess = snap.get("session") or {}
+    opts = sess.get("options") or {}
     return jsonify(
         running=snap["running"],
         job_id=snap["job_id"],
@@ -4151,35 +4298,41 @@ def api_movie_status() -> Response:
         finished_at=snap["finished_at"],
         # Submit-time provenance so the panel header is correct even when reopened
         # from the status chip with no live selection (and mid-render, before a
-        # result exists): the source videos that went in, and which preset. The
-        # ids let "Make another" re-render the same clips after the live selection
-        # is gone.
-        sources=len(meta.get("source_ids") or []),
-        source_ids=meta.get("source_ids") or [],
-        preset=meta.get("preset"),
+        # result exists): the source videos that went in, and which preset.
+        sources=len(sess.get("source_ids") or []),
+        source_ids=sess.get("source_ids") or [],
+        preset=(active["preset"] if active else opts.get("preset")),
         # Auto Montage: the panel header/labels say "auto-picked" instead of a
         # selection count (source_ids is deliberately empty for auto jobs).
-        auto_pick=bool(meta.get("auto_pick")),
+        auto_pick=bool(sess.get("auto_pick")),
         # Which pipeline produced this job. The panel is destroyed on close, so on
         # reopen this is the ONLY signal of the job's true mode — without it a live
         # match cut is labelled as a beat montage.
-        mode=meta.get("mode") or "beat",
-        # Whether the finished result was already added to the gallery and whether
-        # the user has dealt with it. These survive reloads (unlike the client's
-        # in-memory ack), so the floating chip can stay dismissed across sessions.
-        committed=snap["committed"],
-        committed_id=snap["committed_id"],
+        mode=sess.get("mode") or "beat",
+        # Whether the ACTIVE take was already added to the gallery and whether the
+        # user has dealt with the session. These survive reloads (unlike the
+        # client's in-memory ack), so the floating chip can stay dismissed.
+        committed=bool(active and active["committed"]),
+        committed_id=(active["committed_id"] if active else None),
         acknowledged=snap["acknowledged"],
-        # Don't leak the absolute server path to the client.
-        result=({k: v for k, v in r.items() if k != "path"} if r else None),
+        # The active take's result (no server path) — the pre-takes contract.
+        result=(active_pub["result"] if active_pub else None),
+        # Takes: every render of this session (queued, rendering, done, failed) plus
+        # what the session can still be re-rendered as. See /api/movie/restyle.
+        takes=takes,
+        queued=sum(1 for t in takes if t["status"] == "queued"),
+        session=({"song": sess.get("song"), "styles": sess.get("styles") or [],
+                  "base_seed": sess.get("base_seed"), "name": opts.get("name")}
+                 if sess else None),
     )
 
 
 @app.get("/api/movie/result")
 def api_movie_result() -> Response:
-    """Serve the finished movie — inline (range-enabled) so the SPA can preview it
-    in a <video>, or as a download with ``?download=1``."""
-    r = _movie["result"]
+    """Serve a finished take — inline (range-enabled) so the SPA can preview it in
+    a <video>, or as a download with ``?download=1``. ``?take=<job_id>`` picks one;
+    otherwise the active take (else the most recent finished one)."""
+    r = _pick_take(request.args.get("take") or "")
     if not r or not Path(r["path"]).exists():
         return jsonify(ok=False, error="No finished movie available."), 409
     download = request.args.get("download") in ("1", "true", "yes")
@@ -4190,14 +4343,27 @@ def api_movie_result() -> Response:
     return resp
 
 
-def _commit_montage() -> dict:
-    """Persist the finished montage into the gallery: copy the file under a unique
-    id, make a thumbnail, append a metadata record with provenance, drop it into
-    the 'Beat Montage' collection, and rebuild the index. Returns {id, collection_id}."""
-    r = _movie.get("result")
+def _pick_take(take_id: str = "") -> dict | None:
+    """The RESULT dict (with server path) of the take to serve/commit: the requested
+    ``take_id``, else the active take when finished, else the newest finished one."""
+    with _movie_lock:
+        takes = list(_movie["takes"])
+        jid = _movie.get("job_id")
+    t = next((t for t in takes if t["job_id"] == take_id), None) if take_id else None
+    if t is None:
+        t = (next((t for t in takes if t["job_id"] == jid and t.get("result")), None)
+             or next((t for t in reversed(takes) if t.get("result")), None))
+    return t.get("result") if t else None
+
+
+def _commit_montage(take: dict, sess: dict) -> dict:
+    """Persist a finished take into the gallery: copy the file under a unique id,
+    make a thumbnail, append a metadata record with provenance, drop it into the
+    'Beat Montage' collection, and rebuild the index. Returns {id, collection_id}."""
+    r = take.get("result")
     if not r or not Path(r["path"]).exists():
         raise RuntimeError("No finished movie to add.")
-    meta = _movie.get("commit_meta") or {}
+    meta = _take_commit_meta(take, sess)
 
     mid = "montage_" + secrets.token_hex(8)  # unique; never collides with Grok UUIDs
     rel = f"media/montages/{media_shard(mid)}/{mid}.mp4"
@@ -4220,6 +4386,9 @@ def _commit_montage() -> dict:
     title = ["Motion Match Cut" if is_match else "Beat Montage"]
     if meta.get("name") and meta["name"] != "movie":
         title.append(str(meta["name"]))
+    # The style tells sibling takes of one session apart in the gallery.
+    if not is_match and meta.get("preset") in _PRESET_LABELS:
+        title.append(_PRESET_LABELS[meta["preset"]])
     if song:
         title.append(song)
     record = {
@@ -4278,32 +4447,45 @@ def _commit_montage() -> dict:
 
 @app.post("/api/movie/commit")
 def api_movie_commit() -> Response:
-    """Add the finished montage to the gallery + the 'Beat Montage' collection."""
+    """Add a finished take to the gallery + the 'Beat Montage' collection. JSON
+    ``take`` picks one (default: the active/newest finished take). Other takes may
+    still be rendering — a finished take is committable regardless."""
+    body = request.get_json(silent=True) or {}
+    take_id = str(body.get("take") or request.form.get("take") or "").strip()
     # Claim the commit atomically: validate and flip `committing` under the lock so
     # two near-simultaneous clicks can't both pass the checks and double-commit.
     with _movie_lock:
-        if _movie.get("running"):
-            return jsonify(ok=False, error="Still rendering."), 409
-        r = _movie.get("result")
-        if not r or not Path(r["path"]).exists():
+        sess = dict(_movie.get("session") or {})
+        takes = _movie["takes"]
+        take = next((t for t in takes if t["job_id"] == take_id), None) if take_id else None
+        if take is None:
+            take = next((t for t in reversed(takes) if t.get("result")), None)
+        if take is None or take["status"] != "done" or not take.get("result") \
+                or not Path(take["result"]["path"]).exists():
             return jsonify(ok=False, error="No finished movie to add."), 409
-        if _movie.get("committed"):
-            return jsonify(ok=True, id=_movie.get("committed_id"),
+        if take.get("committed"):
+            return jsonify(ok=True, id=take.get("committed_id"),
                            collection_id=BEAT_MONTAGE_COLLECTION, already=True)
-        if _movie.get("committing"):
+        if take.get("committing"):
             return jsonify(ok=False, error="Commit already in progress."), 409
-        _movie["committing"] = True
+        take["committing"] = True
     try:
-        res = _commit_montage()
+        res = _commit_montage(take, sess)
     except Exception as exc:
         with _movie_lock:
-            _movie["committing"] = False
+            take["committing"] = False
         return jsonify(ok=False, error=str(exc)[:300]), 500
     with _movie_lock:
-        _movie["committed"] = True
-        _movie["committed_id"] = res["id"]
-        _movie["acknowledged"] = True  # committing is dealing with it — chip stays gone
-        _movie["committing"] = False
+        take["committed"] = True
+        take["committed_id"] = res["id"]
+        take["committing"] = False
+        if take is _active_take_locked():
+            _movie["committed"] = True
+            _movie["committed_id"] = res["id"]
+        # The session is dealt with once every finished take is filed and nothing
+        # is still rendering — then the chip can go.
+        if not _movie["running"] and all(t.get("committed") for t in takes if t["status"] == "done"):
+            _movie["acknowledged"] = True
     return jsonify(ok=True, **res)
 
 

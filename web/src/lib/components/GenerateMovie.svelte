@@ -5,7 +5,7 @@
   import { portal } from '$lib/portal.js';
   import { trapFocus } from '$lib/focusTrap.js';
   import ParticleField from './ParticleField.svelte';
-  import { generateMovie, movieResultUrl, commitMovie, motionCoverage, startMotionCache, movieResolutions } from '$lib/api.js';
+  import { generateMovie, movieResultUrl, commitMovie, restyleMovie, motionCoverage, startMotionCache, movieResolutions } from '$lib/api.js';
   import { collections, loadCollections, setStashed, movieJob, movieChip, ensureMoviePolling, refreshMovieStatus, markMovieStarted, acknowledgeMovie, montageMode, montageRender } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
 
@@ -190,8 +190,15 @@
 
   let starting = $state(false);
   let startError = $state(''); // error from the kickoff POST (shown in-panel)
-  let committing = $state(false);
-  let committed = $state(false);
+  // Takes: per-take commit state lives on the server (t.committed); this is the
+  // take whose "Add to Collection" is in flight, and whether a restyle is starting.
+  let committingId = $state(null);
+  let restyling = $state(false);
+  // The take the user clicked in the takes strip; null = show the newest finished one.
+  let selectedTakeId = $state(null);
+  // Takes this panel asked for that haven't landed yet: the preview stays on the
+  // selected take while they render, then jumps to each as it finishes.
+  let awaiting = $state([]);
   // The render's status lives in the global movieJob store (shared with the Montage
   // button + the floating status chip). `owned` is whether THIS panel is surfacing
   // that job — true while driving a live render or showing a not-yet-acknowledged
@@ -223,8 +230,27 @@
   );
   const TIGHTNESS_TIP = 'Controls how often the montage cuts to a new clip, relative to the song’s beats. Drag left for fewer, longer shots; right for more, shorter shots. Cut density also rises automatically in louder sections.';
   const running = $derived(!!job && job.running);
-  const done = $derived(!!job && job.status === 'done' && !!job.result);
-  const errored = $derived(!!job && job.status === 'error');
+  // Takes (Aug 2026): one session (clips + song + settings) can hold several
+  // renders — other styles, or the same style with a fresh seed — kept side by side.
+  const takes = $derived(job?.takes ?? []);
+  const doneTakes = $derived(takes.filter((t) => t.status === 'done' && t.result));
+  const queuedCount = $derived(takes.filter((t) => t.status === 'queued').length);
+  const activeTake = $derived(takes.find((t) => t.job_id === job?.job_id) ?? null);
+  // The take on screen: the user's pick, else the most recent finished one.
+  const current = $derived(doneTakes.find((t) => t.job_id === selectedTakeId) ?? doneTakes[doneTakes.length - 1] ?? null);
+  // "done" = there is a finished take to show; more takes may still be rendering
+  // behind it (their progress is shown inline under the takes strip).
+  const done = $derived(!!current);
+  const errored = $derived(!!job && job.status === 'error' && !current);
+  const styles = $derived(job?.session?.styles ?? []);
+  const missingStyles = $derived(styles.filter((s) => !takes.some((t) => t.preset === s && t.status !== 'error')));
+  const labelFor = (id) => ALL_PRESETS.find((p) => p.id === id)?.label || id || '';
+  // "Classic · take 2" when a style was rendered more than once (fresh seeds).
+  function takeLabel(t) {
+    const same = takes.filter((x) => x.preset === t.preset);
+    const n = same.indexOf(t) + 1;
+    return same.length > 1 ? `${labelFor(t.preset)} · take ${n}` : labelFor(t.preset);
+  }
   // Auto-pick is a beat-mode concept (the picker scores clips against the song's
   // grid); flipping to Match Cut falls back to the hand-picked selection.
   const autoEffective = $derived(autoPick && !matchCut);
@@ -239,7 +265,7 @@
   // is owned — the live selection is only meaningful on the fresh setup form and is
   // empty when the panel is reopened from the status chip.
   const sourceCount = $derived(job?.sources ?? activeIds.length);
-  const styleLabel = $derived(ALL_PRESETS.find((p) => p.id === (job?.preset ?? job?.result?.preset))?.label || '');
+  const styleLabel = $derived(labelFor(current?.preset ?? job?.preset ?? job?.result?.preset));
 
   onMount(() => {
     (async () => {
@@ -335,23 +361,46 @@
     }
   }
 
-  async function addToCollection() {
-    if (committing || committed) return;
-    committing = true;
+  async function addToCollection(take) {
+    if (!take || committingId || take.committed) return;
+    committingId = take.job_id;
     try {
-      const res = await commitMovie();
-      committed = true;
+      const res = await commitMovie(take.job_id);
       // Auto-archive the finished montage so it doesn't clutter Recent — it stays
       // in the "Beat Montage" collection (and Archive / All Media).
       if (res?.id) setStashed([String(res.id)], true);
-      acknowledgeMovie(job?.job_id); // dealt with — clear the floating chip
+      const s = await refreshMovieStatus(); // per-take committed flags + session ack
       await loadCollections(); // surface the new "Beat Montage" collection
-      toast('Added to “Beat Montage” collection', { type: 'success' });
-      close(); // the montage is filed away — dismiss the preview
+      toast(`Added ${labelFor(take.preset)} take to “Beat Montage”`, { type: 'success' });
+      // Every finished take is filed and nothing is rendering: the session is dealt
+      // with — clear the chip and dismiss the preview, as a single render always did.
+      if (s?.acknowledged) {
+        acknowledgeMovie(s.job_id);
+        close();
+      }
     } catch (e) {
       toast(e.message || 'Could not add to collection.', { type: 'error' });
     } finally {
-      committing = false;
+      committingId = null;
+    }
+  }
+
+  // Another take of the SAME session: a different style, every missing style, or
+  // the current style with a fresh seed. The server reuses the clips + song and
+  // the caches, so only the plan + render run. The panel stays on the current take
+  // and the new one lands in the takes strip (selected automatically when done).
+  async function restyle(opts) {
+    if (restyling) return;
+    restyling = true;
+    try {
+      const data = await restyleMovie(opts);
+      awaiting = [...awaiting, ...((data?.job_ids) || [])];
+      owned = true;
+      ensureMoviePolling();
+    } catch (e) {
+      toast(e.message || 'Could not start another take.', { type: 'error' });
+    } finally {
+      restyling = false;
     }
   }
 
@@ -370,7 +419,13 @@
   // Fire one celebratory burst when a render lands on `done`. Increment inside
   // untrack so the effect depends only on `done`, not on burstCount itself —
   // otherwise burstCount++ would re-trigger the effect and loop infinitely.
-  $effect(() => { if (done) untrack(() => burstCount++); });
+  $effect(() => { if (doneTakes.length) untrack(() => burstCount++); });
+  // A take this panel queued has finished: show it. (Re-runs until `awaiting` is
+  // drained, so several landing between polls end on the newest.)
+  $effect(() => {
+    const hit = doneTakes.find((t) => awaiting.includes(t.job_id));
+    if (hit) untrack(() => { selectedTakeId = hit.job_id; awaiting = awaiting.filter((id) => id !== hit.job_id); });
+  });
 </script>
 
 <svelte:window onkeydown={onkey} />
@@ -404,32 +459,82 @@
         <div class="space-y-4">
           <!-- Music-only generated preview has no speech track. -->
           <!-- svelte-ignore a11y_media_has_caption -->
-          <video class="mx-auto block max-h-[55dvh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, job.job_id)} controls playsinline autoplay></video>
+          {#key current.job_id}
+            <video class="mx-auto block max-h-[55dvh] max-w-full rounded-xl bg-[var(--media-bg)]" src={movieResultUrl(false, current.job_id, current.job_id)} controls playsinline autoplay></video>
+          {/key}
           <p class="text-sm text-muted">
-            {job.result.cuts} cuts · {job.result.width}×{job.result.height} · {job.result.fps} fps · {job.result.duration}s
-            · {(job.result.size_bytes / 1048576).toFixed(1)} MB{#if job.result.beat_engine} · {job.result.beat_engine === 'madmom' ? `madmom beats (${job.result.beat_device})` : `librosa beats${job.result.beat_engine_note ? ` — ${job.result.beat_engine_note}` : ''}`}{/if}
+            {#if styleLabel}<span class="font-semibold text-ink/90">{styleLabel}</span>{' · '}{/if}{current.result.cuts} cuts · {current.result.width}×{current.result.height} · {current.result.fps} fps · {current.result.duration}s
+            · {(current.result.size_bytes / 1048576).toFixed(1)} MB{#if current.result.beat_engine}{' · '}{current.result.beat_engine === 'madmom' ? `madmom beats (${current.result.beat_device})` : `librosa beats${current.result.beat_engine_note ? ` — ${current.result.beat_engine_note}` : ''}`}{/if}
           </p>
-          {#if job.result.match}
+          {#if current.result.match}
             <!-- Report what the matcher actually found. A weak run must be legible as
                  "no strong matches available" rather than reading as a plain montage. -->
             <p class="text-xs text-muted">
-              Matched {job.result.match.clips_gated} of {job.result.match.clips_in} clips{#if job.result.match.clips_in > job.result.match.clips_gated} · {job.result.match.clips_in - job.result.match.clips_gated} had too little motion to match{/if}
-              · seam quality {job.result.match.seam_mean_chain} of {job.result.match.seam_max_possible}{#if job.result.match.speed_ramped} · {job.result.match.speed_ramped} shot{job.result.match.speed_ramped === 1 ? '' : 's'} speed-matched{/if}
+              Matched {current.result.match.clips_gated} of {current.result.match.clips_in} clips{#if current.result.match.clips_in > current.result.match.clips_gated} · {current.result.match.clips_in - current.result.match.clips_gated} had too little motion to match{/if}
+              · seam quality {current.result.match.seam_mean_chain} of {current.result.match.seam_max_possible}{#if current.result.match.speed_ramped} · {current.result.match.speed_ramped} shot{current.result.match.speed_ramped === 1 ? '' : 's'} speed-matched{/if}
             </p>
           {/if}
-          {#if job.result.auto}
+          {#if current.result.auto}
             <!-- What Auto Montage chose, and whether any candidates were invisible
                  to it (not yet analyzed) — that's the cue to run Analyze Library. -->
             <p class="text-xs text-muted">
-              Auto-picked {job.result.auto.picked} clips from {job.result.auto.analyzed} analyzed candidate{job.result.auto.analyzed === 1 ? '' : 's'}{#if job.result.auto.skipped_uncached} · {job.result.auto.skipped_uncached} skipped (not yet analyzed){/if}
+              Auto-picked {current.result.auto.picked} clips from {current.result.auto.analyzed} analyzed candidate{current.result.auto.analyzed === 1 ? '' : 's'}{#if current.result.auto.skipped_uncached} · {current.result.auto.skipped_uncached} skipped (not yet analyzed){/if}
             </p>
           {/if}
+          <!-- Takes: every render of this session. Finished ones are selectable
+               (the preview swaps), rendering/queued ones show their state, and
+               each style not yet rendered is a ghost chip that renders it — same
+               clips, song, settings and seed, so the comparison isolates the style. -->
+          {#if takes.length > 1 || missingStyles.length}
+            <div>
+              <div class="mb-2 flex items-center justify-between text-xs font-bold uppercase tracking-wider text-muted">
+                <span>Takes</span>
+                {#if missingStyles.length > 1}
+                  <button type="button" class="font-semibold normal-case tracking-normal text-[var(--accent)] disabled:opacity-50"
+                    disabled={restyling} onclick={() => restyle({ all: true })}>Render all styles ({missingStyles.length} more)</button>
+                {/if}
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                {#each takes as t (t.job_id)}
+                  <button type="button" title={t.status === 'error' ? (t.error || 'Failed') : t.status === 'done' ? 'Show this take' : STAGE_LABEL[t.status] || t.status}
+                    class="rounded-lg border px-3 py-1.5 text-left text-sm font-semibold transition disabled:cursor-default {t.job_id === current.job_id ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : t.status === 'done' ? 'border-line hover:border-[var(--accent)]' : 'border-line opacity-70'}"
+                    disabled={t.status !== 'done'} onclick={() => (selectedTakeId = t.job_id)}>
+                    {takeLabel(t)}
+                    <span class="ml-1 text-[11px] font-normal opacity-75">
+                      {#if t.status === 'done'}{t.committed ? '✓ saved' : `${t.result.cuts} cuts`}{:else if t.status === 'queued'}queued{:else if t.status === 'error'}failed{:else}{Math.round((t.progress || 0) * 100)}%{/if}
+                    </span>
+                  </button>
+                {/each}
+                {#each missingStyles as s (s)}
+                  <button type="button" title={`Render this montage in the ${labelFor(s)} style`}
+                    class="rounded-lg border border-dashed border-line px-3 py-1.5 text-sm font-semibold text-muted transition hover:border-[var(--accent)] hover:text-ink disabled:opacity-50"
+                    disabled={restyling} onclick={() => restyle({ preset: s })}>+ {labelFor(s)}</button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+          {#if running && activeTake}
+            <!-- A later take rendering behind the one on screen. -->
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between text-xs font-semibold">
+                <span>{STAGE_LABEL[activeTake.status] || activeTake.status} · {labelFor(activeTake.preset)}{#if queuedCount} · {queuedCount} queued{/if}</span>
+                <span class="text-muted">{pct}%</span>
+              </div>
+              <div class="h-1.5 w-full overflow-hidden rounded-full bg-[var(--surface-2)]">
+                <div class="h-full rounded-full bg-[var(--accent)] transition-[width] duration-500" style="width: {pct}%"></div>
+              </div>
+              <p class="text-xs text-muted">{job.detail || 'Working…'}</p>
+            </div>
+          {/if}
           <div class="flex flex-wrap gap-2">
-            <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-[var(--on-accent)]" href={movieResultUrl(true, job.job_id)} download={job.result.filename}>⇩ Download MP4</a>
+            <a class="rounded-lg bg-[var(--accent)] px-4 py-2.5 font-bold text-[var(--on-accent)]" href={movieResultUrl(true, current.job_id, current.job_id)} download={current.result.filename}>⇩ Download MP4</a>
             <button type="button" class="rounded-lg border border-line px-4 py-2.5 font-semibold disabled:opacity-60"
-              disabled={committing || committed} onclick={addToCollection}>
-              {#if committed}✓ In “Beat Montage”{:else if committing}Adding…{:else}+ Add to Collection{/if}
+              disabled={committingId === current.job_id || current.committed} onclick={() => addToCollection(current)}>
+              {#if current.committed}✓ In “Beat Montage”{:else if committingId === current.job_id}Adding…{:else}+ Add to Collection{/if}
             </button>
+            <button type="button" class="rounded-lg border border-line px-4 py-2.5 font-semibold disabled:opacity-60"
+              title="Render this style again with a fresh seed — different moments, same clips and song"
+              disabled={restyling} onclick={() => restyle({ preset: current.preset, newSeed: true })}>↻ Another take</button>
           </div>
         </div>
       {:else if running}
