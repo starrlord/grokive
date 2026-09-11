@@ -51,7 +51,11 @@ CREATE TABLE IF NOT EXISTS media (
   has_subtitles     INTEGER DEFAULT 0,
   size_bytes        INTEGER,
   api_generated     INTEGER DEFAULT 0,
-  preset            TEXT
+  preset            TEXT,
+  is_root_celebrity INTEGER,
+  r_rated           INTEGER,
+  moderated         INTEGER,
+  is_ext            INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_media_created ON media(created_at);
 CREATE INDEX IF NOT EXISTS idx_media_type    ON media(media_type);
@@ -72,11 +76,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
+# Grok's per-asset flags (gdownloader.AUX_FLAG_KEYS). Stored nullable: SQLite has no bool,
+# and NULL is load-bearing here -- it means "never captured", which covers the whole library
+# archived before these existed. Only 1/0 are Grok's own answer.
+AUX_FLAG_COLUMNS = ("is_root_celebrity", "r_rated", "moderated", "is_ext")
+
 MEDIA_COLUMNS = [
     "id", "media_type", "prompt", "normalized_prompt", "model", "created_at",
     "parent_id", "source_url", "local_path", "href", "thumb", "subtitles",
     "canvas_id", "canvas_name", "thumb_w", "thumb_h", "media_w", "media_h",
     "has_subtitles", "size_bytes", "api_generated", "preset",
+    *AUX_FLAG_COLUMNS,
 ]
 
 
@@ -190,6 +200,15 @@ def build_index(
             conn.execute("ALTER TABLE media ADD COLUMN preset TEXT")
         except sqlite3.OperationalError:
             pass  # already present
+        # Grok's per-asset content/provenance flags. Deliberately NO DEFAULT: these are
+        # only captured off the conversations route and only since they were added, so
+        # NULL has to keep meaning "unknown" for the whole existing library. Defaulting
+        # to 0 would assert Grok rated 25k historical items, which it never did.
+        for col in AUX_FLAG_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE media ADD COLUMN {col} INTEGER")
+            except sqlite3.OperationalError:
+                pass  # already present
         # Carry probed dimensions forward from the previous build so we only ffprobe
         # each video once (not on every startup/sync rebuild). size_bytes rides along
         # as a change marker: it lets the upscaled-video branch below trust the cache
@@ -271,6 +290,8 @@ def build_index(
                 1 if subtitles else 0, size_bytes,
                 1 if item.get("api_generated") else 0,
                 item.get("preset"),
+                *(None if item.get(col) is None else (1 if item.get(col) else 0)
+                  for col in AUX_FLAG_COLUMNS),
             ))
             for tag in tags:
                 tag_rows.append((mid, tag))
@@ -460,6 +481,7 @@ def query_media(
             ]
             d["has_subtitles"] = bool(d["has_subtitles"])
             d["api_generated"] = bool(d.get("api_generated"))
+            _decode_flags(d)
             items.append(d)
         return {"total": total, "page": page, "page_size": page_size, "items": items}
     finally:
@@ -483,6 +505,7 @@ def media_by_ids(db_path: str | Path, ids: list[str]) -> list[dict[str, Any]]:
                 d = dict(row)
                 d["has_subtitles"] = bool(d["has_subtitles"])
                 d["api_generated"] = bool(d.get("api_generated"))
+                _decode_flags(d)
                 d["tags"] = [
                     r[0] for r in conn.execute("SELECT tag FROM media_tags WHERE media_id = ?", (d["id"],))
                 ]
@@ -573,12 +596,22 @@ def filter_video_ids_by_orientation(db_path: str | Path, ids: list[str] | None,
         conn.close()
 
 
+def _decode_flags(d: dict[str, Any]) -> dict[str, Any]:
+    """1/0/None -> True/False/None. bool() would fold None into False and so claim Grok
+    rated everything archived before these flags existed; the None passes through."""
+    for col in AUX_FLAG_COLUMNS:
+        if d.get(col) is not None:
+            d[col] = bool(d[col])
+    return d
+
+
 def _media_dict(conn: sqlite3.Connection, row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     d = dict(row)
     d["has_subtitles"] = bool(d["has_subtitles"])
     d["api_generated"] = bool(d.get("api_generated"))
+    _decode_flags(d)
     d["tags"] = [
         r[0] for r in conn.execute("SELECT tag FROM media_tags WHERE media_id = ? ORDER BY tag", (d["id"],))
     ]

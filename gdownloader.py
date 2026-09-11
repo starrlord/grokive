@@ -107,6 +107,13 @@ class MediaItem:
     canvas_name: str | None = None
     width: int | None = None
     height: int | None = None
+    # Grok's per-asset flags (see AUX_FLAG_KEYS). None means "never captured", which is
+    # every record archived before this landed and everything off the v1 routes -- only
+    # the conversations walker sees auxKeys. Kept distinct from False on purpose.
+    is_root_celebrity: bool | None = None
+    r_rated: bool | None = None
+    moderated: bool | None = None
+    is_ext: bool | None = None
 
 
 def parse_curl_samples(path: Path) -> list[RequestSpec]:
@@ -316,6 +323,33 @@ def _aux_id_list(aux: dict[str, Any], key: str) -> list[str]:
     return []
 
 
+# Content/provenance flags Grok stamps on an asset's auxKeys. Values arrive as the
+# STRINGS "true"/"false", not JSON booleans. is_root_celebrity marks a celebrity likeness
+# on the root/reference image, r_rated and moderated are content ratings, and is_ext most
+# likely marks an extended video (Grok's own UI never reads it, so that one is inferred
+# from the EXTEND_* vocabulary around it rather than confirmed).
+AUX_FLAG_KEYS = ("is_root_celebrity", "r_rated", "moderated", "is_ext")
+
+
+def _as_flag(value: Any) -> bool | None:
+    """A tri-state flag: True/False when the asset says so, None when it stays silent.
+
+    None is not False. An asset that never carried the key is indistinguishable from one
+    that carried "false" if both collapse to False, and every record archived before these
+    were captured would then claim a rating Grok never gave it."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    return None
+
+
+def _aux_flags(asset: dict[str, Any]) -> dict[str, bool | None]:
+    """Every AUX_FLAG_KEYS value on one asset, each tri-state."""
+    aux = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    return {key: _as_flag(aux.get(key)) for key in AUX_FLAG_KEYS}
+
+
 def _asset_id_in_url(value: str) -> str | None:
     """The asset id embedded in an asset URL/key — .../generated/<id>/image.jpg or
     .../<id>/content.
@@ -394,6 +428,7 @@ def extract_conversation_items(responses_json: Any) -> list[dict[str, Any]]:
                 "source_url": GROK_ASSETS_BASE + key.lstrip("/"),
                 "width": asset.get("width"),
                 "height": asset.get("height"),
+                **_aux_flags(asset),
             }
             if is_producer:
                 produced.add(item_id)
@@ -537,10 +572,19 @@ def append_failure(path: Path, failure: dict[str, Any]) -> None:
 
 
 def request_json(client: httpx.Client, spec: RequestSpec) -> Any:
+    # Drop the captured browser's Accept-Encoding so httpx advertises only codings it can
+    # actually decode. Replaying it verbatim offers br/zstd on httpx's behalf, and when the
+    # matching decoder isn't installed httpx hands back the compressed bytes undecoded --
+    # .json() then dies on the first non-UTF-8 byte. grok.com began serving br on these
+    # endpoints, which is exactly how that surfaced. requirements.txt pins the extras so the
+    # codings stay on the table; this keeps a stripped-down install correct rather than
+    # broken. _fetch_account_quota in server.py drops the header for the same reason.
+    headers = {k: v for k, v in spec.headers_with_cookies().items()
+               if k.lower() != "accept-encoding"}
     response = client.request(
         spec.method,
         spec.url,
-        headers=spec.headers_with_cookies(),
+        headers=headers,
         content=spec.body,
         timeout=60,
     )
@@ -949,6 +993,10 @@ def normalize_record(raw: dict[str, Any], local_path: Path) -> MediaItem:
         canvas_name=str(raw["canvas_name"]) if raw.get("canvas_name") else None,
         width=int(raw["width"]) if raw.get("width") else None,
         height=int(raw["height"]) if raw.get("height") else None,
+        is_root_celebrity=_as_flag(raw.get("is_root_celebrity")),
+        r_rated=_as_flag(raw.get("r_rated")),
+        moderated=_as_flag(raw.get("moderated")),
+        is_ext=_as_flag(raw.get("is_ext")),
     )
 
 
@@ -1223,6 +1271,13 @@ def patch_existing_record(raw: dict[str, Any], by_id: dict[str, dict[str, Any]])
     if prompt and not record.get("prompt"):
         record["prompt"] = str(prompt)
         changed = True
+    # Only fills the gap where the flag was never captured; a flag Grok has since flipped
+    # is left alone, same as every other field here.
+    for key in AUX_FLAG_KEYS:
+        flag = _as_flag(raw.get(key))
+        if flag is not None and record.get(key) is None:
+            record[key] = flag
+            changed = True
     return changed
 
 
@@ -1310,8 +1365,10 @@ def main() -> None:
             saved_count = archive_agent_canvases(client, auth_spec, media_spec, by_id, args)
         else:
             list_spec = grok_favorites_spec(auth_spec, args.page_size) if args.grok_favorites else specs[0]
+            listed_count = 0
             for page_data in iter_pages(client, list_spec, args.max_pages):
                 page_items = extract_media_items(page_data)
+                listed_count += len(page_items)
                 if args.refresh_metadata:
                     for raw in page_items:
                         saved_count += patch_existing_record(raw, by_id)
@@ -1323,6 +1380,19 @@ def main() -> None:
                     if process_item(client, media_spec, raw, by_id, args):
                         saved_count += 1
                         report()
+            # An empty favorites listing is not evidence the account has no favorites:
+            # /rest/media/post/list fails OPEN. It ignores an unrecognised filter.source and
+            # answers with the public feed instead, and MEDIA_POST_SOURCE_LIKED itself now
+            # returns {"posts": []} because the store behind it was retired server-side — its
+            # sibling MEDIA_POST_SOURCE_OWNED says so outright ("MongoDB-backed media post
+            # listing has been removed", HTTP 400). Both shapes still exit 0, so a silent
+            # "+0 new" would read as "nothing new" when it means "this route is dead".
+            if args.grok_favorites and not listed_count:
+                print(
+                    "WARNING: favorites listing returned 0 posts. Treat this as a broken route, "
+                    "not an empty library. Media made in the current Imagine UI arrives via the "
+                    "`conversations` subcommand instead; check that it ran."
+                )
 
     save_metadata(args.metadata, list(by_id.values()))
     if args.refresh_metadata:

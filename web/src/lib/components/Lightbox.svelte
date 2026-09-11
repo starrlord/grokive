@@ -2,6 +2,17 @@
   import { loadVolume, saveVolume, theme } from '$lib/state.js';
   // Beat-montage preset id -> human label, shown in the info panel for montages.
   const STYLE_LABELS = { classic: 'Classic', cinematic: 'Cinematic', moody: 'Moody', musicvideo: 'Music Video' };
+  // Grok's per-asset flags, shown in the info panel only when Grok actually set one.
+  // Captured off the conversations route since Sept 2026, so almost everything archived
+  // before that has them as null (= never captured) and shows no row at all — null is
+  // deliberately not false. `is_ext` reads as an extended video; Grok's own UI never
+  // reads the key, so the label is our best inference, hence the raw key in the tooltip.
+  const FLAG_LABELS = {
+    is_root_celebrity: 'Celebrity likeness',
+    r_rated: 'R-rated',
+    moderated: 'Moderated',
+    is_ext: 'Extended'
+  };
   // One AudioContext shared across all lightbox opens — browsers cap how many you
   // can create. Routing the <video> through a context that's resumed inside a user
   // gesture makes the *context* the authorized audio output, so every subsequent
@@ -292,6 +303,12 @@
   // client-side lookup against the store. Sealed (locked, not unlocked) collections
   // are served with ids: [] precisely so membership can't leak — no filtering needed.
   const memberOf = $derived(item ? ($collections || []).filter((c) => (c.ids || []).includes(item.id)) : []);
+  // Only the flags Grok set to true earn a chip: a row of "R-rated: no / Moderated: no"
+  // is noise on every clip, and rendering false the same as null would misreport the
+  // whole pre-capture library as explicitly rated.
+  const flags = $derived(
+    item ? Object.keys(FLAG_LABELS).filter((key) => item[key] === true) : []
+  );
   // Tag chip: jump out of the viewer to All Media filtered to just that tag — one
   // predictable "show me more like this" destination no matter where the lightbox
   // was opened from (a play-queue over the collections landing, a canvas, etc.).
@@ -590,6 +607,15 @@
                style="background: color-mix(in srgb, var(--accent-2) 18%, transparent); color: var(--accent-2);">
             <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="currentColor" aria-hidden="true"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>
             <span>Generated with Grok Imagine</span>
+          </div>
+        {/if}
+        {#if flags.length}
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <span class="text-xs font-bold uppercase tracking-wide text-muted">Flags</span>
+            {#each flags as key (key)}
+              <span class="rounded-full border border-line px-3 py-1 text-xs font-semibold text-muted"
+                title={`Grok asset flag: ${key}`}>{FLAG_LABELS[key]}</span>
+            {/each}
           </div>
         {/if}
         {#if item.tags?.length}
