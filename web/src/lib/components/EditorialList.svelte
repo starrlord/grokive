@@ -54,11 +54,11 @@
             {#each it.tags.slice(0, 6) as tag (tag)}
               {#if filterable}
                 {@const active = $filters.tags.includes(tag)}
-                <button type="button"
-                  class="rounded-full border px-2 py-0.5 text-xs transition {active ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted hover:border-[var(--accent)]'}"
+                <button type="button" title={tag}
+                  class="max-w-full truncate rounded-full border px-2 py-0.5 text-xs transition {active ? 'border-transparent bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-muted hover:border-[var(--accent)]'}"
                   onclick={() => toggleTag(tag)}>{tag}</button>
               {:else}
-                <span class="rounded-full border border-line px-2 py-0.5 text-xs text-muted">{tag}</span>
+                <span class="max-w-full truncate rounded-full border border-line px-2 py-0.5 text-xs text-muted" title={tag}>{tag}</span>
               {/if}
             {/each}
           </div>

@@ -95,6 +95,7 @@ DELETED_FILE = DATA_DIR / "deleted_ids.json"  # blocklist: ids the downloader mu
 PLAYLISTS_FILE = DATA_DIR / "playlists.json"
 COLLECTIONS_FILE = DATA_DIR / "collections.json"
 COLLECTION_GROUPS_FILE = DATA_DIR / "collection_groups.json"
+TAG_WORDS_FILE = DATA_DIR / "tag_words.json"  # optional additions to the tagger's word lists (db.build_index reads it)
 SCENES_FILE = DATA_DIR / "scenes.json"  # saved Prompt Studio Scene Builder scenes
 RESPONSES_FILE = DATA_DIR / "saved_responses.json"  # Prompt Studio responses the user starred
 PERSONAS_FILE = DATA_DIR / "personas.json"  # Prompt Studio persona / voice cards
@@ -1895,6 +1896,12 @@ def _clean_collection(entry: dict) -> dict | None:
     group = _clean_group_name(entry.get("group"))
     if group:
         out["group"] = group
+        # "Use as group cover": a pin STAMP, not a flag — the group card takes the newest
+        # pin among the members this client can see, so a stale pin on a member that is
+        # sealed right now (and can't be cleared from the client) is simply outranked.
+        pin = str(entry.get("group_cover_at") or "")[:32]
+        if pin:
+            out["group_cover_at"] = pin
     # Nested collections: an optional pointer at a parent collection in the same file.
     # Kept here (the whitelist choke point) or every write path would silently strip it.
     # Validity (parent exists, parent is a root, no group on children) is enforced by
@@ -1902,6 +1909,12 @@ def _clean_collection(entry: dict) -> dict | None:
     parent_id = str(entry.get("parent_id") or "")[:64]
     if parent_id and parent_id != out["id"]:
         out["parent_id"] = parent_id
+    # "Use as cover" on a sub-collection, stored on the PARENT (so a sealed child's hollow
+    # client copy never has to be edited). Must name a child of this collection — enforced
+    # by _normalize_collection_parents alongside the other nesting rules.
+    cover_child_id = str(entry.get("cover_child_id") or "")[:64]
+    if cover_child_id:
+        out["cover_child_id"] = cover_child_id
     # Password-lock state rides through every write. It's server-authoritative: the
     # bulk /api/collections POST re-supplies it from disk, and the dedicated lock
     # endpoints set it — so a normal client save can never forge or clear a lock here.
@@ -1959,6 +1972,14 @@ def _normalize_collection_parents(collections: list[dict]) -> list[dict]:
             c.pop("parent_id", None)
         if c.get("parent_id"):
             c.pop("group", None)
+            c.pop("group_cover_at", None)
+    # A cover pin must still name one of this collection's own children (a deleted, moved
+    # or demoted child silently unpins; a child can't be a parent, so it never keeps one).
+    parent_of = {str(c.get("id")): str(c.get("parent_id")) for c in collections if c.get("parent_id")}
+    for c in collections:
+        pin = str(c.get("cover_child_id") or "")
+        if pin and parent_of.get(pin) != str(c.get("id")):
+            c.pop("cover_child_id", None)
     return collections
 
 
@@ -2296,12 +2317,23 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         rebuild_db(wait=True)
     unlocked = _session_unlocked()
     grants = session.get("unlocked") or {}
+    media_of = {str(c.get("id")): db.media_by_ids(DB_FILE, c.get("ids", [])) for c in collections}
+    # A parent's cover mosaic also draws on its sub-collections (the landing shows only
+    # roots, so otherwise filing everything into sub-folders leaves the parent's card stale
+    # or blank). Only children this session can see: a sealed child's media stays out.
+    child_media: dict[str, list[dict]] = {}
+    open_children: dict[str, str] = {}  # visible child id -> its parent id
+    for c in collections:
+        pid = str(c.get("parent_id") or "")
+        if pid and not (c.get("locked") and c.get("pass_hash") and str(c.get("id")) not in unlocked):
+            child_media.setdefault(pid, []).extend(media_of[str(c.get("id"))])
+            open_children[str(c.get("id"))] = pid
     summaries = []
     for coll in collections:
         cid = str(coll.get("id"))
         is_locked = bool(coll.get("locked") and coll.get("pass_hash"))
         is_unlocked = cid in unlocked
-        media = db.media_by_ids(DB_FILE, coll.get("ids", []))
+        media = media_of[cid]
         # Never leak the password hash to the client.
         base = {k: v for k, v in coll.items() if k != "pass_hash"}
         if is_locked and not is_unlocked:
@@ -2325,14 +2357,32 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         # ever added: media_by_ids preserves insertion order (oldest-first), so sort
         # by created_at desc just for the cover/mosaic. `ids` stays in insertion order
         # (it drives playback / montage). An explicitly-set cover_id still wins.
-        recent = sorted(media, key=lambda it: it.get("created_at") or "", reverse=True)
-        cover_id = coll.get("cover_id") if coll.get("cover_id") in ids else (recent[0]["id"] if recent else "")
-        cover_item = next((it for it in media if it["id"] == cover_id), None)
+        # `cover_id` in the summary stays the collection's OWN (explicit, else its newest):
+        # the client round-trips it on every save, so a child's item must never land there.
+        own_cover = coll.get("cover_id") if coll.get("cover_id") in ids else ""
+        newest_own = max(media, key=lambda it: it.get("created_at") or "")["id"] if media else ""
+        pinned = str(coll.get("cover_child_id") or "")
+        pinned_media = media_of[pinned] if open_children.get(pinned) == cid else []
+        if any(it.get("thumb") for it in pinned_media):
+            # A pinned sub-collection's newest items ARE the cover, and the parent's own
+            # cover_id steps aside. A sealed (or thumb-less) pinned child falls through.
+            pool = {it["id"]: it for it in pinned_media}
+            display_id = ""
+        else:
+            # Sub-collection media joins the cover pool only (counts and `ids` stay the
+            # collection's own), deduped since a clip can sit in both parent and child.
+            pool = {it["id"]: it for it in child_media.get(cid, [])}
+            pool.update({it["id"]: it for it in media})
+            display_id = own_cover
+        recent = sorted(pool.values(), key=lambda it: it.get("created_at") or "", reverse=True)
+        cover_item = pool.get(display_id or (recent[0]["id"] if recent else ""))
         # Long-press peek needs the full-media href behind each cover thumb.
         # `cover_items` mirrors `covers` (same items, same order); `cover_peek` is the
         # explicit/primary cover, which may be older than the recent-4 mosaic.
-        # `id` lets the client request the high-res /covers/<id>.jpg tier via srcset.
-        peek = lambda it: {"id": it.get("id"), "thumb": it.get("thumb"), "href": it.get("href"), "media_type": it.get("media_type")}
+        # `id` lets the client request the high-res /covers/<id>.jpg tier via srcset;
+        # `created_at` lets a group card pick the newest covers across its members.
+        peek = lambda it: {"id": it.get("id"), "thumb": it.get("thumb"), "href": it.get("href"),
+                           "media_type": it.get("media_type"), "created_at": it.get("created_at")}
         cover_pool = [it for it in recent if it.get("thumb")][:4]
         covers = [it.get("thumb") for it in cover_pool]
         videos = sum(1 for it in media if it.get("media_type") == "video")
@@ -2340,7 +2390,7 @@ def _collection_summaries(collections: list[dict]) -> list[dict]:
         summaries.append({
             **base,
             "ids": ids,
-            "cover_id": cover_id,
+            "cover_id": own_cover or newest_own,
             "cover": cover_item.get("thumb") if cover_item else (covers[0] if covers else None),
             "covers": covers,
             "cover_items": [peek(it) for it in cover_pool],
@@ -2480,6 +2530,8 @@ def api_collections_post() -> Response:
             return jsonify(ok=False, error="Unlock the collection before changing what's nested inside it."), 403
         if incoming_group:
             entry = {**entry, "group": _canonical_group_name(incoming_group, existing_list, _load_groups())}
+        if prior and incoming_group_key != prior_group_key:
+            entry = {**entry, "group_cover_at": ""}  # a cover pin doesn't follow a collection to another group
         if prior and cid in protected_cids:
             entry = prior
         elif prior and prior.get("locked") and prior.get("pass_hash"):
@@ -5351,10 +5403,12 @@ def _library_sets() -> tuple[set, set]:
     return favorites, stashed
 
 
-def _multi_arg(name: str) -> list[str]:
+def _multi_arg(name: str, split: bool = True) -> list[str]:
+    """Repeated query params, each comma-split unless ``split=False``. Tags aren't split:
+    a tag is a phrase and can hold commas (a spoken line), so the SPA sends one param each."""
     values: list[str] = []
     for raw in request.args.getlist(name):
-        values.extend(part for part in raw.split(",") if part)
+        values.extend((part for part in raw.split(",") if part) if split else ([raw] if raw else []))
     return values
 
 
@@ -5429,7 +5483,7 @@ def api_media() -> Response:
         DB_FILE,
         view=request.args.get("view", "recent"),
         q=request.args.get("q", ""),
-        tags=_multi_arg("tags"),
+        tags=_multi_arg("tags", split=False),
         models=_multi_arg("models"),
         canvas=request.args.get("canvas") or None,
         media_type=request.args.get("type", "all"),
@@ -5469,7 +5523,7 @@ def api_facets() -> Response:
         DB_FILE,
         view=request.args.get("view", "recent"),
         q=request.args.get("q", ""),
-        tags=_multi_arg("tags"),
+        tags=_multi_arg("tags", split=False),
         models=_multi_arg("models"),
         resolutions=_multi_arg("res"),
         canvas=request.args.get("canvas") or None,
@@ -6899,6 +6953,7 @@ _BACKUP_TARGETS = {
     "library.json": LIBRARY_FILE,
     "collections.json": COLLECTIONS_FILE,
     "collection_groups.json": COLLECTION_GROUPS_FILE,
+    "tag_words.json": TAG_WORDS_FILE,
     "playlists.json": PLAYLISTS_FILE,
     "saved_responses.json": RESPONSES_FILE,
     "scenes.json": SCENES_FILE,
@@ -6927,7 +6982,7 @@ _ACCOUNT_ARC_RE = re.compile(r"^grok_accounts/([a-z0-9][a-z0-9-]{2,31})\.txt$")
 # corrupt entry aborts the whole restore rather than half-overwriting live data).
 _BACKUP_JSON_NAMES = {
     "metadata.json", "library.json", "collections.json", "playlists.json",
-    "collection_groups.json",
+    "collection_groups.json", "tag_words.json",
     "saved_responses.json", "scenes.json", "personas.json",
     "freeform_presets.json", "deleted_ids.json", "settings.json",
     "grok_accounts.json",

@@ -55,6 +55,16 @@ def test_long_prompt_imports_exactly_once():
     print("  import: >2000-char prompt imported once, stable on re-run OK")
 
 
+def test_tag_filter_params_keep_commas():
+    # Tags are phrases (a spoken line can hold commas): one query param per tag, never split.
+    from werkzeug.datastructures import MultiDict
+    args = MultiDict([("tags", "meet me by the pool, at noon"), ("tags", "small talk"), ("models", "a,b")])
+    with server.app.test_request_context("/api/media", query_string=args):
+        assert server._multi_arg("tags", split=False) == ["meet me by the pool, at noon", "small talk"]
+        assert server._multi_arg("models") == ["a", "b"]
+    print("  tags: comma inside a tag survives the query string OK")
+
+
 def test_duplicate_pile_collapses_and_merges_tags():
     long_text = _write_state(saved=None)
     stored = long_text[:server.SAVED_PROMPT_TEXT_LIMIT]

@@ -21,7 +21,8 @@ export function fetchMedia(f, page = 1, pageSize = 120, collectionId = null) {
   const p = new URLSearchParams();
   p.set('view', f.view || 'recent');
   if (f.query) p.set('q', f.query);
-  if (f.tags?.length) p.set('tags', f.tags.join(','));
+  // One param per tag, never comma-joined: a tag is a phrase and can contain commas.
+  for (const t of f.tags || []) p.append('tags', t);
   if (f.models?.length) p.set('models', f.models.join(','));
   if (f.resolutions?.length) p.set('res', f.resolutions.join(','));
   if (f.canvas) p.set('canvas', f.canvas);
@@ -42,7 +43,7 @@ export function fetchFacets(f = {}, collectionId = null) {
   // Send the active chip selections so each facet's counts reflect the others
   // (e.g. selecting tags narrows the resolution/model chips). The server excludes
   // each facet's own dimension so its full option list stays visible.
-  if (f.tags?.length) p.set('tags', f.tags.join(','));
+  for (const t of f.tags || []) p.append('tags', t);
   if (f.models?.length) p.set('models', f.models.join(','));
   if (f.resolutions?.length) p.set('res', f.resolutions.join(','));
   if (f.canvas) p.set('canvas', f.canvas);

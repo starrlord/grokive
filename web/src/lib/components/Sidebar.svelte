@@ -28,14 +28,14 @@
     {#if $filters.tags.length}
       <div class="mb-2 flex flex-wrap gap-1.5">
         {#each $filters.tags as t (t)}
-          <button class="rounded-full bg-[var(--accent)] px-2.5 py-1 text-xs font-semibold text-[var(--on-accent)]" onclick={() => toggleTag(t)}>{t} ✕</button>
+          <button class="inline-flex max-w-full items-center gap-1 rounded-full bg-[var(--accent)] px-2.5 py-1 text-xs font-semibold text-[var(--on-accent)]" title={t} onclick={() => toggleTag(t)}><span class="truncate">{t}</span> ✕</button>
         {/each}
       </div>
     {/if}
     <div class="flex flex-wrap gap-1.5">
       {#each topTags as t (t.name)}
         {#if !$filters.tags.includes(t.name)}
-          <button class="rounded-full border border-line px-2.5 py-1 text-xs hover:border-[var(--accent)]" onclick={() => toggleTag(t.name)}>{t.name} <span class="opacity-70">{t.count}</span></button>
+          <button class="inline-flex max-w-full items-center gap-1 rounded-full border border-line px-2.5 py-1 text-xs hover:border-[var(--accent)]" title={t.name} onclick={() => toggleTag(t.name)}><span class="truncate">{t.name}</span> <span class="shrink-0 opacity-70">{t.count}</span></button>
         {/if}
       {/each}
     </div>

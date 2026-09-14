@@ -261,8 +261,8 @@ class _Response:
 
 
 def _fake_cdn(present, raises=False):
-    """Stand in for the CDN at the TRANSPORT seam (curl_cffi), not at _media_url_exists —
-    the per-run memo lives inside that function, so stubbing it would hide what we're
+    """Stand in for the CDN at the TRANSPORT seam (curl_cffi), not at _probe_url — the
+    per-run memo lives in prefer_hd1080 around it, so stubbing higher would hide what we're
     testing. `present` is the set of urls answering 200; calls records every request made."""
     calls = []
 
@@ -358,6 +358,112 @@ def test_images_and_canvas_assets_are_left_alone():
     moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
     assert moved == 0 and calls == []
     assert items[0]["source_url"].endswith("image.jpg")
+
+
+def test_probes_fan_out_but_each_url_is_asked_once():
+    """Parallel probing must not turn a shared sibling into duplicate requests."""
+    head, calls = _fake_cdn({HD})
+    other_sd = "https://assets.grok.com/users/u1/generated/vid-2/generated_video.mp4"
+    other_hd = g._hd1080_sibling_url(other_sd)
+    items = [
+        {"id": "vid-1", "source_url": SD},
+        {"id": "vid-1-again", "source_url": SD},
+        {"id": "vid-2", "source_url": other_sd},
+    ]
+    moved = _with_cdn(head, lambda: g.prefer_hd1080(SPEC, items, {}))
+    assert sorted(calls) == sorted([HD, other_hd])
+    assert moved == 2
+    assert items[0]["source_url"] == HD and items[1]["source_url"] == HD
+    assert items[2]["source_url"] == other_sd
+
+
+def _run_download_batch(workers):
+    """Drive process_items over a batch whose downloads finish in REVERSE order, and record
+    which thread made every library write. Returns what the batch left behind."""
+    import argparse
+    import json
+    import tempfile
+    import threading
+    import time
+    from pathlib import Path
+
+    ids = [f"vid-{n}" for n in range(8)]
+    base = "https://assets.grok.com/users/u1/generated"
+    items = [{"id": i, "prompt": f"prompt {i}", "createdAt": "2026-09-14T00:00:00Z",
+              "source_url": f"{base}/{i}/generated_video.mp4"} for i in ids]
+    items[6]["source_url"] = f"{base}/vid-6/generated_video_1080_hd.mp4"  # an upscale of a held clip
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+    writers = []
+
+    def fake_download(client, spec, url, dest):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.03 * (len(ids) - ids.index(dest.name)))  # the first item finishes LAST
+        with lock:
+            state["active"] -= 1
+        if dest.name == "vid-3":
+            raise RuntimeError("cdn said no")
+        out = dest.with_suffix(".mp4")
+        out.write_bytes(url.encode())
+        return out
+
+    saved_globals = (g.GALLERY_ROOT, g.DOWNLOAD_WORKERS, g.DELETED_IDS, g.REFRESHED,
+                     g.download_media, g.save_metadata, g.append_failure)
+    real_save, real_fail = g.save_metadata, g.append_failure
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "gallery"
+        try:
+            g.GALLERY_ROOT, g.DOWNLOAD_WORKERS, g.DELETED_IDS, g.REFRESHED = root, workers, set(), 0
+            g.download_media = fake_download
+            g.save_metadata = lambda path, recs: (writers.append(threading.get_ident()), real_save(path, recs))
+            g.append_failure = lambda path, f: (writers.append(threading.get_ident()), real_fail(path, f))
+            held_rel = f"media/videos/{g.media_shard('vid-6')}/vid-6.mp4"
+            (root / held_rel).parent.mkdir(parents=True)
+            (root / held_rel).write_bytes(b"sd")
+            by_id = {"vid-6": {"id": "vid-6", "prompt": "kept", "media_type": "video",
+                               "source_url": f"{base}/vid-6/generated_video.mp4", "local_path": held_rel}}
+            on_disk = root / f"media/videos/{g.media_shard('vid-5')}/vid-5.mp4"  # indexed, not fetched
+            on_disk.parent.mkdir(parents=True, exist_ok=True)
+            on_disk.write_bytes(b"copied in")
+            args = argparse.Namespace(metadata=Path(tmp) / "metadata.json",
+                                      failures=Path(tmp) / "failed.json", quiet=True)
+            saved = g.process_items(None, SPEC, items, by_id, args)
+            return {
+                "saved": saved, "peak": state["peak"], "writers": set(writers),
+                "order": list(by_id), "by_id": by_id, "refreshed": g.REFRESHED,
+                "metadata": json.loads(args.metadata.read_text(encoding="utf-8")),
+                "failures": [f["id"] for f in json.loads(args.failures.read_text(encoding="utf-8"))],
+            }
+        finally:
+            (g.GALLERY_ROOT, g.DOWNLOAD_WORKERS, g.DELETED_IDS, g.REFRESHED,
+             g.download_media, g.save_metadata, g.append_failure) = saved_globals
+
+
+def test_parallel_downloads_write_the_library_in_order_from_one_thread():
+    """The metadata.json guarantee. Downloads overlap and finish in reverse order, yet every
+    write — by_id, metadata.json, the failure log — lands on the main thread, in batch order."""
+    import threading
+
+    run = _run_download_batch(workers=4)
+    assert run["peak"] > 1                                   # the downloads really overlapped
+    assert run["writers"] == {threading.get_ident()}         # ...and nothing wrote off-thread
+    assert run["saved"] == 5                                 # 8 items: 1 failed, 1 indexed, 1 upscaled
+    assert run["order"] == ["vid-6", "vid-0", "vid-1", "vid-2", "vid-4", "vid-5", "vid-7"]
+    assert run["metadata"] == list(run["by_id"].values())    # the file matches memory exactly
+    assert run["failures"] == ["vid-3"]
+    assert run["refreshed"] == 1
+    assert run["by_id"]["vid-6"]["prompt"] == "kept"         # the upscale merged, didn't replace
+    assert run["by_id"]["vid-6"]["source_url"].endswith("generated_video_1080_hd.mp4")
+
+
+def test_parallel_batch_leaves_the_same_library_as_the_serial_loop():
+    """GROK_DOWNLOAD_WORKERS=1 is the old serial loop; any worker count must end identical."""
+    serial, parallel = _run_download_batch(workers=1), _run_download_batch(workers=4)
+    assert serial["peak"] == 1
+    for key in ("saved", "order", "metadata", "failures", "refreshed"):
+        assert serial[key] == parallel[key], key
 
 
 if __name__ == "__main__":

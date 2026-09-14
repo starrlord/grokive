@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,17 @@ DELETED_IDS: set[str] = set()
 # Count of items re-downloaded in place this run because Grok began serving an HD
 # (upscaled) variant for an id we already had — surfaced in the run summary.
 REFRESHED: int = 0
+# Sync downloads media in parallel per conversation. On a frozen set of 15 videos (109MB)
+# the download phase took 37.5s serially and 13-15s with 3-4 workers; a single 6-worker
+# sample was slower than 3, so the gain flattens fast. Every worker opens a fresh
+# connection on purpose -- a pooled curl_cffi Session had its connection dropped mid-video
+# on 3 of 6 downloads. 1 = the old strictly-serial loop, 1080p probes included.
+try:
+    DOWNLOAD_WORKERS = max(1, min(8, int(os.environ.get("GROK_DOWNLOAD_WORKERS", "") or 3)))
+except ValueError:
+    DOWNLOAD_WORKERS = 3
+# The 1080p probes are bodyless HEADs, so they tolerate far more fan-out than downloads.
+PROBE_WORKERS = 8 if DOWNLOAD_WORKERS > 1 else 1
 GROK_FAVORITES_ENDPOINT = "https://grok.com/rest/media/post/list"
 GROK_FAVORITES_FILTER = "MEDIA_POST_SOURCE_LIKED"
 GROK_CANVAS_LIST_ENDPOINT = "https://grok.com/rest/media/canvas/list"
@@ -1050,22 +1062,21 @@ def _hd1080_sibling_url(url: str) -> str:
     return urlunparse((parts.scheme, parts.netloc, f"{base}/{HD1080_BASENAME}", "", "", ""))
 
 
-def _media_url_exists(spec: RequestSpec, url: str) -> bool:
+def _probe_url(spec: RequestSpec, url: str) -> bool:
     """Is this asset actually on the CDN? HEAD it through the same browser impersonation
     download_media uses — assets.grok.com sits behind the same bot protection, so a plain
-    httpx probe would 403 and we'd wrongly conclude the file is missing."""
-    if url in _HD1080_PROBES:
-        return _HD1080_PROBES[url]
+    httpx probe would 403 and we'd wrongly conclude the file is missing.
+
+    Pure on purpose: it reads and writes nothing shared, so prefer_hd1080 can fan probes
+    out across threads and keep the per-run memo to itself."""
     try:
         response = cffi_requests.head(
             url, headers=spec.headers, cookies=spec.cookies,
             impersonate="firefox", allow_redirects=True, timeout=60,
         )
-        exists = response.status_code == 200
     except CffiRequestException:
-        exists = False  # unreachable is indistinguishable from absent; either way, keep SD
-    _HD1080_PROBES[url] = exists
-    return exists
+        return False  # unreachable is indistinguishable from absent; either way, keep SD
+    return response.status_code == 200
 
 
 def prefer_hd1080(spec: RequestSpec, items: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> int:
@@ -1078,8 +1089,13 @@ def prefer_hd1080(spec: RequestSpec, items: list[dict[str, Any]], by_id: dict[st
 
     PROBING, rather than swapping blind, is what keeps a missing sibling cheap: a 404 URL
     written into the record would cost 5 backed-off download attempts on EVERY later sync —
-    the same forever-retry trap moderated generations set (see extract_conversation_items)."""
-    upgraded = 0
+    the same forever-retry trap moderated generations set (see extract_conversation_items).
+
+    The probes fan out across PROBE_WORKERS threads. Every sync re-asks about every SD video
+    in every conversation, and one TLS handshake at a time that was ~1s each: 30 videos
+    cost 30s of a sync that downloaded nothing. Workers only make the request; the memo and
+    the item dicts are written back here, on the calling thread."""
+    candidates: list[tuple[dict[str, Any], str]] = []
     for raw in items:
         sibling = _hd1080_sibling_url(str(raw.get("source_url") or ""))
         if not sibling:
@@ -1088,7 +1104,17 @@ def prefer_hd1080(spec: RequestSpec, items: list[dict[str, Any]], by_id: dict[st
         held = str(by_id.get(str(raw.get("id")), {}).get("source_url") or "")
         if _media_res_rank(held) >= 3:
             continue
-        if not _media_url_exists(spec, sibling):
+        candidates.append((raw, sibling))
+    pending = list(dict.fromkeys(sibling for _, sibling in candidates if sibling not in _HD1080_PROBES))
+    if len(pending) > 1 and PROBE_WORKERS > 1:
+        with ThreadPoolExecutor(max_workers=min(PROBE_WORKERS, len(pending))) as pool:
+            found = list(pool.map(lambda url: _probe_url(spec, url), pending))
+    else:
+        found = [_probe_url(spec, url) for url in pending]
+    _HD1080_PROBES.update(zip(pending, found))
+    upgraded = 0
+    for raw, sibling in candidates:
+        if not _HD1080_PROBES[sibling]:
             continue
         raw["source_url"] = sibling
         # The asset metadata's width/height describe the SD render (1280x720). Rather than
@@ -1122,53 +1148,109 @@ def _drop_thumbnail(item_id: str) -> None:
         pass
 
 
-def refresh_hd(
-    client: httpx.Client,
-    media_spec: RequestSpec,
-    raw: dict[str, Any],
-    by_id: dict[str, dict[str, Any]],
-    args: argparse.Namespace,
-) -> bool:
-    """Re-download an item we already have because Grok now offers a higher-resolution variant
-    (an upscale — e.g. SD→1080p), same id, new asset URL. Overwrites the file in place and
-    refreshes ONLY the changed fields on the existing record — source_url, local_path,
-    dimensions, content_hash — preserving everything else (subtitles, flags, etc.). Drops the
-    stale thumbnail so the index step rebuilds it. Returns True on success."""
-    global REFRESHED
+@dataclass
+class _ItemJob:
+    """What one media item needs, decided on the main thread before anything runs.
+
+    kind is "index" (the file is already on disk; just record it), "new" (download it), or
+    "refresh" (re-download a held item in place: an upscale, or a record left mistyped).
+    path is the existing file for "index", else the destination without its extension."""
+    kind: str
+    raw: dict[str, Any]
+    item_id: str
+    url: str
+    path: Path
+
+
+def _plan_item(raw: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> _ItemJob | None:
+    """Decide what an item needs without doing any of it. Reads by_id and the disk, writes
+    nothing — so a whole batch can be planned before its downloads start."""
     item_id = str(raw["id"])
-    new_url = str(raw["source_url"])
+    if item_id in DELETED_IDS:
+        return None  # user deleted it; never bring it back
+    kind = "new"
+    if item_id in by_id:
+        # Self-heal upscales: if Grok now offers a HIGHER-resolution variant for an id we
+        # already have (e.g. SD→1080p, or 720p→1080p), re-download and replace it in place.
+        # Strictly-higher tier guard means a transient lower-res listing can never downgrade
+        # a file we already upgraded. Also re-fetch records left mis-typed by the earlier
+        # nested-videos bug (a video URL saved onto an image record) so they self-correct.
+        old = by_id[item_id]
+        new_url = str(raw.get("source_url") or "")
+        upgrade = bool(new_url) and _media_res_rank(new_url) > _media_res_rank(str(old.get("source_url") or ""))
+        if not (upgrade or _record_mistyped(old)):
+            return None
+        kind = "refresh"
+    source_url = str(raw["source_url"])
     media_type = resolve_media_type(raw)
     base = Path("media/videos" if media_type == "video" else "media/images")
     folder = base / media_shard(item_id)
-    old = by_id[item_id]
-    try:
-        (GALLERY_ROOT / folder).mkdir(parents=True, exist_ok=True)
-        local = download_media(client, media_spec, new_url, GALLERY_ROOT / folder / item_id)
-    except Exception as exc:
-        append_failure(args.failures, {"id": item_id, "source_url": new_url, "error": str(exc)})
-        print(f"failed HD refresh {item_id}: {exc}")
+    if kind == "new":
+        # If the media file is already on disk (e.g. copied in from another machine)
+        # but missing from metadata, index it instead of re-downloading. Check the
+        # sharded location first, then the legacy flat one.
+        existing_file = (next(iter((GALLERY_ROOT / folder).glob(f"{item_id}.*")), None)
+                         or next(iter((GALLERY_ROOT / base).glob(f"{item_id}.*")), None))
+        if existing_file is not None and existing_file.is_file():
+            return _ItemJob("index", raw, item_id, source_url, existing_file)
+    return _ItemJob(kind, raw, item_id, source_url, GALLERY_ROOT / folder / item_id)
+
+
+def _fetch_item(client: httpx.Client, media_spec: RequestSpec, job: _ItemJob) -> Path:
+    """Download one planned item — the only step that ever runs on a worker thread.
+
+    It touches nothing shared: not by_id, not metadata.json, not the failure log, only the
+    network and this item's own file. A batch carries one job per id, so no two workers
+    can write the same path."""
+    job.path.parent.mkdir(parents=True, exist_ok=True)
+    return download_media(client, media_spec, job.url, job.path)
+
+
+def _record_failure(job: _ItemJob, exc: Exception, args: argparse.Namespace) -> None:
+    append_failure(args.failures, {"id": job.item_id, "source_url": job.url, "error": str(exc)})
+    print(f"failed {'HD refresh ' if job.kind == 'refresh' else ''}{job.item_id}: {exc}")
+
+
+def _apply_item(
+    job: _ItemJob, local: Path | None, by_id: dict[str, dict[str, Any]], args: argparse.Namespace
+) -> bool:
+    """Write one finished item into the library. Main thread only. Returns True for a newly
+    downloaded file — indexed and refreshed items don't count, as before."""
+    if job.kind == "refresh":
+        _apply_refresh(job, local, by_id, args)
         return False
-    # Everything past the download is wrapped so a single malformed item can't throw out
-    # of process_item and abort the whole sync (the worker's outer catch would). On failure
-    # the record keeps its old SD URL, so the next sync simply retries.
+    path = job.path if job.kind == "index" else local
+    # Store local_path relative to GALLERY_ROOT (e.g. media/images/<id>.jpg).
+    record = normalize_record(job.raw, path.relative_to(GALLERY_ROOT))
+    by_id[job.item_id] = record.__dict__
+    save_metadata(args.metadata, list(by_id.values()))
+    if not args.quiet:
+        verb = "indexed existing" if job.kind == "index" else "saved"
+        print(f"{verb} {job.item_id} -> {path}")
+    return job.kind == "new"
+
+
+def _apply_refresh(
+    job: _ItemJob, local: Path, by_id: dict[str, dict[str, Any]], args: argparse.Namespace
+) -> None:
+    """Record an item re-downloaded because Grok now offers a higher-resolution variant (an
+    upscale — e.g. SD→1080p), same id, new asset URL. Refreshes ONLY the changed fields on
+    the existing record — source_url, local_path, dimensions, content_hash — preserving
+    everything else (subtitles, flags, etc.), and drops the stale thumbnail so the index
+    step rebuilds it."""
+    global REFRESHED
+    item_id = job.item_id
+    # Everything here is wrapped so a single malformed item can't throw out and abort the
+    # whole sync. On failure the record keeps its old SD URL, so the next sync simply retries.
     try:
         new_rel = local.relative_to(GALLERY_ROOT).as_posix()
-        # If the refreshed file landed at a different path (ext change, or old legacy/flat
-        # layout), remove the now-orphaned old file so we don't leave the stale small copy.
-        old_rel = str(old.get("local_path") or "").replace("\\", "/")
-        if old_rel and old_rel != new_rel:
-            try:
-                old_file = GALLERY_ROOT / old_rel
-                if old_file.is_file():
-                    old_file.unlink()
-            except OSError:
-                pass
+        old = by_id[item_id]
         # Merge: keep the existing record (subtitles/flags/etc.) and update only what changed.
         # Each field is taken from the fresh download only when present, so a sparse list item
         # never nulls out good existing metadata (e.g. a canvas_id).
-        fresh = normalize_record(raw, local.relative_to(GALLERY_ROOT)).__dict__
+        fresh = normalize_record(job.raw, local.relative_to(GALLERY_ROOT)).__dict__
         record = dict(old)
-        record["source_url"] = new_url
+        record["source_url"] = job.url
         record["local_path"] = new_rel
         record["content_hash"] = file_content_hash(local)
         # canvas_name is intentionally excluded: a canvas is user-renamable and the rename
@@ -1180,15 +1262,26 @@ def refresh_hd(
             if fresh.get(key) is not None:
                 record[key] = fresh[key]
         by_id[item_id] = record
+        # Save BEFORE removing the superseded file. The other order leaves a crash window in
+        # which metadata.json still points at a file that has just been deleted.
         save_metadata(args.metadata, list(by_id.values()))
+        # If the refreshed file landed at a different path (ext change, or old legacy/flat
+        # layout), remove the now-orphaned old file so we don't leave the stale small copy.
+        old_rel = str(old.get("local_path") or "").replace("\\", "/")
+        if old_rel and old_rel != new_rel:
+            try:
+                old_file = GALLERY_ROOT / old_rel
+                if old_file.is_file():
+                    old_file.unlink()
+            except OSError:
+                pass
         _drop_thumbnail(item_id)
     except Exception as exc:  # noqa: BLE001 - never let one item abort the sync
         print(f"failed HD refresh record {item_id}: {exc}")
-        return False
+        return
     REFRESHED += 1
     if not args.quiet:
         print(f"upgraded {item_id} -> {local} (upscaled)")
-    return True
 
 
 def process_item(
@@ -1199,54 +1292,73 @@ def process_item(
     args: argparse.Namespace,
 ) -> bool:
     """Download one media item and record it. Returns True if a new file was saved."""
-    item_id = str(raw["id"])
-    if item_id in DELETED_IDS:
-        return False  # user deleted it; never bring it back
-    if item_id in by_id:
-        # Self-heal upscales: if Grok now offers a HIGHER-resolution variant for an id we
-        # already have (e.g. SD→1080p, or 720p→1080p), re-download and replace it in place.
-        # Strictly-higher tier guard means a transient lower-res listing can never downgrade
-        # a file we already upgraded. Also re-fetch records left mis-typed by the earlier
-        # nested-videos bug (a video URL saved onto an image record) so they self-correct.
-        old = by_id[item_id]
-        new_url = str(raw.get("source_url") or "")
-        upgrade = bool(new_url) and _media_res_rank(new_url) > _media_res_rank(str(old.get("source_url") or ""))
-        if upgrade or _record_mistyped(old):
-            refresh_hd(client, media_spec, raw, by_id, args)
+    job = _plan_item(raw, by_id)
+    if job is None:
         return False
-    source_url = str(raw["source_url"])
-    media_type = resolve_media_type(raw)
-    base = Path("media/videos" if media_type == "video" else "media/images")
-    folder = base / media_shard(item_id)
-    # If the media file is already on disk (e.g. copied in from another machine)
-    # but missing from metadata, index it instead of re-downloading. Check the
-    # sharded location first, then the legacy flat one.
-    existing_file = (next(iter((GALLERY_ROOT / folder).glob(f"{item_id}.*")), None)
-                     or next(iter((GALLERY_ROOT / base).glob(f"{item_id}.*")), None))
-    if existing_file is not None and existing_file.is_file():
-        record = normalize_record(raw, existing_file.relative_to(GALLERY_ROOT))
-        by_id[item_id] = record.__dict__
-        save_metadata(args.metadata, list(by_id.values()))
-        if not args.quiet:
-            print(f"indexed existing {item_id} -> {existing_file}")
-        return False
+    local = None
+    if job.kind != "index":
+        try:
+            local = _fetch_item(client, media_spec, job)
+        except Exception as exc:
+            _record_failure(job, exc, args)
+            return False
+    return _apply_item(job, local, by_id, args)
+
+
+def process_items(
+    client: httpx.Client,
+    media_spec: RequestSpec,
+    items: list[dict[str, Any]],
+    by_id: dict[str, dict[str, Any]],
+    args: argparse.Namespace,
+) -> int:
+    """process_item over a batch, downloading in parallel. Returns how many new files were saved.
+
+    Only _fetch_item runs on worker threads. Every decision before it and every write after
+    it — by_id, metadata.json, failed_downloads.json, REFRESHED — happens on this thread,
+    one item at a time and in the batch's own order, even when downloads finish out of
+    order. So metadata.json receives exactly the sequence of writes the serial loop made,
+    and nothing shared is ever written concurrently: there are no locks because there is
+    nothing left to lock.
+
+    A crash mid-batch loses nothing that matters. Every applied item was saved as it was
+    applied, and a download that finished but wasn't applied yet is sitting on disk, where
+    the next sync's _plan_item indexes it instead of fetching it again."""
+    if DOWNLOAD_WORKERS <= 1:
+        return sum(process_item(client, media_spec, raw, by_id, args) for raw in items)
+    jobs: list[_ItemJob] = []
+    planned: set[str] = set()
+    for raw in items:
+        # One job per id, or two workers could write the same file. Only a repeated id can
+        # clash; it waits for the next sync, which plans it against the recorded first copy.
+        if str(raw["id"]) in planned:
+            continue
+        job = _plan_item(raw, by_id)
+        if job is not None:
+            jobs.append(job)
+            planned.add(job.item_id)
+    downloads = sum(job.kind != "index" for job in jobs)
+    saved = 0
+    pool = ThreadPoolExecutor(max_workers=max(1, min(DOWNLOAD_WORKERS, downloads)))
     try:
-        (GALLERY_ROOT / folder).mkdir(parents=True, exist_ok=True)
-        local = download_media(client, media_spec, source_url, GALLERY_ROOT / folder / item_id)
-    except Exception as exc:
-        append_failure(
-            args.failures,
-            {"id": item_id, "source_url": source_url, "error": str(exc)},
-        )
-        print(f"failed {item_id}: {exc}")
-        return False
-    # Store local_path relative to GALLERY_ROOT (e.g. media/images/<id>.jpg).
-    record = normalize_record(raw, local.relative_to(GALLERY_ROOT))
-    by_id[item_id] = record.__dict__
-    save_metadata(args.metadata, list(by_id.values()))
-    if not args.quiet:
-        print(f"saved {item_id} -> {local}")
-    return True
+        scheduled = [
+            (job, None if job.kind == "index" else pool.submit(_fetch_item, client, media_spec, job))
+            for job in jobs
+        ]
+        for job, future in scheduled:
+            local = None
+            if future is not None:
+                try:
+                    local = future.result()
+                except Exception as exc:
+                    _record_failure(job, exc, args)
+                    continue
+            if _apply_item(job, local, by_id, args):
+                saved += 1
+    finally:
+        # On an abort, don't start downloads nobody will apply; in-flight ones finish.
+        pool.shutdown(wait=True, cancel_futures=True)
+    return saved
 
 
 def patch_existing_record(raw: dict[str, Any], by_id: dict[str, dict[str, Any]]) -> bool:
@@ -1496,21 +1608,23 @@ def archive_conversations(
             print(f"conversation {conv_id}: failed ({exc})")
             continue
         print(f"conversation {conv_id} '{title}': {len(items)} media items")
-        # v2 never names its 1080p renders, so ask the CDN before downloading anything.
-        # Skipped under --refresh-metadata: that path only patches records, and pointing one
-        # at a file we haven't downloaded would leave the record describing bytes we don't have.
-        if not args.refresh_metadata:
-            upgraded = prefer_hd1080(media_spec, items, by_id)
-            if upgraded:
-                print(f"  {upgraded} video(s) have a 1080p render — taking that instead of SD")
-        for raw in items:
-            if args.refresh_metadata:
+        if args.refresh_metadata:
+            for raw in items:
                 saved_count += patch_existing_record(raw, by_id)
-                continue
-            if process_item(client, media_spec, raw, by_id, args):
-                saved_count += 1
-                if args.quiet and saved_count % 100 == 0:
-                    print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
+            continue
+        # v2 never names its 1080p renders, so ask the CDN before downloading anything.
+        # Skipped under --refresh-metadata (above): that path only patches records, and pointing
+        # one at a file we haven't downloaded would leave the record describing bytes we don't have.
+        upgraded = prefer_hd1080(media_spec, items, by_id)
+        if upgraded:
+            print(f"  {upgraded} video(s) have a 1080p render — taking that instead of SD")
+        # One batch per conversation, fully applied before the next conversation is planned,
+        # so an asset shared by two conversations resolves exactly as it did serially: the
+        # second sees the first's record.
+        before = saved_count
+        saved_count += process_items(client, media_spec, items, by_id, args)
+        if args.quiet and saved_count // 100 > before // 100:
+            print(f"saved {saved_count} new files; metadata records: {len(by_id)}")
     return saved_count
 
 

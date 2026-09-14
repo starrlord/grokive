@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from mediautil import group_key_and_label, media_rel_path, media_shard, tags_for_groups
+from mediautil import TAG_WORDS_FILE, group_key_and_label, load_tag_words, media_rel_path, media_shard, tags_for_groups
 
 try:
     from PIL import Image
@@ -173,7 +173,9 @@ def build_index(
             order.append(key)
         buckets[key]["ids"].append(item["id"])
     groups = [{"prompt": buckets[k]["prompt"]} for k in order]
-    tags_for_groups(groups)
+    # The data dir's optional tag_words.json extends the tagger's neutral built-in word lists
+    # (library-specific vocabulary is kept out of the repo and backed up with the data).
+    tags_for_groups(groups, load_tag_words(metadata_path.parent / TAG_WORDS_FILE))
     tags_by_id: dict[str, list[str]] = {}
     for key, group in zip(order, groups):
         for mid in buckets[key]["ids"]:

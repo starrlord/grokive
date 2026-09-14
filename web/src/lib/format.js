@@ -12,6 +12,24 @@ export function fmtSize(b) {
   return `${s} ${units[u]}`;
 }
 
+// A stored timestamp in the viewer's own time zone: "Jun 1, 2026, 12:09 PM CDT".
+// created_at is ISO-8601 UTC ("…T17:09:36.640727Z"); the fraction is trimmed to ms for
+// strict parsers. Date-only values ("2026-06-01") are shown as-is — parsing one reads as
+// UTC midnight and slides back a day west of Greenwich. Unparseable values pass through.
+export function fmtDateTime(v) {
+  if (v == null || v === '') return '';
+  const s = String(v);
+  let d;
+  if (/^\d+(\.\d+)?$/.test(s)) d = new Date(Number(s) < 1e12 ? Number(s) * 1000 : Number(s));
+  else if (s.includes('T')) d = new Date(s.replace(/(\.\d{3})\d+/, '$1'));
+  else return s;
+  if (isNaN(d)) return s;
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+  });
+}
+
 // Whole-number count with thousands separators: 1234 → "1,234".
 export function fmtCount(n) {
   return Number(n || 0).toLocaleString();

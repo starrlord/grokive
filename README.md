@@ -185,6 +185,7 @@ building on the server needed.
 | `VIDEO_ENCODER` | `auto` | Re-encoder for playlist merges and burned-in subtitles. `auto` uses the NVIDIA GPU (NVENC) when one is visible to the container, else CPU `libx264`. Force with `nvenc` or `cpu`. See *GPU video encoding* below. |
 | `BEAT_ENGINE` | `neural` | Beat detector for Beat Montage. Default uses **madmom** (steady beats + **real downbeats**, built into the image, CPU-only). Set `librosa` to use the simpler librosa tracker. See *Song Beat Montage → Beat & downbeat detection*. |
 | `MOVIE_RENDER_WORKERS` | `6` | Montage renders: parallel per-segment ffmpeg encodes and motion-analysis decodes (`1` = serial; clamped 1–16). |
+| `GROK_DOWNLOAD_WORKERS` | `3` | Sync: parallel media downloads per Imagine conversation (`1` = serial; clamped 1–8). 3–4 measured ~2.5–3× faster than serial; more isn't reliably faster. |
 | `GROK_MOTION_CACHE_MB` | `512` | Size cap for the motion-analysis cache (`/data/motion_cache`) used by Match Cut and Auto-pick; least-recently-used entries are evicted above it. `0` disables the cap. |
 | `GROK_MOTION_CACHE_DAYS` | `90` | Drop cached motion descriptors unused for this long. `0` disables. |
 | `SPA_DIR` | `/app/web/build` | Where the built SvelteKit app lives (advanced; the image sets this for you). |

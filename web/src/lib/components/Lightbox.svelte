@@ -40,7 +40,7 @@
   import { mediaRelated } from '$lib/api.js';
   import { copyText } from '$lib/clipboard.js';
   import { trapFocus } from '$lib/focusTrap.js';
-  import { fmtSize } from '$lib/format.js';
+  import { fmtSize, fmtDateTime } from '$lib/format.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import VisionPrompt from './VisionPrompt.svelte';
   import SubtitleStyleModal from './SubtitleStyleModal.svelte';
@@ -598,7 +598,7 @@
             fmtSize(item.size_bytes),
             item.model,
             item.preset ? (STYLE_LABELS[item.preset] || item.preset) : null,
-            (item.created_at || '').slice(0, 10),
+            fmtDateTime(item.created_at),
             (item.href || '').split('/').pop()
           ].filter(Boolean).join('  ·  ')}
         </p>
@@ -622,7 +622,8 @@
           <div class="mb-3 flex flex-wrap items-center gap-2">
             <span class="text-xs font-bold uppercase tracking-wide text-muted">Tags</span>
             {#each item.tags as tag (tag)}
-              <button type="button" class="rounded-full border border-line px-3 py-1 text-xs font-semibold transition hover:border-[var(--accent)]"
+              <!-- A tag can be a whole spoken line: wrap it as a soft bubble, not a stretched pill. -->
+              <button type="button" class="max-w-full rounded-2xl border border-line px-3 py-1 text-left text-xs font-semibold transition hover:border-[var(--accent)]"
                 title={`Show all media tagged “${tag}”`} onclick={() => browseTag(tag)}>{tag}</button>
             {/each}
           </div>

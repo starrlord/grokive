@@ -17,7 +17,7 @@
 
 <script>
   import { tick } from 'svelte';
-  import { collections, collectionGroups, removeCollection, updateCollection, loadCollections, requestGalleryReload } from '$lib/state.js';
+  import { collections, collectionGroups, removeCollection, updateCollection, setGroupCover, loadCollections, requestGalleryReload } from '$lib/state.js';
   import { relockCollection, relockAllCollections, relockGroup } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -63,6 +63,11 @@
   const isMontage = (c) => c.id === 'beat-montage' || c.name?.toLowerCase() === 'beat montage';
 
   const groupKey = (name) => String(name || '').trim().toLowerCase();
+  // The member a group card is pinned to ("Use as group cover"): the newest pin among
+  // members this session can see. A sealed member ships no covers, so it can't win.
+  const pinnedMember = (members) => members
+    .filter((m) => m.group_cover_at && !isSealed(m))
+    .reduce((best, m) => (!best || m.group_cover_at > best.group_cover_at ? m : best), null);
   const mediaCount = (c) => c.item_count ?? c.ids?.length ?? 0;
   const collectionsList = $derived($collections || []);
   const collectionGroupList = $derived($collectionGroups || []);
@@ -109,18 +114,26 @@
     for (const [key, bucket] of byKey) {
       const members = bucket.members || [];
       const server = bucket.server || {};
-      const covers = [];
-      const coverItems = [];
-      for (const member of members) {
-        for (const cover of (member.covers || []).slice(0, 4)) {
-          if (covers.length < 4) covers.push(cover);
+      // Cover: the pinned member's own mosaic, else the newest covers across every member
+      // this session can see (cover_items carry created_at) — never just whichever member
+      // happens to be stored first, which pinned the card to the newest-CREATED collection.
+      const pinned = pinnedMember(members);
+      let coverItems;
+      if (pinned) {
+        coverItems = (pinned.cover_items || []).slice(0, 4);
+      } else {
+        const byId = new Map();
+        for (const member of members) {
+          if (isSealed(member)) continue;
+          for (const item of member.cover_items || []) {
+            if (item?.id && !byId.has(item.id)) byId.set(item.id, item);
+          }
         }
-        for (const item of (member.cover_items || []).slice(0, 4)) {
-          if (coverItems.length < 4) coverItems.push(item);
-        }
-        if (!covers.length && member.cover) covers.push(member.cover);
-        if (!coverItems.length && member.cover_peek) coverItems.push(member.cover_peek);
+        coverItems = [...byId.values()]
+          .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+          .slice(0, 4);
       }
+      const covers = coverItems.map((it) => it.thumb);
       const itemCount = members.reduce((sum, c) => sum + mediaCount(c), 0);
       entries.push({
         id: `group:${key}`,
@@ -134,8 +147,8 @@
         image_count: members.reduce((sum, c) => sum + (c.image_count ?? 0), 0),
         covers,
         cover_items: coverItems,
-        cover: covers[0] || null,
-        cover_peek: coverItems[0] || null,
+        cover: (pinned ? pinned.cover : null) || covers[0] || null,
+        cover_peek: (pinned ? pinned.cover_peek : null) || coverItems[0] || null,
         locked: !!server.locked,
         unlocked: !!server.unlocked,
         unlock_expires: server.unlock_expires,
@@ -161,6 +174,7 @@
       .map((c, index) => ({ ...c, store_index: index }))
       .filter((c) => groupKey(c.group) === key);
   });
+  const activePin = $derived(activeGroup ? pinnedMember(activeMembers) : null);
   const baseEntries = $derived(activeGroup ? activeMembers : topEntries);
   const lockedHiddenCount = $derived(baseEntries.filter(isSealed).length);
   const visibleTotal = $derived(baseEntries.filter((c) => showLocked || !isSealed(c)).length);
@@ -544,7 +558,7 @@
             {/if}
             <span class="block truncate {hero ? 'text-2xl' : 'text-lg'} font-black tracking-tight">{c.name}</span>
           </span>
-          <span class="block {hero ? 'text-sm' : 'text-xs'} font-medium opacity-65">{sealed && c.is_group ? `Locked · ${c.collection_count ?? 0} collection${(c.collection_count ?? 0) === 1 ? '' : 's'}` : `${sealed ? 'Locked · ' : ''}${countLabel(c)}`}</span>
+          <span class="block {hero ? 'text-sm' : 'text-xs'} font-medium opacity-65">{sealed && c.is_group ? `Locked · ${c.collection_count ?? 0} collection${(c.collection_count ?? 0) === 1 ? '' : 's'}` : `${sealed ? 'Locked · ' : ''}${countLabel(c)}${activePin && activePin.id === c.id ? ' · Group cover' : ''}`}</span>
         </span>
       </div>
 
@@ -565,6 +579,17 @@
               <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--media-control-border-hover)] hover:bg-[var(--media-control-bg-hover)]"
                 title="Add this collection's videos and photos to the montage queue" aria-label="Add this collection's videos and photos to the montage queue" onclick={() => onqueue(c)}>
                 <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+              </button>
+            {/if}
+            {#if activeGroup && !sealed && !c.is_group && (c.cover || c.covers?.length)}
+              <!-- Inside a group: pin this member's covers as the group card's cover
+                   (unpinned, the card shows the newest images across the group). -->
+              {@const pinned = activePin?.id === c.id}
+              <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border bg-[var(--media-control-bg)] backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] {pinned ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--media-control-border)] text-[var(--media-control-ink)]'}"
+                title={pinned ? 'Group cover — click to show the newest images instead' : 'Use as the group cover'}
+                aria-label={pinned ? 'Unpin group cover' : 'Use as group cover'} aria-pressed={pinned}
+                onclick={() => setGroupCover(c.id, !pinned)}>
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill={pinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
               </button>
             {/if}
             {#if !c.locked}

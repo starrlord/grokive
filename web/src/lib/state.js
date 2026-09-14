@@ -685,9 +685,40 @@ export function addCollectionAndRemove(name, ids = [], patch = {}, sourceId = ''
 }
 export function updateCollection(id, patch) {
   const stamp = today();
-  collections.update((c) => touchParents(c.map((coll) => (
-    coll.id === id ? { ...coll, ...patch, updated_at: stamp } : coll
-  )), [id], stamp));
+  collections.update((c) => touchParents(c.map((coll) => {
+    if (coll.id !== id) return coll;
+    const next = { ...coll, ...patch, updated_at: stamp };
+    // A cover pin belongs to the group it was set in — it doesn't follow a move.
+    if ('group' in patch && groupKeyOf(patch.group) !== groupKeyOf(coll.group)) next.group_cover_at = '';
+    return next;
+  }), [id], stamp));
+  persistCollections();
+}
+const groupKeyOf = (group) => String(group || '').trim().toLowerCase();
+// Pin one of a parent's sub-collections as the parent's cover (childId '' unpins — back to
+// the newest across the parent and its sub-collections). The server builds that mosaic, so
+// refetch once the save lands. No updated_at bump: a cover choice isn't a content change.
+export function setSubCollectionCover(parentId, childId) {
+  collections.update((c) => c.map((coll) => (coll.id === parentId ? { ...coll, cover_child_id: childId || '' } : coll)));
+  persistCollections();
+  loadCollections().catch(() => {});
+}
+// Pin (on) or unpin a collection as its group's cover on the Library landing. Pinning
+// clears the other members' pins; a sealed member's copy here is a hollow placeholder
+// the server won't take edits for, so the pin is a STAMP and the group card uses the
+// newest one it can see (see CollectionsGrid). No updated_at bump: picking a cover
+// isn't a content change, so it mustn't reshuffle "Recently updated".
+export function setGroupCover(id, on) {
+  const stamp = new Date().toISOString();
+  collections.update((c) => {
+    const key = groupKeyOf(c.find((coll) => coll.id === id)?.group);
+    if (!key) return c;
+    return c.map((coll) => {
+      if (coll.id === id) return { ...coll, group_cover_at: on ? stamp : '' };
+      if (on && coll.group_cover_at && groupKeyOf(coll.group) === key) return { ...coll, group_cover_at: '' };
+      return coll;
+    });
+  });
   persistCollections();
 }
 export function removeCollection(id) {

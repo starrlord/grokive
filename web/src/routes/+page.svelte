@@ -9,7 +9,7 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters, toggleUncollected,
-    collections, collectionGroups, activeCollectionId, updateCollection, removeFromCollection, removeCollection, collectionsSettled, ensureMoviePolling, movieChip,
+    collections, collectionGroups, activeCollectionId, updateCollection, setSubCollectionCover, removeFromCollection, removeCollection, collectionsSettled, ensureMoviePolling, movieChip,
     galleryReload, requestGalleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
     playQueue, enqueuePlayQueue, shuffled
   } from '$lib/state.js';
@@ -940,13 +940,22 @@
                     {/if}
                     <span class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-2.5 pb-2 pt-8 text-[var(--media-control-ink)]">
                       <span class="block truncate text-sm font-extrabold tracking-tight">{child.name}</span>
-                      <span class="block text-[11px] font-medium opacity-70">{sealedChild ? 'Locked' : `${child.item_count ?? child.ids?.length ?? 0} item${(child.item_count ?? child.ids?.length ?? 0) === 1 ? '' : 's'}`}</span>
+                      <span class="block text-[11px] font-medium opacity-70">{sealedChild ? 'Locked' : `${child.item_count ?? child.ids?.length ?? 0} item${(child.item_count ?? child.ids?.length ?? 0) === 1 ? '' : 's'}${activeCollection.cover_child_id === child.id ? ' · Cover' : ''}`}</span>
                     </span>
                   </span>
                 </button>
-                <!-- Tile actions (hover / focus / touch): lock and delete — the landing card
-                     affordances, since children never appear there. Hidden while sealed. -->
+                <!-- Tile actions (hover / focus / touch): cover pin, lock and delete — the
+                     landing card affordances, since children never appear there. Hidden while sealed. -->
                 <div class="absolute right-1.5 top-1.5 flex gap-1 opacity-0 transition group-hover/tile:opacity-100 group-focus-within/tile:opacity-100 pointer-coarse:opacity-100">
+                  {#if !sealedChild && (child.cover || child.covers?.length)}
+                    {@const coverPinned = activeCollection.cover_child_id === child.id}
+                    <button type="button" class="grid h-7 w-7 place-items-center rounded-md border bg-[var(--media-control-bg)] backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] {coverPinned ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--media-control-border)] text-[var(--media-control-ink)]'}"
+                      title={coverPinned ? `Cover of “${activeCollection.name}” — click to show the newest images instead` : `Use as the cover of “${activeCollection.name}”`}
+                      aria-label={coverPinned ? `Unpin ${child.name} as cover` : `Use ${child.name} as cover`} aria-pressed={coverPinned}
+                      onclick={() => setSubCollectionCover(activeCollection.id, coverPinned ? '' : child.id)}>
+                      <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill={coverPinned ? 'currentColor' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
+                    </button>
+                  {/if}
                   {#if !child.locked}
                     <button type="button" class="grid h-7 w-7 place-items-center rounded-md border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
                       title="Lock this sub-collection with a password" aria-label={`Lock sub-collection ${child.name}`}

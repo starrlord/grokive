@@ -7,7 +7,11 @@
   let { facets = { tags: [], models: [] }, onclose = () => {} } = $props();
   let q = $state('');
 
-  const shown = $derived((facets.tags || []).filter((t) => !q || t.name.toLowerCase().includes(q.toLowerCase())));
+  // Tags are phrases now (spoken lines included), so the full list runs to thousands:
+  // the cloud shows the most-used until you type, then every match.
+  const TAG_CAP = 400;
+  const matching = $derived((facets.tags || []).filter((t) => !q || t.name.toLowerCase().includes(q.toLowerCase())));
+  const shown = $derived(q ? matching : matching.slice(0, TAG_CAP));
   const maxCount = $derived(Math.max(1, ...(facets.tags || []).map((t) => t.count)));
   // Font size scales with sqrt of frequency: ~0.8rem (rare) … ~1.7rem (most used).
   const size = (c) => (0.8 + Math.sqrt(c / maxCount) * 0.9).toFixed(2);
@@ -51,16 +55,19 @@
       {/if}
 
       <div class="mb-5">
-        <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Tags · {shown.length}</div>
+        <div class="mb-2 text-xs font-bold uppercase tracking-wider text-muted">Tags · {matching.length}</div>
         <div class="flex flex-wrap items-baseline gap-2">
           {#each shown as t (t.name)}
-            <button class="rounded-full px-2.5 py-1 leading-none transition {$filters.tags.includes(t.name) ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'border border-line hover:border-[var(--accent)]'}"
-              style="font-size:{size(t.count)}rem" onclick={() => toggleTag(t.name)}>
+            <button class="max-w-full truncate rounded-full px-2.5 py-1 leading-none transition {$filters.tags.includes(t.name) ? 'bg-[var(--accent)] text-[var(--on-accent)]' : 'border border-line hover:border-[var(--accent)]'}"
+              style="font-size:{size(t.count)}rem" title={t.name} onclick={() => toggleTag(t.name)}>
               {t.name}<span class="ml-1 align-super text-[0.6em] opacity-60">{t.count}</span>
             </button>
           {/each}
           {#if !shown.length}<p class="text-sm text-muted">No tags match “{q}”.</p>{/if}
         </div>
+        {#if matching.length > shown.length}
+          <p class="mt-3 text-xs text-muted">Showing the {TAG_CAP} most-used of {matching.length} — type to search them all.</p>
+        {/if}
       </div>
 
       {#if facets.models?.length}
