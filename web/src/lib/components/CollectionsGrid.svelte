@@ -12,12 +12,13 @@
   let sortBy = $state('updated'); // updated (last-modified) | recent (store/creation order) | name | size
   let showLocked = $state(false);
   let activeGroup = $state('');
+  let onlyUngrouped = $state(false); // landing filter: only collections that aren't in a group
   let landingScrollY = 0;
 </script>
 
 <script>
   import { tick } from 'svelte';
-  import { collections, collectionGroups, removeCollection, updateCollection, setGroupCover, loadCollections, requestGalleryReload } from '$lib/state.js';
+  import { collections, collectionGroups, removeCollection, updateCollection, setGroupCover, setCollectionsGroup, renameCollectionGroup, loadCollections, requestGalleryReload } from '$lib/state.js';
   import { relockCollection, relockAllCollections, relockGroup } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
@@ -175,7 +176,7 @@
       .filter((c) => groupKey(c.group) === key);
   });
   const activePin = $derived(activeGroup ? pinnedMember(activeMembers) : null);
-  const baseEntries = $derived(activeGroup ? activeMembers : topEntries);
+  const baseEntries = $derived(activeGroup ? activeMembers : onlyUngrouped ? topEntries.filter((c) => !c.is_group) : topEntries);
   const lockedHiddenCount = $derived(baseEntries.filter(isSealed).length);
   const visibleTotal = $derived(baseEntries.filter((c) => showLocked || !isSealed(c)).length);
 
@@ -216,7 +217,7 @@
     return () => mq.removeEventListener('change', onchange);
   });
   const heroEntries = $derived.by(() => {
-    if (!wideScreen || activeGroup || sortBy !== 'updated' || q.trim() || shown.length < 8) return [];
+    if (!wideScreen || activeGroup || selecting || onlyUngrouped || sortBy !== 'updated' || q.trim() || shown.length < 8) return [];
     return shown.filter((c) => !isSealed(c)).slice(0, 3);
   });
   const gridEntries = $derived.by(() => {
@@ -323,6 +324,7 @@
     return c.cover_peek || items[0] || null;
   }
   function peekDown(c, e) {
+    if (selecting) return; // in select mode a press toggles the card, never peeks
     suppressOpen = false; // clear a stale flag from a press that ended in pointercancel
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     const target = peekTargetFor(c, e); // resolved now — currentTarget is gone by timer time
@@ -367,6 +369,102 @@
     await tick();
     window.scrollTo({ top: landingScrollY });
   }
+
+  // --- Select mode: tick collection cards, then move them into a group (or out of one) in
+  // one write. Only plain collections can be picked — group cards aren't movable, and a sealed
+  // card's copy here is a redacted placeholder the server won't take edits for.
+  let selecting = $state(false);
+  let picked = $state(new Set());
+  let movePrompt = $state(null); // { name } -> move-to-group picker
+  const pickedList = $derived(collectionsList.filter((c) => picked.has(c.id)));
+  const pickedGrouped = $derived(pickedList.filter((c) => String(c.group || '').trim()).length);
+  function toggleSelecting() {
+    selecting = !selecting;
+    picked = new Set();
+  }
+  function togglePick(c) {
+    const next = new Set(picked);
+    if (next.has(c.id)) next.delete(c.id);
+    else next.add(c.id);
+    picked = next;
+  }
+  function selectAllShown() {
+    picked = new Set([...picked, ...shown.filter((c) => !c.is_group && !isSealed(c)).map((c) => c.id)]);
+  }
+  function openMovePrompt() {
+    if (pickedList.length) movePrompt = { name: '' };
+  }
+  function finishSelection(message) {
+    movePrompt = null;
+    picked = new Set();
+    selecting = false;
+    toast(message, { type: 'success' });
+    loadCollections(); // pick up the server's canonical group names + lock summaries
+  }
+  function confirmMove(name) {
+    const typed = String(name || '').trim().slice(0, 60);
+    if (!typed || !pickedList.length) return;
+    const existing = groupEntries.find((g) => g.group_key === groupKey(typed));
+    if (existing && isSealed(existing)) {
+      toast('Unlock that group before adding collections to it', { type: 'error' });
+      return;
+    }
+    const target = existing ? existing.name : typed;
+    const moved = setCollectionsGroup(pickedList.map((c) => c.id), target);
+    finishSelection(moved ? `Moved ${moved} collection${moved === 1 ? '' : 's'} to “${target}”` : `Already in “${target}”`);
+  }
+  function removePickedFromGroup() {
+    const moved = setCollectionsGroup(pickedList.map((c) => c.id), '');
+    finishSelection(`Took ${moved} collection${moved === 1 ? '' : 's'} out of ${moved === 1 ? 'its group' : 'their groups'}`);
+  }
+
+  // --- Group actions (inside a group): rename, or ungroup back onto the landing. Blocked while
+  // the group is locked (its lock is stored under the group's name, so renaming or dissolving
+  // would silently shed it) or holds sealed members (their records can't be edited from here,
+  // so they'd be left behind in a split group).
+  const activeGroupEntry = $derived(activeGroup ? groupEntries.find((g) => g.group_key === groupKey(activeGroup)) || null : null);
+  const groupEditBlocker = $derived.by(() => {
+    if (!activeGroup) return '';
+    if (activeGroupEntry?.locked) return 'Remove the group lock first — the lock is tied to the group name';
+    const sealedCount = activeMembers.filter(isSealed).length;
+    return sealedCount ? `Unlock its ${sealedCount} locked collection${sealedCount === 1 ? '' : 's'} first` : '';
+  });
+  let renamingGroup = $state(false);
+  let groupDraft = $state('');
+  let confirmUngroup = $state(false);
+  function startGroupRename() {
+    groupDraft = activeGroup;
+    renamingGroup = true;
+  }
+  function commitGroupRename() {
+    if (!renamingGroup) return; // Enter commits, then the unmounting input's blur calls again
+    renamingGroup = false;
+    const to = groupDraft.trim().slice(0, 60);
+    if (!to || to === activeGroup) return;
+    const other = groupEntries.find((g) => g.group_key === groupKey(to) && g.group_key !== groupKey(activeGroup));
+    if (other?.locked) {
+      toast("Can't merge into a locked group", { type: 'error' });
+      return;
+    }
+    const target = other ? other.name : to;
+    renameCollectionGroup(activeGroup, target);
+    activeGroup = target;
+    toast(other ? `Merged into “${target}”` : `Renamed group to “${target}”`, { type: 'success' });
+    loadCollections();
+  }
+  function ungroupActive() {
+    const name = activeGroup;
+    const moved = setCollectionsGroup(activeMembers.map((c) => c.id), '');
+    confirmUngroup = false;
+    toast(`Ungrouped “${name}” — ${moved} collection${moved === 1 ? '' : 's'} back on the Library page`, { type: 'success' });
+    closeGroup();
+    loadCollections();
+  }
+  // A group view whose group no longer exists (emptied from select mode, or ungrouped) returns
+  // to the landing instead of showing an empty page.
+  $effect(() => {
+    if (activeGroup && !renamingGroup && collectionsList.length && !groupEntries.some((g) => g.group_key === groupKey(activeGroup))) closeGroup();
+  });
 
   // Cover srcset: the 400px grid thumb for small slots, the server's lazily generated
   // /covers/<id>.jpg high-res tier once a card renders large (desktop). `it` is a
@@ -415,10 +513,21 @@
         <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
         Back
       </button>
-      <span class="min-w-0 truncate text-base font-extrabold">{activeGroup}</span>
+      {#if renamingGroup}
+        <input use:autofocus bind:value={groupDraft} maxlength="60" aria-label="Group name"
+          onkeydown={(e) => { if (e.key === 'Enter') commitGroupRename(); else if (e.key === 'Escape') renamingGroup = false; }}
+          onblur={commitGroupRename}
+          class="min-w-0 rounded-lg border border-[var(--accent)] bg-[var(--surface-2)] px-2.5 py-1 text-base font-extrabold outline-none" />
+      {:else}
+        <span class="min-w-0 truncate text-base font-extrabold">{activeGroup}</span>
+        <button type="button" onclick={startGroupRename} disabled={!!groupEditBlocker} title={groupEditBlocker || 'Rename this group (typing another group’s name merges them)'}
+          class="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">Rename</button>
+        <button type="button" onclick={() => (confirmUngroup = true)} disabled={!!groupEditBlocker} title={groupEditBlocker || 'Remove this group — its collections go back to the Library page'}
+          class="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">Ungroup</button>
+      {/if}
     {/if}
     <span class="text-sm text-muted">{visibleTotal} collection{visibleTotal === 1 ? '' : 's'}</span>
-    <div class="ml-auto flex w-full flex-wrap items-center gap-2 sm:w-auto sm:flex-nowrap">
+    <div class="ml-auto flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
       {#if lockedHiddenCount}
         <button type="button" onclick={() => (showLocked = !showLocked)} aria-pressed={showLocked}
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {showLocked ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}"
@@ -441,6 +550,20 @@
           Lock all
         </button>
       {/if}
+      {#if !activeGroup && groupEntries.length}
+        <button type="button" onclick={() => (onlyUngrouped = !onlyUngrouped)} aria-pressed={onlyUngrouped}
+          title={onlyUngrouped ? 'Show groups and every collection again' : 'Show only collections that are not in a group'}
+          class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {onlyUngrouped ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}">
+          <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M7 12h10M10 18h4"/></svg>
+          Not in a group
+        </button>
+      {/if}
+      <button type="button" onclick={toggleSelecting} aria-pressed={selecting}
+        title={selecting ? 'Stop organizing' : 'Select collections to move them into or out of a group'}
+        class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {selecting ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}">
+        <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
+        {selecting ? 'Done' : 'Organize'}
+      </button>
       <button type="button" onclick={() => fileInput?.click()}
         class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)]"
         title="Import a folder of videos/images into a new collection">
@@ -471,7 +594,7 @@
         </button>
       </div>
     {:else}
-      <p class="py-16 text-center text-sm text-muted">No collections match “{q.trim()}”.</p>
+      <p class="py-16 text-center text-sm text-muted">{q.trim() ? `No collections match “${q.trim()}”.` : onlyUngrouped ? 'Every collection is in a group.' : 'Nothing to show here.'}</p>
     {/if}
   {:else}
     {#if heroEntries.length}
@@ -488,11 +611,32 @@
       {/each}
     </div>
   {/if}
+  {#if selecting}
+    <!-- Select-mode action bar: sticks to the bottom of the viewport while you pick. -->
+    <div class="sticky bottom-3 z-30 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--surface-solid)] px-3 py-2 shadow-lg">
+      <span class="text-sm font-semibold tabular-nums">{pickedList.length} selected</span>
+      <button type="button" onclick={selectAllShown} class="rounded-lg px-2 py-1 text-xs font-semibold text-muted transition hover:text-ink">Select all shown</button>
+      {#if pickedList.length}
+        <button type="button" onclick={() => (picked = new Set())} class="rounded-lg px-2 py-1 text-xs font-semibold text-muted transition hover:text-ink">Clear</button>
+      {/if}
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <button type="button" onclick={openMovePrompt} disabled={!pickedList.length}
+          class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-bold text-[var(--on-accent)] transition hover:brightness-110 disabled:opacity-40">Move to group…</button>
+        <button type="button" onclick={removePickedFromGroup} disabled={!pickedGrouped}
+          title={pickedGrouped ? 'Put the selected collections back on the Library page' : 'None of the selected collections are in a group'}
+          class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">Remove from group</button>
+        <button type="button" onclick={toggleSelecting}
+          class="rounded-lg border border-line px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)]">Done</button>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 {#snippet collectionCard(c, hero = false)}
   {@const sealed = c.locked && !c.unlocked}
   {@const liveVideo = live === c.id ? liveVideoFor(c) : null}
+  {@const canPick = selecting && !c.is_group && !sealed}
+  {@const isPicked = canPick && picked.has(c.id)}
   <!-- Group cards get a stacked-deck silhouette (edges peeking above the card) so a
        CONTAINER never shares a body with a leaf collection. -->
   <div class="relative {c.is_group ? 'pt-2' : ''}">
@@ -501,8 +645,8 @@
       <span aria-hidden="true" class="deck-edge-near absolute inset-x-2 top-1 h-3 rounded-t-[10px]"></span>
     {/if}
     <article
-      class="group relative overflow-hidden rounded-card border bg-[var(--surface-2)] transition-colors focus-within:border-[var(--accent)] {sealed ? 'vault-card border-line' : 'border-line hover:border-[var(--accent)]'} {dragging === c.id ? 'opacity-40' : ''} {dropTarget === c.id ? 'drop-target' : ''}"
-      draggable={!sealed && !c.is_group}
+      class="group relative overflow-hidden rounded-card border bg-[var(--surface-2)] transition-colors focus-within:border-[var(--accent)] {sealed ? 'vault-card border-line' : 'border-line hover:border-[var(--accent)]'} {dragging === c.id ? 'opacity-40' : ''} {dropTarget === c.id ? 'drop-target' : ''} {isPicked ? 'picked' : ''}"
+      draggable={!sealed && !c.is_group && !selecting}
       ondragstart={(e) => dragStart(c, e)}
       ondragend={dragEnd}
       ondragover={(e) => dragOver(c, e)}
@@ -542,7 +686,11 @@
             src={liveVideo.href} poster={liveVideo.thumb || undefined} autoplay muted loop playsinline></video>
         {/if}
 
-        {#if c.locked && c.unlocked}
+        {#if canPick}
+          <!-- Select-mode tick box (the whole card is the toggle; this just shows the state). -->
+          <span aria-hidden="true" class="pointer-events-none absolute left-2 top-2 z-20 grid h-6 w-6 place-items-center rounded-md border-2 text-sm font-black shadow {isPicked ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--on-accent)]' : 'border-white/85 bg-black/35 text-transparent'}">✓</span>
+        {/if}
+        {#if c.locked && c.unlocked && !selecting}
           <!-- Unlocked-for-now badge: one tap to re-lock immediately. -->
           <button type="button" class="absolute left-2 top-2 z-20 inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/90 px-2 py-1 text-[11px] font-bold text-[var(--on-accent)] backdrop-blur-sm"
             title={`Unlocked — ${unlockHoursLeft(c)}h left. Click to lock now.`} aria-label="Lock now" onclick={(e) => { e.stopPropagation(); relockNow(c); }}>
@@ -565,8 +713,10 @@
           <!-- Full-bleed open target sits under the action buttons (which carry higher z).
                A sealed collection opens the unlock prompt instead of its contents.
                Also the long-press surface: hold to peek at the pressed cover's full media. -->
-          <button type="button" class="peek-press absolute inset-0 z-0 select-none" aria-label={sealed ? `Unlock ${c.is_group ? 'group' : 'collection'} ${c.name}` : `Open ${c.is_group ? 'group' : 'collection'} ${c.name}`}
-            onclick={() => openClick(c, sealed)}
+          <button type="button" class="peek-press absolute inset-0 z-0 select-none"
+            aria-label={canPick ? `${isPicked ? 'Deselect' : 'Select'} collection ${c.name}` : sealed ? `Unlock ${c.is_group ? 'group' : 'collection'} ${c.name}` : `Open ${c.is_group ? 'group' : 'collection'} ${c.name}`}
+            aria-pressed={canPick ? isPicked : undefined}
+            onclick={() => (canPick ? togglePick(c) : openClick(c, sealed))}
             onpointerdown={(e) => peekDown(c, e)}
             onpointermove={peekMove}
             oncontextmenu={(e) => { if (peekTimer != null || peek) e.preventDefault(); }}></button>
@@ -574,6 +724,7 @@
           <!-- Secondary actions: top-right, revealed on hover / keyboard focus anywhere in the
                card (group-focus-within), always shown for touch. Hidden while sealed (so a
                lock can't be bypassed by deleting the collection or queueing its videos). -->
+          {#if !selecting}
           <div class="absolute right-2 top-2 z-10 flex gap-1.5 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100">
             {#if !sealed && !c.is_group && ((c.video_count ?? 0) >= 1 || (c.image_count ?? 0) >= 1)}
               <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] backdrop-blur-sm transition hover:border-[var(--media-control-border-hover)] hover:bg-[var(--media-control-bg-hover)]"
@@ -610,13 +761,14 @@
               </button>
             {/if}
           </div>
+          {/if}
 
           <!-- Primary actions: bottom-right, only when accessible and has videos. "Add to
                Play Queue" and "Shuffle" (compact, secondary) sit to the LEFT of the accent
                "Play" — queue these videos onto the cross-library Play Queue, or play this
                collection now in order / at random. An icon rather than a caret menu: the card
                is overflow-hidden for its mosaic, which would clip a dropdown panel. -->
-          {#if !sealed && !c.is_group && c.video_count}
+          {#if !selecting && !sealed && !c.is_group && c.video_count}
             <div class="absolute bottom-2 right-2 z-10 flex items-center gap-1.5">
               <button type="button" class="grid h-9 w-9 place-items-center rounded-lg border border-[var(--media-control-border)] bg-[var(--media-control-bg)] text-[var(--media-control-ink)] opacity-0 shadow-lg backdrop-blur-sm transition hover:border-[var(--accent)] hover:text-[var(--accent)] group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
                 title="Add this collection's videos to the Play Queue" aria-label="Add collection videos to play queue" onclick={() => onplayqueue(c)}>
@@ -631,7 +783,7 @@
                 <span aria-hidden="true">▶</span> Play
               </button>
             </div>
-          {:else if sealed}
+          {:else if sealed && !selecting}
             <button type="button" class="absolute bottom-2 right-2 z-10 inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-bold text-[var(--on-accent)] opacity-0 shadow-lg transition group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100"
               title={c.is_group ? 'Unlock group' : 'Unlock collection'} aria-label={c.is_group ? 'Unlock group' : 'Unlock collection'} onclick={() => (lockModal = c.is_group ? { group: c, mode: 'unlock' } : { collection: c, mode: 'unlock' })}>
               <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
@@ -669,6 +821,49 @@
       <Button variant="primary" size="lg" class="flex-1" disabled={!groupPrompt.name.trim()} onclick={confirmGroupPrompt}>Create group</Button>
     </div>
   </Modal>
+{/if}
+
+{#if movePrompt}
+  <!-- Select mode → Move to group: pick an existing group or type a name for a new one. -->
+  {@const typed = movePrompt.name.trim()}
+  {@const exact = groupEntries.find((g) => g.group_key === groupKey(typed))}
+  {@const choices = groupEntries
+    .filter((g) => !isSealed(g) && (!typed || g.name.toLowerCase().includes(typed.toLowerCase())))
+    .sort((a, b) => a.name.localeCompare(b.name))}
+  <Modal onclose={() => (movePrompt = null)} ariaLabel="Move to a group" z="z-[70]" panelClass="panel flex max-h-[80dvh] w-full max-w-sm flex-col rounded-2xl p-6">
+    <h2 class="mb-1 text-lg font-bold">Move {pickedList.length} collection{pickedList.length === 1 ? '' : 's'} to a group</h2>
+    <p class="mb-3 text-sm leading-relaxed text-muted">Pick a group, or type a name to start a new one. Sub-collections come along with their parent.</p>
+    <input use:autofocus bind:value={movePrompt.name} placeholder="Group name" maxlength="60" aria-label="Group name"
+      onkeydown={(e) => { if (e.key === 'Enter' && typed) confirmMove(typed); }}
+      class="mb-3 w-full rounded-lg border border-line bg-[var(--surface-2)] px-3 py-2 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
+    {#if choices.length}
+      <ul class="mb-4 min-h-0 flex-1 space-y-1 overflow-y-auto">
+        {#each choices as g (g.group_key)}
+          <li>
+            <button type="button" onclick={() => confirmMove(g.name)}
+              class="flex w-full items-center justify-between gap-3 rounded-lg border border-line px-3 py-2 text-left text-sm font-semibold transition hover:border-[var(--accent)]">
+              <span class="min-w-0 truncate">{g.name}</span>
+              <span class="shrink-0 text-xs font-normal text-muted">{g.collection_count} collection{g.collection_count === 1 ? '' : 's'}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <div class="flex gap-2">
+      <Button variant="secondary" size="lg" class="flex-1" onclick={() => (movePrompt = null)}>Cancel</Button>
+      <Button variant="primary" size="lg" class="min-w-0 flex-1 truncate" disabled={!typed || (exact && isSealed(exact))} onclick={() => confirmMove(typed)}>
+        {exact ? 'Move' : 'Create group'}
+      </Button>
+    </div>
+  </Modal>
+{/if}
+
+{#if confirmUngroup}
+  <ConfirmDialog danger={false} title={`Ungroup “${activeGroup}”?`}
+    message={`Its ${activeMembers.length} collection${activeMembers.length === 1 ? '' : 's'} go back to the Library page just as they are — nothing is deleted.`}
+    confirmLabel="Ungroup"
+    onconfirm={ungroupActive}
+    oncancel={() => (confirmUngroup = false)} />
 {/if}
 
 <!-- Release anywhere (or a cancelled gesture / window losing focus) ends the peek. -->
@@ -725,6 +920,12 @@
   @keyframes live-drift {
     from { transform: scale(1.04); }
     to { transform: scale(1.16) translateY(-2.5%); }
+  }
+
+  /* Select mode: a picked card gets a solid accent ring. */
+  .picked {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent);
   }
 
   /* Card under a dragged collection: accent ring + glow says "drop to group". */

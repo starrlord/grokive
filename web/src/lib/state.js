@@ -703,6 +703,39 @@ export function setSubCollectionCover(parentId, childId) {
   persistCollections();
   loadCollections().catch(() => {});
 }
+// Move several collections into one group ('' = out of any group) in ONE write — the Library
+// page's select mode. Sub-collections never carry a group (they live inside their parent), so
+// they're skipped; a cover pin doesn't follow a collection into another group. No updated_at
+// bump: organizing isn't a content change, so it mustn't reshuffle "Recently updated".
+export function setCollectionsGroup(ids, group) {
+  const want = new Set((ids || []).map(String));
+  const name = String(group || '').trim().slice(0, 60);
+  let moved = 0;
+  collections.update((c) => c.map((coll) => {
+    if (!want.has(String(coll.id)) || coll.parent_id || String(coll.group || '').trim() === name) return coll;
+    moved++;
+    const next = { ...coll, group: name };
+    if (groupKeyOf(coll.group) !== groupKeyOf(name)) next.group_cover_at = '';
+    return next;
+  }));
+  if (moved) persistCollections();
+  return moved;
+}
+// Rename a group: every member takes the new name in one write. Renaming onto another group's
+// name merges the two; members keep their cover pins (the newest pin wins on the merged card).
+export function renameCollectionGroup(from, to) {
+  const fromKey = groupKeyOf(from);
+  const name = String(to || '').trim().slice(0, 60);
+  if (!fromKey || !name) return 0;
+  let moved = 0;
+  collections.update((c) => c.map((coll) => {
+    if (coll.parent_id || groupKeyOf(coll.group) !== fromKey) return coll;
+    moved++;
+    return { ...coll, group: name };
+  }));
+  if (moved) persistCollections();
+  return moved;
+}
 // Pin (on) or unpin a collection as its group's cover on the Library landing. Pinning
 // clears the other members' pins; a sealed member's copy here is a hollow placeholder
 // the server won't take edits for, so the pin is a STAMP and the group card uses the
