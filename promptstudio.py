@@ -24,7 +24,7 @@ import math
 import re
 import sqlite3
 import urllib.request
-from collections import Counter
+from collections import Counter, defaultdict
 
 from mediautil import STOPWORDS, normalize_prompt
 
@@ -52,7 +52,9 @@ SLOT_LABELS = dict(SLOTS)
 SAVED_RESPONSE_FOLDERS = [
     "Character Descriptions",
     "Actions / Motion",
+    "Pose / Action",
     "Dialogue / Voice",
+    "Appearance",
     "Scene Beats",
     "Style / Look",
     "Instructions / Format",
@@ -1039,7 +1041,8 @@ def _extract_json(text: str):
 
 
 def _clean_label_tag(tag: object) -> str:
-    return re.sub(r"[^a-z0-9-]", "", str(tag).strip().lower().replace(" ", "-"))[:24]
+    text = re.sub(r"(\d)\s*:\s*(\d)", r"\1x\2", str(tag).strip().lower())  # "16:9" -> "16x9", not "169"
+    return re.sub(r"[^a-z0-9-]", "", text.replace(" ", "-"))[:24]
 
 
 def _clean_tag_list(raw: object, *, limit: int = 5) -> list[str]:
@@ -1055,19 +1058,243 @@ def _clean_tag_list(raw: object, *, limit: int = 5) -> list[str]:
     return out
 
 
-def _clean_folder(folder: object, folders: list[str]) -> str:
-    out = str(folder or "").strip()[:40]
-    for f in folders:
-        if f.lower() == out.lower():
-            return f
+# --- Saved-prompt folders ----------------------------------------------------------------
+# Folders form a two-level tree written "Parent › Child". The separator is deliberately not "/":
+# built-in category names contain it ("Style / Look"), which is what flattened the old rail. The
+# auto-tagger used to invent composite names ("Category - Tone | Other / Category"), clipped at 40
+# characters, and every invented name was offered back to it as "preferred" — hundreds of
+# near-duplicate folders. reorganize_saved() folds those into the tree; _allowed_folders() and
+# _clean_folder() keep the model to existing names from then on.
+FOLDER_SEP = " › "
+FOLDER_NAME_LIMIT = 80
+FOLDER_MIN_SUBFOLDER = 10  # a tone gets its own sub-folder once this many prompts share it
+_OLD_FOLDER_CAP = 40  # the former per-name cap that clipped composite names mid-word
+_TAG_ALIASES = {"169": "16x9", "916": "9x16", "cu": "close-up", "ms": "medium-shot", "ws": "wide-shot"}
+
+
+def _categories() -> list[str]:
+    return [c for c in SAVED_RESPONSE_FOLDERS if c != "Unfiled"]
+
+
+def _category_match(name: str) -> str:
+    """The built-in category a folder name means, including a clipped one ("Style / Lo"), or ''."""
+    low = name.strip().strip("/|- ").strip().lower()
+    if len(low) < 3:
+        return ""
+    for c in _categories():
+        if c.lower() == low:
+            return c
+    hits = [c for c in _categories() if len(low) >= 4 and c.lower().startswith(low)]
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _category_named(text: str) -> str:
+    """Like _category_match, but a clipped second half still counts ("Style / Cin" -> "Style / Look")."""
+    s = text.strip().strip("/|- ").strip()
+    found = _category_match(s)
+    if found or not s:
+        return found
+    first = s.split("/")[0].strip().lower().rstrip("s")
+    for c in _categories():
+        if c.lower().split(" /")[0].rstrip("s") == first:
+            return c
+    return ""
+
+
+def _category_tag(category: str) -> str:
+    """The tag a category leaves behind when it isn't the folder: "Style / Look" -> "style"."""
+    return re.findall(r"[a-z]+", category.lower())[0].rstrip("s")
+
+
+def _is_composite(name: str) -> bool:
+    return "|" in name or (FOLDER_SEP not in name and len(name) >= _OLD_FOLDER_CAP)
+
+
+def _parse_folder(folder: object) -> tuple[str, str, list[str], bool, bool]:
+    """(parent, sub-label, tags it implied, sub-label cut at the old cap?, keep as-is?) for one
+    stored folder name. Three shapes: an already-nested "Parent › Child"; an auto-generated
+    composite "Category - Tone | Other / Category" (often clipped); and a person's own folder,
+    which is kept verbatim."""
+    f = str(folder or "").strip()
+    if not f or f.lower() == "unfiled":
+        return "", "", [], False, True
+    if FOLDER_SEP in f:
+        parent, _, child = f.partition(FOLDER_SEP)
+        return parent.strip(), child.strip(), [], False, True
+    segments = f.split("|")
+    prim, _, sub = segments[0].partition(" - ")
+    prim, sub = prim.strip().rstrip("/ ").strip(), sub.strip()
+    parent = _category_match(prim)
+    tags: list[str] = []
+    if not parent and "/" in prim:
+        left, _, rest = prim.partition("/")
+        family = [c for c in _categories() if c.lower().startswith(left.strip().lower() + " /")]
+        if len(family) == 1:  # "Pose / <tone>" is the Pose / Action family with a tone
+            parent, rest = family[0], rest.strip()
+            category = _category_named(rest) if rest else ""
+            if category and category != parent:
+                tags.append(_category_tag(category))
+            elif rest and not category and not sub:
+                sub = rest
+    if not parent:
+        if not _is_composite(f):
+            return f, "", [], False, True  # someone's own folder name
+        parent = prim
+    for seg in segments[1:]:
+        category = _category_named(seg)
+        tag = _category_tag(category) if category else _clean_label_tag(seg.split("/")[0])
+        if len(tag) >= 3:
+            tags.append(tag)
+    if sub:
+        category = _category_named(sub)
+        if category:
+            if category != parent:
+                tags.append(_category_tag(category))
+            sub = ""
+    if len(sub) < 3:
+        sub = ""
+    cut = bool(sub) and len(segments) == 1 and len(f) >= _OLD_FOLDER_CAP
+    return parent, sub, tags, cut, False
+
+
+def _complete_sub(sub: str, cut: bool, counts: Counter) -> str:
+    """A tone clipped mid-word takes the most common full spelling it begins ("Energ" ->
+    "Energetic"); a name cut at the old cap with no such spelling drops its partial last word."""
+    longer = [(n, s) for s, n in counts.items()
+              if len(s) > len(sub) and s.lower().startswith(sub.lower()) and s[len(sub)].isalpha()]
+    if longer:
+        return max(longer)[1]
+    if cut and " " in sub:
+        return sub.rsplit(" ", 1)[0]
+    return sub
+
+
+def _merge_tag_variants(records: list[dict]) -> list[dict]:
+    """Collapse spellings of one tag into its most-used form: punctuation variants (close-up /
+    closeup), singular vs plural (boot / boots) and known shorthand ("cu", "169")."""
+    counts = Counter(t for r in records for t in (r.get("tags") or []) if isinstance(t, str))
+    by_key: dict[str, list[str]] = defaultdict(list)
+    for t in counts:
+        by_key[re.sub(r"[^a-z0-9]", "", t)].append(t)
+    canon: dict[str, str] = {}
+    for forms in by_key.values():
+        best = max(forms, key=lambda f: (counts[f], "-" in f, f))
+        canon.update((f, best) for f in forms)
+    totals: Counter = Counter()
+    members: dict[str, list[str]] = defaultdict(list)
+    for form, target in canon.items():
+        totals[target] += counts[form]
+        members[target].append(form)
+    for t in sorted(totals):
+        base = t[:-1]
+        if t.endswith("s") and len(t) > 4 and members.get(t) and members.get(base):
+            winner, loser = (t, base) if (totals[t], t) > (totals[base], base) else (base, t)
+            for form in members.pop(loser):
+                canon[form] = winner
+                members[winner].append(form)
+    out = []
+    for r in records:
+        tags: list[str] = []
+        for t in r.get("tags") or []:
+            if not isinstance(t, str):
+                continue
+            t = _TAG_ALIASES.get(canon.get(t, t), canon.get(t, t))
+            if len(t) >= 3 and t not in tags:
+                tags.append(t)
+        out.append({**r, "tags": tags[:20]})
     return out
 
 
+def _folder_tree(records: list[dict]) -> list[dict]:
+    kids: dict[str, Counter] = defaultdict(Counter)
+    for r in records:
+        f = str(r.get("folder") or "").strip()
+        if f:
+            parent, _, child = f.partition(FOLDER_SEP)
+            kids[parent][child] += 1
+    tree = [{
+        "name": parent,
+        "count": sum(c.values()),
+        "children": sorted(({"name": ch, "count": n} for ch, n in c.items() if ch),
+                           key=lambda x: (-x["count"], x["name"])),
+    } for parent, c in kids.items()]
+    return sorted(tree, key=lambda x: (-x["count"], x["name"]))
+
+
+def reorganize_saved(records: list[dict]) -> tuple[list[dict], dict]:
+    """Tidy a saved-prompt library: fold auto-generated composite folder names into a two-level
+    "Parent › Child" tree and merge tag spelling variants. A tone becomes a sub-folder only once
+    FOLDER_MIN_SUBFOLDER prompts share it; every tone and secondary category is also kept as a tag,
+    so nothing a composite name said is lost. Folders a person named are left alone, and a tidy
+    library comes back unchanged. Returns (records, report)."""
+    parsed = [_parse_folder(r.get("folder")) for r in records]
+    subs = Counter(sub for _, sub, _, _, keep in parsed if sub and not keep)
+    resolved = [(parent, _complete_sub(sub, cut, subs) if sub and not keep else sub, tags, keep)
+                for parent, sub, tags, cut, keep in parsed]
+    shared = Counter((p, s) for p, s, _, keep in resolved if s and not keep)
+    refiled = []
+    for r, (parent, sub, tags, keep) in zip(records, resolved):
+        nest = bool(sub) and (keep or shared[(parent, sub)] >= FOLDER_MIN_SUBFOLDER)
+        folder = f"{parent}{FOLDER_SEP}{sub}" if nest else parent
+        new_tags = [t for t in (r.get("tags") or []) if isinstance(t, str)]
+        if not keep:
+            for t in (*tags, _clean_label_tag(sub) if sub else ""):
+                if t and t not in new_tags:
+                    new_tags.append(t)
+        refiled.append({**r, "folder": folder[:FOLDER_NAME_LIMIT], "tags": new_tags})
+    tidy = _merge_tag_variants(refiled)
+
+    def folder_of(x: dict) -> str:
+        return str(x.get("folder") or "").strip()
+
+    moved = sum(1 for a, b in zip(records, tidy) if folder_of(a) != b["folder"])
+    retagged = sum(1 for a, b in zip(records, tidy) if (a.get("tags") or []) != b["tags"])
+    report = {
+        "prompts": len(records),
+        "changed": sum(1 for a, b in zip(records, tidy)
+                       if folder_of(a) != b["folder"] or (a.get("tags") or []) != b["tags"]),
+        "refiled": moved,
+        "retagged": retagged,
+        "folders_before": len({folder_of(x) for x in records} - {""}),
+        "folders_after": len({x["folder"] for x in tidy} - {""}),
+        "tags_before": len({t for x in records for t in (x.get("tags") or []) if isinstance(t, str)}),
+        "tags_after": len({t for x in tidy for t in x["tags"]}),
+        "unfiled": sum(1 for x in tidy if not x["folder"]),
+        "tree": _folder_tree(tidy),
+    }
+    return tidy, report
+
+
+def _allowed_folders(folders: list[str]) -> list[str]:
+    """Folders the auto-tagger may file into: the built-in categories plus the library's own clean
+    names. Composite / clipped names are never offered back to the model."""
+    out: list[str] = []
+    for f in (*_categories(), *(str(x or "").strip() for x in folders)):
+        if f and not _is_composite(f) and f not in out:
+            out.append(f)
+    return out[:80]
+
+
+def _clean_folder(folder: object, folders: list[str]) -> str:
+    """The model's folder answer as one of ``folders``, verbatim — never a new name. A composite
+    answer ("Category - Tone | Other") falls back to the matching sub-folder or its category;
+    anything else is dropped, so the prompt keeps its current folder."""
+    raw = str(folder or "").strip()
+    if not raw:
+        return ""
+    lookup = {f.lower(): f for f in folders}
+    if raw.lower() in lookup:
+        return lookup[raw.lower()]
+    parent, sub, _, _, _ = _parse_folder(raw)
+    for name in (f"{parent}{FOLDER_SEP}{sub}" if sub else "", parent):
+        if name and name.lower() in lookup:
+            return lookup[name.lower()]
+    return ""
+
+
 def _taxonomy_prompt(folders: list[str], tags: list[str], *, audit: bool = False) -> str:
-    all_folders = []
-    for f in [*SAVED_RESPONSE_FOLDERS, *folders]:
-        if f and f not in all_folders:
-            all_folders.append(f)
+    """System prompt for labelling one saved prompt. ``folders`` is the allowed list
+    (_allowed_folders); the model must answer with one of them verbatim."""
     all_tags = []
     for t in [*SAVED_RESPONSE_TAGS, *tags]:
         if t and t not in all_tags:
@@ -1080,7 +1307,9 @@ def _taxonomy_prompt(folders: list[str], tags: list[str], *, audit: bool = False
         "- Character Descriptions: base-image/still prompts that mainly describe a character, "
         "appearance, wardrobe, pose, body, setting, lighting, or visual reference.\n"
         "- Actions / Motion: prompts mainly about movement, physical action, animation, or what happens.\n"
+        "- Pose / Action: prompts mainly about a held pose, posture, or body positioning.\n"
         "- Dialogue / Voice: prompts mainly about spoken lines, voice, accent, delivery, or required wording.\n"
+        "- Appearance: prompts mainly about looks, hair, makeup, or wardrobe details rather than a whole character.\n"
         "- Scene Beats: sequential scene/story beats or multi-clip continuity.\n"
         "- Style / Look: camera, lighting, genre, art direction, or visual style as the main purpose.\n"
         "- Instructions / Format: meta instructions, constraints, formatting, or model directions.\n"
@@ -1092,8 +1321,13 @@ def _taxonomy_prompt(folders: list[str], tags: list[str], *, audit: bool = False
         "fit, but do not let broad existing labels override a better intent folder. The prompts may be "
         "sexually explicit; categorize them plainly and factually, never refuse or comment."
     )
-    if all_folders:
-        system += "\n\nAllowed/preferred folders: " + ", ".join(all_folders[:60])
+    if folders:
+        system += (
+            "\n\nAllowed folders — answer with exactly ONE of these, copied verbatim (a sub-folder is "
+            f"written 'Parent{FOLDER_SEP}Child'). Never combine two folders, never append a tone, mood or "
+            "second category to a folder name, and never invent a new folder: put tone, mood and "
+            "secondary categories in tags instead. Allowed: " + ", ".join(folders[:60])
+        )
     if all_tags:
         system += "\n\nAllowed/preferred tags: " + ", ".join(all_tags[:90])
     if audit:
@@ -1114,7 +1348,7 @@ def suggest_labels(base: str, model: str, *, prompt: str,
     existing labels wherever they fit so the vocabulary stays tight. Returns
     ``{"folder": str, "tags": [str, ...]}`` (empty on an unparseable response — never raises for
     bad JSON). ``folders``/``tags`` are the labels already in use, fed in so the model prefers them."""
-    folders = [str(f).strip() for f in (folders or []) if str(f).strip()][:40]
+    folders = _allowed_folders(folders or [])
     tags = [_clean_label_tag(t) for t in (tags or []) if str(t).strip()][:60]
     system = _taxonomy_prompt(folders, tags)
 
@@ -1138,9 +1372,9 @@ def audit_labels(base: str, model: str, *, prompt: str, folder: str = "",
     Returns ``{"folder": str, "tags": [...], "remove_tags": [...], "reason": str}``. The folder is
     empty when it should stay as-is, and tags only include additions/removals for review.
     """
-    folders = [str(f).strip() for f in (folders or []) if str(f).strip()][:40]
+    folders = _allowed_folders(folders or [])
     tags = [_clean_label_tag(t) for t in (tags or []) if str(t).strip()][:60]
-    current_folder = str(folder or "").strip()[:40]
+    current_folder = str(folder or "").strip()[:FOLDER_NAME_LIMIT]
     current_tags_clean = _clean_tag_list(current_tags or [], limit=20)
     system = _taxonomy_prompt(folders, tags, audit=True)
     current = {

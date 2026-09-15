@@ -6268,7 +6268,7 @@ def api_prompts_responses_post() -> Response:
             "id": rid,
             "text": text,
             "created_at": str(entry.get("created_at", ""))[:32],
-            "folder": str(entry.get("folder", "")).strip()[:40],
+            "folder": str(entry.get("folder", "")).strip()[:promptstudio.FOLDER_NAME_LIMIT],
             "tags": tags,
             "starred": bool(entry.get("starred")),
         })
@@ -6294,7 +6294,7 @@ def api_prompts_responses_add() -> Response:
     text = str(payload.get("text") or "").strip()[:SAVED_PROMPT_TEXT_LIMIT]
     if not text:
         return jsonify(ok=False, error="No text provided.", responses=[]), 400
-    folder = str(payload.get("folder") or "").strip()[:40]
+    folder = str(payload.get("folder") or "").strip()[:promptstudio.FOLDER_NAME_LIMIT]
     starred = bool(payload.get("starred"))
     with _responses_lock:
         current = _read_responses()
@@ -6351,6 +6351,22 @@ def api_prompts_responses_delete() -> Response:
         if len(remaining) != len(current):
             _atomic_write_json(RESPONSES_FILE, remaining)
         return jsonify(ok=True, responses=remaining)
+
+
+@app.post("/api/prompts/responses/reorganize")
+def api_prompts_responses_reorganize() -> Response:
+    """Tidy the saved-prompt folders into a two-level "Parent › Child" tree and merge tag spelling
+    variants (promptstudio.reorganize_saved). ``{"preview": true}`` returns only the report and
+    writes nothing; otherwise the current list is backed up, rewritten and returned with the
+    report. Re-running on a tidy library changes nothing (``applied: false``)."""
+    preview = bool((request.get_json(silent=True) or {}).get("preview"))
+    with _responses_lock:
+        current = _read_responses()
+        tidy, report = promptstudio.reorganize_saved(current)
+        if preview or not report["changed"]:
+            return jsonify(ok=True, applied=False, report=report)
+        backup = _atomic_write_json(RESPONSES_FILE, tidy)
+    return jsonify(ok=True, applied=True, backup=backup, report=report, responses=tidy)
 
 
 def _library_unique_prompts(exclude_hidden: bool = False) -> dict:
@@ -6521,7 +6537,7 @@ def _autotag_records(records: list, *, log=None) -> int:
                 if t not in vocab:
                     vocab.append(t)  # keep new vocab available to later items in this batch
         if folder:
-            patch["folder"] = folder[:40]
+            patch["folder"] = folder[:promptstudio.FOLDER_NAME_LIMIT]
             if folder not in folders:
                 folders.append(folder)
         if patch:
@@ -6565,7 +6581,7 @@ def api_prompts_responses_import_library() -> Response:
     current list first and can only grow it. Returns the full updated list."""
     payload = request.get_json(silent=True) or {}
     preview = bool(payload.get("preview"))
-    folder = str(payload.get("folder") or "Library").strip()[:40]
+    folder = str(payload.get("folder") or "Library").strip()[:promptstudio.FOLDER_NAME_LIMIT]
     if preview:
         current = _read_responses()
         have = {promptstudio.prompt_hash(t) for t in

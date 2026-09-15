@@ -602,6 +602,18 @@ export async function importLibraryPrompts({ preview = false, folder } = {}) {
   return d;
 }
 
+// Tidy saved-prompt folders into a two-level "Parent › Child" tree and merge tag spelling variants,
+// server-side. preview:true returns only { report }; otherwise the list is backed up and rewritten:
+// { applied, backup, report, responses }.
+export async function reorganizeSavedResponses({ preview = false } = {}) {
+  const res = await fetch('/api/prompts/responses/reorganize', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preview })
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Tidy-up failed.');
+  return d;
+}
+
 // Persona cards (durable, server-side, shared across devices). Returns null when the GET FAILS
 // (so callers don't mistake an unreachable server for a genuinely empty list and overwrite it);
 // returns [] only when the server really has no cards.

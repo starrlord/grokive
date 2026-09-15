@@ -148,6 +148,27 @@ def test_responses_get_revalidates_with_etag():
     print("  responses GET: 304 when unchanged, 200 after a write, no ETag when absent OK")
 
 
+def test_reorganize_previews_then_applies_with_a_backup():
+    composite = "Actions / Motion - Energetic | Style / Look"
+    _write_state(saved=[{"id": f"rs-{i}", "text": f"prompt {i}", "folder": composite, "tags": []} for i in range(12)])
+    with server.app.test_client() as client:
+        before = server.RESPONSES_FILE.read_text(encoding="utf-8")
+        r = client.post("/api/prompts/responses/reorganize", json={"preview": True})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert r.get_json()["applied"] is False and r.get_json()["report"]["folders_after"] == 1
+        assert server.RESPONSES_FILE.read_text(encoding="utf-8") == before  # a preview writes nothing
+
+        d = client.post("/api/prompts/responses/reorganize", json={}).get_json()
+        assert d["applied"] is True and d["backup"], d
+        assert {x["folder"] for x in d["responses"]} == {"Actions / Motion › Energetic"}
+        saved = json.loads(server.RESPONSES_FILE.read_text(encoding="utf-8"))
+        assert saved[0]["folder"] == "Actions / Motion › Energetic"
+
+        again = client.post("/api/prompts/responses/reorganize", json={}).get_json()
+        assert again["applied"] is False  # already tidy: nothing rewritten
+    print("  reorganize: preview writes nothing, apply backs up + rewrites, re-run is a no-op OK")
+
+
 if __name__ == "__main__":
     print("server prompt-import golden tests")
     test_long_prompt_imports_exactly_once()

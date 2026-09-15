@@ -4,7 +4,7 @@ import {
   saveLibrary, fetchPlaylists, savePlaylists,
   fetchCollections, saveCollections,
   getSettings, deleteMedia, movieStatus, dismissMovie,
-  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, starResponseRemote, deleteResponseRemote, importLibraryPrompts,
+  fetchSavedResponses, saveSavedResponses, addSavedResponseRemote, starResponseRemote, deleteResponseRemote, importLibraryPrompts, reorganizeSavedResponses,
   getImagineSessions, imagineJobsAll
 } from './api.js';
 import { toast } from './toast.js';
@@ -1000,6 +1000,13 @@ export async function saveResponseToStudio(text, { folder = '' } = {}) {
 // refresh the store from the authoritative list. Returns { added, total, backup }.
 export async function importLibraryIntoSaved({ folder = 'Library' } = {}) {
   const d = await importLibraryPrompts({ folder });
+  if (Array.isArray(d.responses)) savedResponses.set(d.responses);
+  return d;
+}
+// Tidy folders & tags server-side (see reorganizeSavedResponses). A preview leaves the store alone;
+// an applied tidy-up replaces it with the rewritten list.
+export async function reorganizeSaved({ preview = false } = {}) {
+  const d = await reorganizeSavedResponses({ preview });
   if (Array.isArray(d.responses)) savedResponses.set(d.responses);
   return d;
 }

@@ -1,12 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import {
-    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses, importLibraryIntoSaved, toggleStarred
+    savedResponses, addSavedResponse, removeSavedResponse, updateSavedResponse, setSavedResponses, importLibraryIntoSaved, toggleStarred,
+    reorganizeSaved
   } from '$lib/state.js';
   import { copyText } from '$lib/clipboard.js';
   import { auditPromptLabels, autotagPrompt, enhancePrompt, importLibraryPrompts } from '$lib/api.js';
   import { toast } from '$lib/toast.js';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import Modal from './Modal.svelte';
   import SearchField from './SearchField.svelte';
 
   let { llmReady = false, onRemix = null } = $props(); // llmReady -> auto-tag affordances; onRemix -> load a saved prompt back into the Compose composer
@@ -63,37 +65,48 @@
     return best;
   });
 
-  // --- Folder rail: filter box + collapsible tree (group by first "/") -------
-  // The stored "folder" is a flat string; names follow a "Parent / Child" convention. We DON'T
-  // touch the data — we just group the existing rows by their first "/" segment so a long flat
-  // list collapses into a handful of expandable parents, and add a filter box over the names.
+  // --- Folder rail: a two-level tree --------------------------------------------------------
+  // The stored folder is a flat string; a sub-folder is written "Parent › Child". (Not "/" — the
+  // built-in category names contain it, e.g. "Style / Look".) Selecting a parent shows its own
+  // prompts plus every sub-folder's.
+  const SEP = ' › ';
+  const parentOf = (name) => { const i = name.indexOf(SEP); return i === -1 ? name : name.slice(0, i); };
+  const childOf = (name) => { const i = name.indexOf(SEP); return i === -1 ? '' : name.slice(i + SEP.length); };
+  const inTree = (folder, target) => folder === target || folder.startsWith(target + SEP);
+  const folderExists = (name) => folderNames.some((f) => inTree(f, name));
   let folderQuery = $state('');
-  let expandedGroups = $state(new Set()); // top-level group keys the user has opened
+  let expandedGroups = $state(new Set()); // parent folders the user has opened
   const EXPANDED_KEY = 'ga.savedResponses.expandedFolderGroups';
-  const folderTop = (name) => { const i = name.indexOf('/'); return i === -1 ? name : name.slice(0, i).trim(); };
-  const folderRest = (name) => { const i = name.indexOf('/'); return i === -1 ? name : name.slice(i + 1).trim(); };
   const folderSearching = $derived(!!folderQuery.trim());
-  // Rail folders after the filter box (filters real folders only — not the virtual All/Starred/Unfiled).
-  const displayedFolderNames = $derived.by(() => {
-    const ql = folderQuery.trim().toLowerCase();
-    return ql ? folderNames.filter((f) => f.toLowerCase().includes(ql)) : folderNames;
-  });
-  // Group the (filtered) names by their first "/" segment. A group with 2+ members renders as a
-  // collapsible parent (header = segment + summed count); a lone member renders as a flat leaf.
-  const folderGroups = $derived.by(() => {
+  // Every parent with its sub-folders, biggest first; a parent's total counts its whole subtree.
+  const folderTree = $derived.by(() => {
     const groups = new Map();
-    for (const f of displayedFolderNames) {
-      const top = folderTop(f);
-      let g = groups.get(top);
-      if (!g) { g = { key: top, children: [], total: 0 }; groups.set(top, g); }
-      g.children.push(f);
-      g.total += folderCounts.get(f) || 0;
+    for (const f of folderNames) {
+      const key = parentOf(f);
+      let g = groups.get(key);
+      if (!g) { g = { key, total: 0, children: [] }; groups.set(key, g); }
+      const n = folderCounts.get(f) || 0;
+      g.total += n;
+      if (f !== key) g.children.push({ name: f, label: childOf(f), count: n });
     }
-    return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
+    for (const g of groups.values()) g.children.sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    return [...groups.values()].sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+  });
+  // The rail after the filter box: a parent shows when its name or any sub-folder's matches.
+  const folderGroups = $derived.by(() => {
+    const ql = folderQuery.trim().toLowerCase();
+    if (!ql) return folderTree;
+    return folderTree.flatMap((g) => {
+      if (g.key.toLowerCase().includes(ql)) return [g];
+      const children = g.children.filter((c) => c.label.toLowerCase().includes(ql));
+      return children.length ? [{ ...g, children }] : [];
+    });
   });
   const activeTop = $derived(
-    activeFolder === ALL || activeFolder === STARRED || activeFolder === UNFILED ? null : folderTop(activeFolder)
+    activeFolder === ALL || activeFolder === STARRED || activeFolder === UNFILED ? null : parentOf(activeFolder)
   );
+  // Names the tidy-up pass folds away: auto-generated composites and names clipped at 40 chars.
+  const messyFolderCount = $derived(folderNames.filter((f) => f.includes('|') || (!f.includes(SEP) && f.length >= 40)).length);
   // A group is open when the user expanded it, or while filtering. (The active folder's parent is
   // *seeded* open by the effect below — but only once, so a deliberate collapse still sticks.)
   const groupOpen = (key) => folderSearching || expandedGroups.has(key);
@@ -134,7 +147,7 @@
     if (activeFolder === ALL) return true;
     if (activeFolder === STARRED) return !!r.starred;
     if (activeFolder === UNFILED) return !folderOf(r);
-    return folderOf(r) === activeFolder;
+    return inTree(folderOf(r), activeFolder); // a parent includes its sub-folders
   }));
   const shown = $derived(inFolder.filter((r) => {
     if (activeTags.length && !activeTags.some((t) => tagsOf(r).includes(t))) return false;
@@ -164,7 +177,7 @@
     try {
       const saved = localStorage.getItem(LAST_FOLDER_KEY);
       if (saved === UNFILED && unfiledCount) return UNFILED;
-      if (saved && folderNames.includes(saved)) return saved;
+      if (saved && folderExists(saved)) return saved;
     } catch {}
     return largestFolder || ALL;
   }
@@ -184,7 +197,7 @@
     if (!defaultFolderChosen || activeFolder === ALL || activeFolder === UNFILED) return;
     // Stay on Starred while it still has items; only fall back once the last star is removed.
     if (activeFolder === STARRED) { if (!starredCount) activeFolder = chooseDefaultFolder(); return; }
-    if (!folderNames.includes(activeFolder)) activeFolder = chooseDefaultFolder();
+    if (!folderExists(activeFolder)) activeFolder = chooseDefaultFolder();
   });
 
   // Incremental rendering — only the first `visibleCount` rows are in the DOM; a sentinel below the
@@ -301,14 +314,21 @@
   // Inline folder creation — mirrors the `+ tag` editor and persona cards (no native prompt).
   let newFolderOpen = $state(false);
   let newFolderDraft = $state('');
-  function openNewFolder() { newFolderOpen = true; newFolderDraft = ''; }
+  let newFolderParent = $state(''); // '' = a top-level folder; else the parent a sub-folder goes in
+  function openNewFolder(parent = '') {
+    newFolderOpen = true;
+    newFolderDraft = '';
+    newFolderParent = parent;
+  }
   function commitNewFolder() {
-    const name = newFolderDraft.trim().slice(0, 40);
+    const leaf = newFolderDraft.trim().replaceAll('›', '-'); // a name can't smuggle in a separator
+    const name = (newFolderParent ? newFolderParent + SEP + leaf : leaf).slice(0, 80);
     newFolderDraft = '';
     newFolderOpen = false;
-    if (!name) return;
+    newFolderParent = '';
+    if (!leaf) return;
     if (!folderNames.includes(name)) extraFolders = [...extraFolders, name];
-    activeFolder = name;
+    selectFolder(name);
   }
   function onNewFolderKey(e) {
     if (e.key === 'Enter') { e.preventDefault(); commitNewFolder(); }
@@ -319,26 +339,35 @@
   // write; renaming onto an existing folder merges into it. Empty (item-less) folders rename too.
   let renamingFolder = $state(null);
   let renameDraft = $state('');
-  function startRename(f) { renamingFolder = f; renameDraft = f; }
+  // A sub-folder's editor shows just its own name; a parent's rename carries its sub-folders along.
+  function startRename(f) { renamingFolder = f; renameDraft = childOf(f) || f; }
   function commitRename() {
     const from = renamingFolder;
-    const to = renameDraft.trim().slice(0, 40);
+    let to = renameDraft.trim().replaceAll('›', '-').slice(0, 80);
     renamingFolder = null;
     renameDraft = '';
-    if (!from || !to || to === from) return;
+    if (!from || !to) return;
+    if (from.includes(SEP)) to = parentOf(from) + SEP + to; // renamed within its parent
+    if (to === from) return;
+    const moveName = (f) => (inTree(f, from) ? to + f.slice(from.length) : f);
     let touched = 0;
     const next = items.map((r) => {
-      if (folderOf(r) !== from) return r;
+      const f = folderOf(r);
+      if (!inTree(f, from)) return r;
       touched++;
-      return { ...r, folder: to };
+      return { ...r, folder: moveName(f) };
     });
     if (touched) setSavedResponses(next);
     // Keep an empty folder visible after rename (it has no items to carry the name).
-    const stillHasItems = next.some((r) => folderOf(r) === to);
-    extraFolders = extraFolders.filter((e) => e !== from && e !== to);
-    if (!stillHasItems) extraFolders = [...extraFolders, to];
-    if (activeFolder === from) selectFolder(to);
-    else { try { if (localStorage.getItem(LAST_FOLDER_KEY) === from) localStorage.setItem(LAST_FOLDER_KEY, to); } catch {} }
+    extraFolders = [...new Set(extraFolders.map(moveName))];
+    if (!next.some((r) => inTree(folderOf(r), to)) && !extraFolders.includes(to)) extraFolders = [...extraFolders, to];
+    if (inTree(activeFolder, from)) selectFolder(moveName(activeFolder));
+    else {
+      try {
+        const last = localStorage.getItem(LAST_FOLDER_KEY);
+        if (last && inTree(last, from)) localStorage.setItem(LAST_FOLDER_KEY, moveName(last));
+      } catch {}
+    }
   }
   function onRenameKey(e) {
     if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
@@ -347,6 +376,40 @@
   function moveToFolder(r, folder) {
     updateSavedResponse(rowId(r), { folder });
   }
+
+  // --- Tidy folders & tags (server-side: previewed first, backed up, safe to re-run) ---------
+  const TIDY_IDLE = { open: false, loading: false, applying: false, report: null };
+  let tidy = $state({ ...TIDY_IDLE });
+  async function openTidy() {
+    tidy = { open: true, loading: true, applying: false, report: null };
+    try {
+      const d = await reorganizeSaved({ preview: true });
+      if (!d.report?.changed) {
+        tidy = { ...TIDY_IDLE };
+        toast('Folders and tags are already tidy', { type: 'info' });
+        return;
+      }
+      tidy = { ...tidy, loading: false, report: d.report };
+    } catch (e) {
+      tidy = { ...TIDY_IDLE };
+      toast(e.message || 'Could not preview the tidy-up', { type: 'error' });
+    }
+  }
+  async function applyTidy() {
+    if (tidy.applying || !tidy.report) return;
+    tidy = { ...tidy, applying: true };
+    try {
+      const d = await reorganizeSaved();
+      const rep = d.report || {};
+      extraFolders = [];
+      tidy = { ...TIDY_IDLE };
+      toast(`Tidied ${rep.folders_before} folders into ${rep.folders_after}${d.backup ? ' · previous list backed up' : ''}`, { type: 'success' });
+    } catch (e) {
+      tidy = { ...tidy, applying: false };
+      toast(e.message || 'Tidy-up failed', { type: 'error' });
+    }
+  }
+  function closeTidy() { if (!tidy.applying) tidy = { ...TIDY_IDLE }; }
 
   // --- Per-item tag editing (one card open at a time) -----------------------
   let tagEditId = $state(null);
@@ -619,7 +682,7 @@
   // belong to that folder are rewritten — items outside it keep their positions.
   function persistReorder(newShown) {
     if (activeFolder === ALL) { setSavedResponses(newShown); return; }
-    const inView = (r) => (activeFolder === UNFILED ? !folderOf(r) : folderOf(r) === activeFolder);
+    const inView = (r) => (activeFolder === UNFILED ? !folderOf(r) : inTree(folderOf(r), activeFolder));
     const next = items.slice();
     const slots = [];
     for (let k = 0; k < next.length; k++) if (inView(next[k])) slots.push(k);
@@ -665,34 +728,49 @@
 
 <div class="mx-auto grid w-full max-w-7xl grid-cols-1 gap-3 md:grid-cols-[15rem_minmax(0,1fr)] lg:grid-cols-[16rem_minmax(0,1fr)]">
   <!-- Folder rail -->
-  <aside class="rounded-xl border border-line bg-[var(--surface-solid)] p-2 shadow-[inset_0_0_0_1px_var(--surface-highlight)] md:sticky md:top-20 md:self-start">
-    <div class="mb-2 flex items-center justify-between px-1 text-[0.625rem] font-bold uppercase tracking-wider text-muted">
+  <aside class="rounded-xl border border-line bg-[var(--surface-solid)] p-2 shadow-[inset_0_0_0_1px_var(--surface-highlight)] md:sticky md:top-20 md:max-h-[calc(100dvh-6rem)] md:self-start md:overflow-y-auto">
+    <div class="mb-2 flex items-center justify-between gap-2 px-1 text-[0.625rem] font-bold uppercase tracking-wider text-muted">
       <span>Folders</span>
-      <span class="max-w-[11rem] truncate md:hidden">{activeFolderLabel}</span>
+      <span class="min-w-0 flex-1 truncate text-right md:hidden">{activeFolderLabel}</span>
+      {#if items.length}
+        <button type="button" onclick={openTidy} disabled={tidy.loading || tidy.applying}
+          title="Fold auto-generated folder names into a tidy tree and merge tag spelling variants (previewed first, backed up)"
+          class="hidden shrink-0 rounded-md px-1.5 py-0.5 text-[0.6875rem] font-semibold normal-case tracking-normal text-[var(--accent)] transition hover:bg-[var(--folder-hover)] disabled:opacity-50 md:inline-block">Tidy up</button>
+      {/if}
     </div>
+    {#if messyFolderCount}
+      <button type="button" onclick={openTidy} disabled={tidy.loading || tidy.applying}
+        class="mb-2 w-full rounded-lg border border-[color-mix(in_srgb,var(--accent)_45%,var(--line))] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] px-2.5 py-2 text-left text-xs leading-snug text-ink transition hover:border-[var(--accent)] disabled:opacity-50">
+        <span class="font-bold">{messyFolderCount} auto-generated folder{messyFolderCount === 1 ? '' : 's'}</span>
+        <span class="block text-muted">Tidy them into a folder tree →</span>
+      </button>
+    {/if}
 
-    <!-- Shared rail rows. A "folder" is a flat string; the desktop list groups them by first "/". -->
+    <!-- Shared rail rows. Desktop rows wrap long names instead of clipping them; the phone strip
+         truncates (a horizontal strip has no room to wrap). -->
     {#snippet folderBtn(key, label, count)}
       <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
         <button type="button" onclick={() => selectFolder(key)} title={label}
           class="flex min-w-0 w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === key ? 'border-line border-l-2 border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--elev-card))] text-ink shadow-[var(--shadow-card)]' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
           <span class="min-w-0 flex-1 truncate">{label}</span>
-          <span class="shrink-0 text-xs opacity-70">{count}</span>
+          <span class="shrink-0 text-xs tabular-nums opacity-70">{count}</span>
         </button>
       </li>
     {/snippet}
-    {#snippet folderRow(f, label, indented)}
+    {#snippet folderRow(f, label, count, indented)}
       <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
         {#if renamingFolder === f}
-          <input use:focusOnMount bind:value={renameDraft} onkeydown={onRenameKey} onblur={commitRename}
-            maxlength="40" aria-label={`Rename folder ${f}`}
-            class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none" />
+          <div class={indented ? 'md:pl-5' : ''}>
+            <input use:focusOnMount bind:value={renameDraft} onkeydown={onRenameKey} onblur={commitRename}
+              maxlength="80" aria-label={`Rename folder ${f}`}
+              class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none" />
+          </div>
         {:else}
-          <div class="group flex items-stretch gap-0.5 {indented ? 'md:pl-3' : ''}">
+          <div class="group flex items-stretch gap-0.5 {indented ? 'md:pl-5' : ''}">
             <button type="button" onclick={() => selectFolder(f)} ondblclick={() => startRename(f)} title={f}
               class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === f ? 'border-line border-l-2 border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--elev-card))] text-ink shadow-[var(--shadow-card)]' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
-              <span class="min-w-0 flex-1 truncate">{label}</span>
-              <span class="shrink-0 text-xs opacity-70">{folderCounts.get(f) || 0}</span>
+              <span class="min-w-0 flex-1 truncate md:whitespace-normal md:[overflow-wrap:anywhere]">{label}</span>
+              <span class="shrink-0 text-xs tabular-nums opacity-70">{count}</span>
             </button>
             <button type="button" onclick={() => startRename(f)} aria-label={`Rename folder ${f}`} title="Rename folder"
               class="grid w-6 shrink-0 place-items-center rounded-md text-xs text-muted opacity-60 transition hover:bg-[var(--surface-2)] hover:text-ink focus:opacity-100 group-hover:opacity-100">✎</button>
@@ -700,26 +778,59 @@
         {/if}
       </li>
     {/snippet}
-    {#snippet groupHeader(g)}
+    <!-- A parent row: caret (when it has sub-folders), the folder itself (selects the whole
+         subtree), then + sub-folder and rename. -->
+    {#snippet parentRow(g)}
+      {@const hasKids = g.children.length > 0}
+      {@const open = hasKids && groupOpen(g.key)}
+      {@const adding = newFolderOpen && newFolderParent === g.key}
       <li class="md:w-full">
-        <button type="button" onclick={() => toggleGroup(g.key)} aria-expanded={groupOpen(g.key)} title={`${g.key} · ${g.total}`}
-          class="flex w-full items-center justify-between gap-2 rounded-lg border px-2 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeTop === g.key ? 'border-transparent border-l-2 border-l-[var(--accent)] text-ink' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
-          <span class="flex min-w-0 items-center gap-1.5">
-            <span class="shrink-0 text-[0.5rem] opacity-60 transition-transform duration-150 {groupOpen(g.key) ? 'rotate-90' : ''}" aria-hidden="true">▶</span>
-            <span class="min-w-0 truncate">{g.key}</span>
-          </span>
-          <span class="shrink-0 text-xs opacity-60">{g.total}</span>
-        </button>
+        {#if renamingFolder === g.key}
+          <input use:focusOnMount bind:value={renameDraft} onkeydown={onRenameKey} onblur={commitRename}
+            maxlength="80" aria-label={`Rename folder ${g.key}`}
+            class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none" />
+        {:else}
+          <div class="group flex items-stretch gap-0.5">
+            {#if hasKids}
+              <button type="button" onclick={() => toggleGroup(g.key)} aria-expanded={open}
+                aria-label={`${open ? 'Collapse' : 'Expand'} ${g.key}`} title={open ? 'Hide sub-folders' : 'Show sub-folders'}
+                class="grid w-5 shrink-0 place-items-center rounded-md text-muted transition hover:bg-[var(--folder-hover)] hover:text-ink">
+                <span class="text-[0.5rem] transition-transform duration-150 {open ? 'rotate-90' : ''}" aria-hidden="true">▶</span>
+              </button>
+            {:else}
+              <span class="w-5 shrink-0" aria-hidden="true"></span>
+            {/if}
+            <button type="button" onclick={() => selectFolder(g.key)} ondblclick={() => startRename(g.key)} title={`${g.key} · ${g.total}`}
+              class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg border px-2 py-1.5 text-left text-[0.8125rem] font-semibold transition {activeFolder === g.key ? 'border-line border-l-2 border-l-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_16%,var(--elev-card))] text-ink shadow-[var(--shadow-card)]' : activeTop === g.key ? 'border-transparent text-ink hover:bg-[var(--folder-hover)]' : 'border-transparent text-muted hover:bg-[var(--folder-hover)] hover:text-ink'}">
+              <span class="min-w-0 flex-1 [overflow-wrap:anywhere]">{g.key}</span>
+              <span class="shrink-0 text-xs tabular-nums opacity-70">{g.total}</span>
+            </button>
+            <button type="button" onclick={() => openNewFolder(g.key)} aria-label={`New sub-folder in ${g.key}`} title="New sub-folder"
+              class="grid w-5 shrink-0 place-items-center rounded-md text-sm text-muted opacity-0 transition hover:bg-[var(--surface-2)] hover:text-ink focus:opacity-100 group-hover:opacity-100">+</button>
+            <button type="button" onclick={() => startRename(g.key)} aria-label={`Rename folder ${g.key}`} title="Rename folder"
+              class="grid w-5 shrink-0 place-items-center rounded-md text-xs text-muted opacity-0 transition hover:bg-[var(--surface-2)] hover:text-ink focus:opacity-100 group-hover:opacity-100">✎</button>
+          </div>
+        {/if}
       </li>
+      {#if open || adding}
+        {#each g.children as c (c.name)}{@render folderRow(c.name, c.label, c.count, true)}{/each}
+        {#if adding}
+          <li class="md:w-full md:pl-5">
+            <input use:focusOnMount bind:value={newFolderDraft} onkeydown={onNewFolderKey} onblur={commitNewFolder}
+              maxlength="40" placeholder="Sub-folder name…" aria-label={`New sub-folder in ${g.key}`}
+              class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none placeholder:text-muted" />
+          </li>
+        {/if}
+      {/if}
     {/snippet}
     {#snippet newFolderLi()}
       <li class="min-w-[8.5rem] max-w-[12rem] shrink-0 md:w-full md:min-w-0 md:max-w-none">
-        {#if newFolderOpen}
+        {#if newFolderOpen && !newFolderParent}
           <input use:focusOnMount bind:value={newFolderDraft} onkeydown={onNewFolderKey} onblur={commitNewFolder}
             maxlength="40" placeholder="Folder name…"
             class="w-full rounded-lg border border-[var(--accent)] bg-[var(--surface)] px-2.5 py-1.5 text-[0.8125rem] font-semibold text-ink outline-none placeholder:text-muted" />
         {:else}
-          <button type="button" onclick={openNewFolder}
+          <button type="button" onclick={() => openNewFolder()}
             class="w-full rounded-lg border border-dashed border-line px-2.5 py-1.5 text-left text-[0.8125rem] font-semibold text-muted transition hover:border-[var(--accent-2)] hover:text-ink">+ New folder</button>
         {/if}
       </li>
@@ -729,12 +840,12 @@
     <ul class="flex flex-row gap-1 overflow-x-auto pb-1 md:hidden">
       {@render folderBtn(ALL, 'All', items.length)}
       {#if starredCount}{@render folderBtn(STARRED, '★ Starred', starredCount)}{/if}
-      {#each folderNames as f (f)}{@render folderRow(f, f, false)}{/each}
+      {#each folderNames as f (f)}{@render folderRow(f, f, folderCounts.get(f) || 0, false)}{/each}
       {#if unfiledCount}{@render folderBtn(UNFILED, 'Unfiled', unfiledCount)}{/if}
       {@render newFolderLi()}
     </ul>
 
-    <!-- Desktop: filterable, collapsible tree grouped by the first "/" segment. -->
+    <!-- Desktop: filterable, collapsible "Parent › Child" tree, biggest folders first. -->
     <ul class="hidden md:flex md:flex-col md:gap-0.5">
       {@render folderBtn(ALL, 'All', items.length)}
       {#if starredCount}{@render folderBtn(STARRED, '★ Starred', starredCount)}{/if}
@@ -744,17 +855,8 @@
             class="my-1 w-full rounded-lg border border-line bg-[var(--surface-2)] px-2.5 py-1.5 text-[0.8125rem] text-ink outline-none placeholder:text-muted focus:border-[var(--accent)]" />
         </li>
       {/if}
-      {#each folderGroups as g (g.key)}
-        {#if g.children.length > 1}
-          {@render groupHeader(g)}
-          {#if groupOpen(g.key)}
-            {#each g.children as c (c)}{@render folderRow(c, folderRest(c), true)}{/each}
-          {/if}
-        {:else}
-          {@render folderRow(g.children[0], g.children[0], false)}
-        {/if}
-      {/each}
-      {#if folderSearching && !displayedFolderNames.length}
+      {#each folderGroups as g (g.key)}{@render parentRow(g)}{/each}
+      {#if folderSearching && !folderGroups.length}
         <li class="px-2.5 py-2 text-xs text-muted">No folders match “{folderQuery.trim()}”.</li>
       {/if}
       {#if unfiledCount}{@render folderBtn(UNFILED, 'Unfiled', unfiledCount)}{/if}
@@ -1009,10 +1111,21 @@
                 {/if}
 
                 <select value={folderOf(r)} onchange={(e) => moveToFolder(r, e.currentTarget.value)}
-                  title="Move to folder"
-                  class="ml-auto max-w-[10rem] truncate rounded-md border border-line bg-[var(--surface)] px-2 py-0.5 text-[0.6875rem] text-muted outline-none transition hover:border-[var(--accent)] focus:border-[var(--accent)]">
+                  title={folderOf(r) ? `In ${folderOf(r)} — move to folder` : 'Move to folder'}
+                  class="ml-auto max-w-[12rem] truncate rounded-md border border-line bg-[var(--surface)] px-2 py-0.5 text-[0.6875rem] text-muted outline-none transition hover:border-[var(--accent)] focus:border-[var(--accent)]">
                   <option value="">Unfiled</option>
-                  {#each folderNames as f (f)}<option value={f}>{f}</option>{/each}
+                  <!-- Grouped under their parent, but each option keeps its full "Parent › Child" name so
+                       the closed picker never reads an ambiguous "› Calm". -->
+                  {#each folderTree as g (g.key)}
+                    {#if g.children.length}
+                      <optgroup label={g.key}>
+                        <option value={g.key}>{g.key}</option>
+                        {#each g.children as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+                      </optgroup>
+                    {:else}
+                      <option value={g.key}>{g.key}</option>
+                    {/if}
+                  {/each}
                 </select>
               </div>
 
@@ -1140,6 +1253,71 @@
       </footer>
     </div>
   </div>
+{/if}
+
+{#if tidy.open}
+  <Modal onclose={closeTidy} ariaLabel="Tidy folders and tags" z="z-[70]" closeOnOutside={!tidy.applying}
+    panelClass="panel flex max-h-[85dvh] w-full max-w-lg flex-col overflow-hidden rounded-2xl">
+    <header class="border-b border-line px-5 py-4">
+      <h2 class="text-base font-bold text-ink">Tidy folders &amp; tags</h2>
+      <p class="mt-1 text-sm leading-relaxed text-muted">
+        Folds auto-generated folder names into a two-level tree — a tone gets its own sub-folder once enough
+        prompts share it, otherwise it becomes a tag — and merges tag spelling variants. Folders you named
+        yourself stay as they are, and your list is backed up first.
+      </p>
+    </header>
+    <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      {#if tidy.loading || !tidy.report}
+        <p class="py-8 text-center text-sm font-semibold text-[var(--accent)]">Working out the new layout…</p>
+      {:else}
+        {@const rep = tidy.report}
+        <div class="mb-4 grid grid-cols-3 gap-2 text-center">
+          {#each [['Folders', rep.folders_before, rep.folders_after], ['Tags', rep.tags_before, rep.tags_after]] as [name, before, after] (name)}
+            <div class="rounded-lg bg-[var(--surface-2)] px-2 py-2">
+              <div class="text-[0.625rem] font-bold uppercase tracking-wider text-muted">{name}</div>
+              <div class="mt-0.5 text-sm font-bold tabular-nums text-ink">{before.toLocaleString()} → {after.toLocaleString()}</div>
+            </div>
+          {/each}
+          <div class="rounded-lg bg-[var(--surface-2)] px-2 py-2">
+            <div class="text-[0.625rem] font-bold uppercase tracking-wider text-muted">Prompts updated</div>
+            <div class="mt-0.5 text-sm font-bold tabular-nums text-ink">{rep.changed.toLocaleString()}</div>
+          </div>
+        </div>
+        <div class="mb-1.5 text-[0.625rem] font-bold uppercase tracking-wider text-muted">New folder tree</div>
+        <ul class="space-y-1 text-[0.8125rem]">
+          {#each rep.tree as node (node.name)}
+            <li>
+              <div class="flex items-baseline justify-between gap-3 font-semibold text-ink">
+                <span class="min-w-0 [overflow-wrap:anywhere]">{node.name}</span>
+                <span class="shrink-0 text-xs tabular-nums text-muted">{node.count.toLocaleString()}</span>
+              </div>
+              {#if node.children.length}
+                <ul class="mt-0.5 space-y-0.5 border-l border-line pl-3">
+                  {#each node.children as c (c.name)}
+                    <li class="flex items-baseline justify-between gap-3 text-muted">
+                      <span class="min-w-0 [overflow-wrap:anywhere]">› {c.name}</span>
+                      <span class="shrink-0 text-xs tabular-nums">{c.count.toLocaleString()}</span>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </li>
+          {/each}
+          {#if rep.unfiled}
+            <li class="flex items-baseline justify-between gap-3 text-muted">
+              <span>Unfiled</span><span class="text-xs tabular-nums">{rep.unfiled.toLocaleString()}</span>
+            </li>
+          {/if}
+        </ul>
+      {/if}
+    </div>
+    <footer class="flex justify-end gap-2 border-t border-line px-5 py-3">
+      <button type="button" onclick={closeTidy} disabled={tidy.applying}
+        class="rounded-md border border-line px-3 py-1.5 text-xs font-semibold transition hover:border-[var(--accent)] disabled:opacity-40">Cancel</button>
+      <button type="button" onclick={applyTidy} disabled={tidy.loading || tidy.applying || !tidy.report}
+        class="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-bold text-[var(--on-accent)] transition hover:brightness-110 disabled:opacity-40">{tidy.applying ? 'Tidying…' : 'Tidy up'}</button>
+    </footer>
+  </Modal>
 {/if}
 
 {#if confirmImport}
