@@ -13,6 +13,10 @@
   let showLocked = $state(false);
   let activeGroup = $state('');
   let onlyUngrouped = $state(false); // landing filter: only collections that aren't in a group
+  // 'cards' = the cover grid (default, untouched); 'outline' = the whole Group → Collection
+  // → Sub-collection tree on one screen. Nested collections never appear on the card
+  // landing (it shows roots only), so the outline is the only place the hierarchy is visible.
+  let viewMode = $state('cards');
   let landingScrollY = 0;
 </script>
 
@@ -24,6 +28,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import SearchField from './SearchField.svelte';
   import CollectionLockModal from './CollectionLockModal.svelte';
+  import CollectionsOutline from './CollectionsOutline.svelte';
   import PeekOverlay from './PeekOverlay.svelte';
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
@@ -90,6 +95,19 @@
       return child && child > (c.updated_at || c.created_at || '') ? { ...c, updated_at: child } : c;
     });
   });
+  // How many sub-collections hang off each collection. The landing renders roots only, so
+  // without this nothing on screen says a collection (or a group) contains any nesting at
+  // all — you had to open each one to find out. Sealed children are left out (unlike the
+  // delete dialog, which must warn about them): the badge is a promise of what the Outline
+  // will actually list, and the outline can't list a collection this session can't see.
+  const childCountOf = $derived.by(() => {
+    const m = new Map();
+    for (const c of collectionsList) {
+      if (!c.parent_id || (!showLocked && isSealed(c))) continue;
+      m.set(c.parent_id, (m.get(c.parent_id) || 0) + 1);
+    }
+    return m;
+  });
   const groupEntries = $derived.by(() => {
     const collections = rolledList;
     const serverGroups = collectionGroupList;
@@ -143,6 +161,7 @@
         members,
         group_key: key,
         collection_count: server.collection_count ?? members.length,
+        sub_count: members.reduce((sum, c) => sum + (childCountOf.get(c.id) || 0), 0),
         item_count: itemCount,
         video_count: members.reduce((sum, c) => sum + (c.video_count ?? 0), 0),
         image_count: members.reduce((sum, c) => sum + (c.image_count ?? 0), 0),
@@ -169,6 +188,12 @@
       .filter((c) => !c.parent_id && !grouped.has(groupKey(c.group)));
     return [...ungrouped, ...groupEntries];
   });
+  // Roots with no group — the outline's second section (the card grid mixes them into
+  // topEntries alongside the group cards).
+  const ungroupedRoots = $derived(topEntries.filter((c) => !c.is_group));
+  // The outline is a landing-only map: inside a group you're already one tier down, so the
+  // drill-in always renders cards.
+  const outline = $derived(viewMode === 'outline' && !activeGroup);
   const activeMembers = $derived.by(() => {
     const key = groupKey(activeGroup);
     return rolledList
@@ -474,6 +499,11 @@
   const quadSizes = (hero) => (hero ? '16vw' : '(min-width: 1280px) 12vw, (min-width: 1024px) 16vw, (min-width: 640px) 25vw, 50vw');
   const fullSizes = (hero) => (hero ? '33vw' : '(min-width: 1280px) 25vw, (min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw');
 
+  // Sub-collections hiding under a card: a group's total across its members, or a
+  // collection's own children. Drives the folder pill on the cover — the only hint on the
+  // card landing that there's another tier below (Outline view shows the whole tree).
+  const subCountOf = (c) => (c.is_group ? c.sub_count || 0 : childCountOf.get(c.id) || 0);
+
   // Count line for the cover, dropping any zero segments (e.g. "26 items · 26 videos").
   const countLabel = (c) => {
     if (c.is_group) {
@@ -526,7 +556,9 @@
           class="shrink-0 rounded-lg border border-line px-2.5 py-1 text-xs font-semibold transition enabled:hover:border-[var(--accent)] disabled:opacity-40">Ungroup</button>
       {/if}
     {/if}
-    <span class="text-sm text-muted">{visibleTotal} collection{visibleTotal === 1 ? '' : 's'}</span>
+    {#if !outline}
+      <span class="text-sm text-muted">{visibleTotal} collection{visibleTotal === 1 ? '' : 's'}</span>
+    {/if}
     <div class="ml-auto flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
       {#if lockedHiddenCount}
         <button type="button" onclick={() => (showLocked = !showLocked)} aria-pressed={showLocked}
@@ -550,7 +582,7 @@
           Lock all
         </button>
       {/if}
-      {#if !activeGroup && groupEntries.length}
+      {#if !activeGroup && groupEntries.length && !outline}
         <button type="button" onclick={() => (onlyUngrouped = !onlyUngrouped)} aria-pressed={onlyUngrouped}
           title={onlyUngrouped ? 'Show groups and every collection again' : 'Show only collections that are not in a group'}
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {onlyUngrouped ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}">
@@ -558,19 +590,32 @@
           Not in a group
         </button>
       {/if}
+      {#if !outline}
       <button type="button" onclick={toggleSelecting} aria-pressed={selecting}
         title={selecting ? 'Stop organizing' : 'Select collections to move them into or out of a group'}
         class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {selecting ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}">
         <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></svg>
         {selecting ? 'Done' : 'Organize'}
       </button>
+      {/if}
       <button type="button" onclick={() => fileInput?.click()}
         class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-[var(--surface-2)] px-3 py-1.5 text-sm font-semibold transition hover:border-[var(--accent)]"
         title="Import a folder of videos/images into a new collection">
         <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 13v8"/><path d="m8 17 4 4 4-4"/><path d="M4 14.9A6 6 0 0 1 7 4a5 5 0 0 1 9 1 4 4 0 0 1 2 7.7"/></svg>
         Import
       </button>
-      <SearchField bind:value={q} placeholder="Search collections…" ariaLabel="collection search"
+      {#if !activeGroup}
+        <!-- Cards ⇄ Outline. The card grid can only ever show tier one; the outline is
+             where the whole Group → Collection → Sub-collection tree lives. -->
+        <div class="inline-flex shrink-0 rounded-lg border border-line bg-[var(--surface-2)] p-0.5" role="group" aria-label="Library layout">
+          {#each [{ id: 'cards', label: 'Cards', hint: 'Cover cards — groups and top-level collections' }, { id: 'outline', label: 'Outline', hint: 'The whole tree: groups, collections and their sub-collections' }] as v (v.id)}
+            <button type="button" aria-pressed={viewMode === v.id} title={v.hint}
+              class="rounded-md px-2.5 py-1 text-sm font-semibold transition {viewMode === v.id ? 'bg-[var(--surface-solid)] text-ink shadow-sm' : 'text-muted hover:text-ink'}"
+              onclick={() => { viewMode = v.id; if (v.id === 'outline' && selecting) toggleSelecting(); }}>{v.label}</button>
+          {/each}
+        </div>
+      {/if}
+      <SearchField bind:value={q} placeholder={outline ? 'Search the whole tree…' : 'Search collections…'} ariaLabel="collection search"
         wrapperClass="order-last w-full min-w-0 sm:order-none sm:w-60 sm:flex-none"
         inputClass="rounded-full border border-line bg-[var(--surface-2)] py-1.5 pl-3.5 pr-10 text-sm outline-none placeholder:text-muted focus:border-[var(--accent)]" />
       <select bind:value={sortBy} aria-label="Sort collections" title="Sort collections"
@@ -583,7 +628,12 @@
     </div>
   </div>
 
-  {#if !shown.length}
+  {#if outline}
+    <CollectionsOutline groups={groupEntries} ungrouped={ungroupedRoots} collections={rolledList}
+      {q} {sortBy} {showLocked}
+      onopengroup={openGroup} {onopen} onplay={(c) => onplay(c)}
+      onunlock={(c) => (lockModal = c.is_group ? { group: c, mode: 'unlock' } : { collection: c, mode: 'unlock' })} />
+  {:else if !shown.length}
     {#if !showLocked && lockedHiddenCount && !q.trim()}
       <div class="py-16 text-center text-sm text-muted">
         <p class="mb-3">{lockedHiddenCount} locked collection{lockedHiddenCount === 1 ? '' : 's'} hidden.</p>
@@ -705,6 +755,15 @@
               <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 opacity-85" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
             {/if}
             <span class="block truncate {hero ? 'text-2xl' : 'text-lg'} font-black tracking-tight">{c.name}</span>
+            {#if !sealed && subCountOf(c)}
+              <!-- Nesting badge: sub-collections live a tier below the landing, so without
+                   this the card gives no sign they exist at all. -->
+              <span class="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--media-control-border)] bg-[var(--media-control-bg)] px-1.5 py-0.5 text-[11px] font-bold tabular-nums backdrop-blur-sm"
+                title="{subCountOf(c)} sub-collection{subCountOf(c) === 1 ? '' : 's'} inside">
+                <svg viewBox="0 0 24 24" class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2a1 1 0 0 0-.8-.4h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></svg>
+                {subCountOf(c)}
+              </span>
+            {/if}
           </span>
           <span class="block {hero ? 'text-sm' : 'text-xs'} font-medium opacity-65">{sealed && c.is_group ? `Locked · ${c.collection_count ?? 0} collection${(c.collection_count ?? 0) === 1 ? '' : 's'}` : `${sealed ? 'Locked · ' : ''}${countLabel(c)}${activePin && activePin.id === c.id ? ' · Group cover' : ''}`}</span>
         </span>
