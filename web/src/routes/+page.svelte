@@ -9,6 +9,7 @@
     filters, mode, favorites, stashed, deleted, applyLibrary,
     selectMode, setSelectMode, selection, toggleSelection, clearSelection,
     loadPlaylists, loadCollections, loadSettings, resetAll, hasActiveFilters, toggleUncollected,
+    searchWidenedFrom, narrowSearch,
     collections, collectionGroups, activeCollectionId, updateCollection, setSubCollectionCover, removeFromCollection, removeCollection, collectionsSettled, ensureMoviePolling, movieChip,
     galleryReload, requestGalleryReload, basket, enqueueBasket, montageMode, isMontageSource, isMontageQueueable,
     playQueue, enqueuePlayQueue, shuffled
@@ -1119,6 +1120,17 @@
     {:else}
       <div class="mb-3 flex flex-wrap items-center gap-3">
         <p class="text-sm text-muted">{displayTotal.toLocaleString()} {$filters.view === 'favorites' ? 'favorites' : $filters.view === 'archive' ? 'archived' : $filters.view === 'all' ? 'items' : 'recent items'}</p>
+        {#if $searchWidenedFrom}
+          <!-- The app, not the user, moved this view: Recent hides archived media, so a
+               search typed there would have missed about half the library. Say so, and
+               offer the way back — the same search, narrowed to Recent again. -->
+          <button type="button" onclick={() => narrowSearch()}
+            title="Recent hides archived media, so this search widened to All Media. Click to search Recent only."
+            class="inline-flex items-center gap-1.5 rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent)] transition hover:bg-[var(--accent)]/20">
+            <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            Widened to All Media · search Recent only
+          </button>
+        {/if}
         {#if hasActiveFilters($filters)}
           <button class="rounded-full border border-line px-3 py-1 text-xs font-semibold hover:border-[var(--accent)]" onclick={resetAll}>Reset filters ✕</button>
         {/if}

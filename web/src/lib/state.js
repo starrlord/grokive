@@ -114,10 +114,19 @@ export const filters = writable({
   sort: 'new'
 });
 
+// Set while a search typed on Recent has been auto-widened to All Media, holding the view
+// to fall back to. Recent is "everything except Archive" — with roughly half the library
+// archived, a query there quietly searches the wrong half — so the search box widens the
+// view instead of returning a thin result set. The flag is what makes that undoable: the
+// results header offers the way back, and clearing the box restores the view itself.
+export const searchWidenedFrom = writable('');
+
 export function setView(view) {
   // Any top-level nav click exits an open collection — including re-clicking the section
   // you're already in (e.g. tapping "Library" while inside a collection returns to its root).
   activeCollectionId.set(null);
+  // A deliberate nav click owns the view from here on — nothing left to undo.
+  searchWidenedFrom.set('');
   filters.update((f) => {
     const changed = f.view !== view;
     // Switching to a different view starts a clean slate — no refinement follows you in.
@@ -147,10 +156,27 @@ export function setQuery(query) {
 // setView it's a fresh context — refinements other than the query reset; sort persists.
 export function searchAllMedia(query) {
   activeCollectionId.set(null);
+  searchWidenedFrom.set(''); // an explicit Enter-jump, not something the app should undo
   filters.update((f) => ({
     ...f, view: 'all', canvas: null, query,
     tags: [], models: [], resolutions: [], mediaType: 'all', period: 'all', uncollected: false
   }));
+}
+
+// Widen a live search from Recent to All Media. Unlike searchAllMedia (an explicit Enter
+// jump out of a view where search does nothing, so it starts a clean context), this is the
+// app moving you mid-typing: every other refinement — tags, models, resolutions, period,
+// sort — rides along untouched, because you never asked for a new context.
+export function widenSearch(query, from = 'recent') {
+  searchWidenedFrom.set(from);
+  filters.update((f) => ({ ...f, view: 'all', query }));
+}
+// Undo the widening. With no argument the query stays and only the view narrows back
+// ("no, just search Recent"); pass '' to clear the search as well — what the box's ✕ does.
+export function narrowSearch(query = null) {
+  const back = get(searchWidenedFrom) || 'recent';
+  searchWidenedFrom.set('');
+  filters.update((f) => ({ ...f, view: back, query: query === null ? f.query : query }));
 }
 
 // Which Prompt Studio sub-tab is active. Lifted out of the component so the top-bar
@@ -199,6 +225,7 @@ export function clearFilters() {
 }
 // Full reset, including the active view -> back to Recent.
 export function resetAll() {
+  searchWidenedFrom.set('');
   filters.update((f) => ({ ...f, view: 'recent', query: '', tags: [], models: [], resolutions: [], canvas: null, mediaType: 'all', period: 'all', uncollected: false }));
 }
 export function toggleUncollected() {
@@ -789,6 +816,30 @@ export function addToCollectionAndRemove(id, ids, sourceId = '') {
     return coll;
   }), [id, sourceId], stamp));
   persistCollections();
+}
+// Add the same items to SEVERAL collections in one write — the picker's multi-select. The
+// whole collections list is POSTed on every save, so looping addToCollection() would fire N
+// racing requests for one user action; this is one store update and one save. `sourceId`
+// is the Move half: the items leave the source once, after every target has them.
+export function addToCollections(targetIds, ids, sourceId = '') {
+  const incoming = uniqueIds(ids);
+  const targets = new Set(uniqueIds(targetIds));
+  if (!incoming.length || !targets.size) return 0;
+  const remove = new Set(incoming.map(String));
+  const stamp = today();
+  collections.update((c) => touchParents(c.map((coll) => {
+    if (targets.has(coll.id)) {
+      const next = uniqueIds([...(coll.ids || []), ...incoming]);
+      return { ...coll, ids: next, cover_id: coll.cover_id || next[0] || '', updated_at: stamp };
+    }
+    if (sourceId && coll.id === sourceId) {
+      const next = (coll.ids || []).filter((mid) => !remove.has(String(mid)));
+      return { ...coll, ids: next, cover_id: remove.has(String(coll.cover_id)) ? (next[0] || '') : coll.cover_id, updated_at: stamp };
+    }
+    return coll;
+  }), [...targets, sourceId], stamp));
+  persistCollections();
+  return targets.size;
 }
 export function removeFromCollection(id, ids) {
   const remove = new Set((ids || []).map(String));

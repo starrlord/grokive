@@ -201,14 +201,41 @@
       .filter((c) => groupKey(c.group) === key);
   });
   const activePin = $derived(activeGroup ? pinnedMember(activeMembers) : null);
-  const baseEntries = $derived(activeGroup ? activeMembers : onlyUngrouped ? topEntries.filter((c) => !c.is_group) : topEntries);
+
+  // --- Search is LIBRARY-WIDE, not tier-wide. The card landing browses one tier (group
+  // cards + ungrouped roots), and search used to filter exactly that list — so typing a
+  // sub-collection's name matched nothing (children aren't in topEntries), and neither did
+  // the name of a collection that sits inside a group (it's folded into the group card).
+  // With a query the pool becomes every collection plus the group cards, each match carrying
+  // the crumb that says where it lives; an empty query leaves the landing untouched.
+  const collById = $derived(new Map(collectionsList.map((c) => [c.id, c])));
+  // "Parent" for a sub-collection, "Group" for a grouped root, '' for a plain root. Also
+  // part of the haystack: searching a parent's (or group's) name surfaces what's inside it,
+  // the same way a matching ancestor opens its subtree in the Outline.
+  const crumbOf = (c) => (c.parent_id ? collById.get(c.parent_id)?.name || '' : String(c.group || '').trim());
+  const needle = $derived(q.trim().toLowerCase());
+  const searchPool = $derived.by(() => {
+    if (!needle) return [];
+    const cards = rolledList.map((c, index) => ({ ...c, store_index: index, crumb: crumbOf(c) }));
+    // Inside a group, search stays scoped to that group: its members and their
+    // sub-collections, never the rest of the library.
+    if (activeGroup) {
+      const memberIds = new Set(activeMembers.map((c) => c.id));
+      return cards.filter((c) => memberIds.has(c.id) || memberIds.has(c.parent_id));
+    }
+    return [...cards, ...groupEntries];
+  });
+  // Searching overrides the "Not in a group" landing filter (the button hides while a query
+  // is live) — a whole-library search that silently skipped grouped collections would be
+  // the very hole this fixes.
+  const baseEntries = $derived(needle ? searchPool : activeGroup ? activeMembers : onlyUngrouped ? topEntries.filter((c) => !c.is_group) : topEntries);
   const lockedHiddenCount = $derived(baseEntries.filter(isSealed).length);
   const visibleTotal = $derived(baseEntries.filter((c) => showLocked || !isSealed(c)).length);
 
   const filtered = $derived(
     baseEntries.filter((c) =>
       (showLocked || !isSealed(c)) &&
-      (!q.trim() || (c.name || '').toLowerCase().includes(q.trim().toLowerCase())))
+      (!needle || `${c.name || ''} ${c.crumb || ''}`.toLowerCase().includes(needle)))
   );
   const shown = $derived.by(() => {
     const list = [...filtered];
@@ -242,7 +269,7 @@
     return () => mq.removeEventListener('change', onchange);
   });
   const heroEntries = $derived.by(() => {
-    if (!wideScreen || activeGroup || selecting || onlyUngrouped || sortBy !== 'updated' || q.trim() || shown.length < 8) return [];
+    if (!wideScreen || activeGroup || selecting || onlyUngrouped || sortBy !== 'updated' || needle || shown.length < 8) return [];
     return shown.filter((c) => !isSealed(c)).slice(0, 3);
   });
   const gridEntries = $derived.by(() => {
@@ -280,7 +307,7 @@
   let dragging = $state(null); // id of the card being dragged
   let dropTarget = $state(null); // id of the card currently hovered as a drop target
   let groupPrompt = $state(null); // { source, target, name } -> new-group naming modal
-  const canDrop = (c) => !!dragging && c.id !== dragging && !isSealed(c);
+  const canDrop = (c) => !!dragging && c.id !== dragging && !c.parent_id && !isSealed(c);
   function dragStart(c, e) {
     // The pointer is dragging, not holding — disarm a pending long-press peek.
     if (peekTimer != null) { clearTimeout(peekTimer); peekTimer = null; }
@@ -414,7 +441,7 @@
     picked = next;
   }
   function selectAllShown() {
-    picked = new Set([...picked, ...shown.filter((c) => !c.is_group && !isSealed(c)).map((c) => c.id)]);
+    picked = new Set([...picked, ...shown.filter((c) => !c.is_group && !c.parent_id && !isSealed(c)).map((c) => c.id)]);
   }
   function openMovePrompt() {
     if (pickedList.length) movePrompt = { name: '' };
@@ -557,7 +584,7 @@
       {/if}
     {/if}
     {#if !outline}
-      <span class="text-sm text-muted">{visibleTotal} collection{visibleTotal === 1 ? '' : 's'}</span>
+      <span class="text-sm text-muted">{#if needle}{shown.length} match{shown.length === 1 ? '' : 'es'}{:else}{visibleTotal} collection{visibleTotal === 1 ? '' : 's'}{/if}</span>
     {/if}
     <div class="ml-auto flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
       {#if lockedHiddenCount}
@@ -582,7 +609,7 @@
           Lock all
         </button>
       {/if}
-      {#if !activeGroup && groupEntries.length && !outline}
+      {#if !activeGroup && groupEntries.length && !outline && !needle}
         <button type="button" onclick={() => (onlyUngrouped = !onlyUngrouped)} aria-pressed={onlyUngrouped}
           title={onlyUngrouped ? 'Show groups and every collection again' : 'Show only collections that are not in a group'}
           class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition {onlyUngrouped ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-line bg-[var(--surface-2)] hover:border-[var(--accent)]'}">
@@ -634,7 +661,7 @@
       onopengroup={openGroup} {onopen} onplay={(c) => onplay(c)}
       onunlock={(c) => (lockModal = c.is_group ? { group: c, mode: 'unlock' } : { collection: c, mode: 'unlock' })} />
   {:else if !shown.length}
-    {#if !showLocked && lockedHiddenCount && !q.trim()}
+    {#if !showLocked && lockedHiddenCount && !needle}
       <div class="py-16 text-center text-sm text-muted">
         <p class="mb-3">{lockedHiddenCount} locked collection{lockedHiddenCount === 1 ? '' : 's'} hidden.</p>
         <button type="button" onclick={() => (showLocked = true)}
@@ -644,7 +671,7 @@
         </button>
       </div>
     {:else}
-      <p class="py-16 text-center text-sm text-muted">{q.trim() ? `No collections match “${q.trim()}”.` : onlyUngrouped ? 'Every collection is in a group.' : 'Nothing to show here.'}</p>
+      <p class="py-16 text-center text-sm text-muted">{needle ? `No collections match “${q.trim()}”.` : onlyUngrouped ? 'Every collection is in a group.' : 'Nothing to show here.'}</p>
     {/if}
   {:else}
     {#if heroEntries.length}
@@ -685,7 +712,7 @@
 {#snippet collectionCard(c, hero = false)}
   {@const sealed = c.locked && !c.unlocked}
   {@const liveVideo = live === c.id ? liveVideoFor(c) : null}
-  {@const canPick = selecting && !c.is_group && !sealed}
+  {@const canPick = selecting && !c.is_group && !c.parent_id && !sealed}
   {@const isPicked = canPick && picked.has(c.id)}
   <!-- Group cards get a stacked-deck silhouette (edges peeking above the card) so a
        CONTAINER never shares a body with a leaf collection. -->
@@ -696,7 +723,7 @@
     {/if}
     <article
       class="group relative overflow-hidden rounded-card border bg-[var(--surface-2)] transition-colors focus-within:border-[var(--accent)] {sealed ? 'vault-card border-line' : 'border-line hover:border-[var(--accent)]'} {dragging === c.id ? 'opacity-40' : ''} {dropTarget === c.id ? 'drop-target' : ''} {isPicked ? 'picked' : ''}"
-      draggable={!sealed && !c.is_group && !selecting}
+      draggable={!sealed && !c.is_group && !c.parent_id && !selecting}
       ondragstart={(e) => dragStart(c, e)}
       ondragend={dragEnd}
       ondragover={(e) => dragOver(c, e)}
@@ -750,6 +777,16 @@
         {/if}
 
         <span class="pointer-events-none absolute inset-x-0 bottom-0 z-[5] bg-gradient-to-t from-[var(--media-scrim-strong)] to-transparent px-3 pb-3 {hero ? 'pt-20' : 'pt-14'} text-[var(--media-control-ink)]">
+          {#if c.crumb && !sealed}
+            <!-- Where this match lives. Search spans every tier, so a card that isn't on the
+                 landing you're looking at says so: "Neon ›" for a sub-collection, "Sci-fi /"
+                 for a collection inside a group. Only ever set on search results. -->
+            <span class="mb-0.5 flex min-w-0 items-center gap-1 text-[11px] font-bold uppercase tracking-[0.12em] opacity-75">
+              <svg viewBox="0 0 24 24" class="h-3 w-3 shrink-0" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+              <span class="truncate">{c.crumb}</span>
+              <span class="shrink-0" aria-hidden="true">{c.parent_id ? '›' : '/'}</span>
+            </span>
+          {/if}
           <span class="flex min-w-0 items-center gap-1.5">
             {#if c.is_group}
               <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 opacity-85" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>

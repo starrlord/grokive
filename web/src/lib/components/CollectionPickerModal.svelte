@@ -4,7 +4,7 @@
   import Button from './Button.svelte';
   import SearchField from './SearchField.svelte';
   import {
-    collections, collectionGroups, addCollection, addCollectionAndRemove, addToCollection, addToCollectionAndRemove,
+    collections, collectionGroups, addCollection, addCollectionAndRemove, addToCollections,
     loadCollections, setStashed, setSelectMode, clearSelection, loadLastGroup, saveLastGroup
   } from '$lib/state.js';
   import { toast } from '$lib/toast.js';
@@ -32,6 +32,9 @@
   let nestListEl = $state(null);
   let archiveAfter = $state(true);
   let removeAfter = $state(false);
+  // Ticked add-targets. One trip through this modal can file the same clips into as many
+  // collections as you like — rows toggle, the footer commits them in a single write.
+  let pickedIds = $state(new Set());
   let initializedFor = null;
 
   // The collections list is a shared, server-owned store loaded once at app start. Refetch on every
@@ -98,6 +101,18 @@
       .filter((c) => !q.trim() || searchText(c).includes(q.trim().toLowerCase()))
       .sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''))
   );
+
+  // Ticked rows, in the order the list shows them. Derived from `available`, so a target
+  // deleted (or sealed) on another device between ticking and committing simply drops out.
+  const picked = $derived(available.filter((c) => pickedIds.has(c.id)));
+  // Move = the source collection gives the items up; only ever offered from inside one.
+  const moveMode = $derived(!!currentCollection && removeAfter);
+  function togglePick(id) {
+    const next = new Set(pickedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    pickedIds = next;
+  }
 
   // Seed the group dropdown once per source context. Opened from inside a collection, that
   // collection's group (or, ungrouped, its name — as a suggested new group) wins; opened from
@@ -169,13 +184,13 @@
     }
   }
 
-  function finish(collectionName, didMove) {
+  function finish(label, didMove) {
     const selectedNow = [...selected];
     const count = selectedNow.length;
     if (archiveAfter) setStashed(selectedNow, true);
     clearSelection();
     setSelectMode(false);
-    toast(`${didMove ? 'Moved' : 'Added'} ${count} item${count === 1 ? '' : 's'} to "${collectionName}"`, { type: 'success' });
+    toast(`${didMove ? 'Moved' : 'Added'} ${count} item${count === 1 ? '' : 's'} to ${label}`, { type: 'success' });
     setTimeout(() => loadCollections(), 250);
     onclose();
   }
@@ -197,15 +212,16 @@
     const move = !!currentCollection && removeAfter;
     if (move) addCollectionAndRemove(clean, selected, patch, currentCollection.id);
     else addCollection(clean, selected, patch);
-    finish(parent ? `${parent.name} › ${clean}` : (group ? `${group} / ${clean}` : clean), move);
+    finish(`“${parent ? `${parent.name} › ${clean}` : (group ? `${group} / ${clean}` : clean)}”`, move);
   }
 
-  function addExisting(c) {
-    if (!selected.length) return;
-    const move = !!currentCollection && removeAfter;
-    if (move) addToCollectionAndRemove(c.id, selected, currentCollection.id);
-    else addToCollection(c.id, selected);
-    finish(displayName(c), move);
+  // Commit every ticked collection at once. One store write, one save — a move takes the
+  // items out of the source a single time, after all the targets have them.
+  function addPicked() {
+    if (!picked.length || !selected.length) return;
+    const move = moveMode;
+    addToCollections(picked.map((c) => c.id), selected, move ? currentCollection.id : '');
+    finish(picked.length === 1 ? `“${displayName(picked[0])}”` : `${picked.length} collections`, move);
   }
 </script>
 
@@ -329,8 +345,11 @@
             <p class="py-6 text-center text-sm text-muted">No collections match.</p>
           {:else}
             {#each shown as c (c.id)}
-              <button type="button" class="flex items-center gap-2 rounded-lg border border-line p-2 text-left transition hover:border-[var(--accent)]"
-                onclick={() => addExisting(c)}>
+              {@const on = pickedIds.has(c.id)}
+              <button type="button" role="checkbox" aria-checked={on}
+                class="flex items-center gap-2 rounded-lg border p-2 text-left transition {on ? 'border-[var(--accent)] bg-[var(--accent)]/10' : 'border-line hover:border-[var(--accent)]'}"
+                onclick={() => togglePick(c.id)}>
+                <span aria-hidden="true" class="grid h-5 w-5 shrink-0 place-items-center rounded-md border-2 text-xs font-black {on ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--on-accent)]' : 'border-line text-transparent'}">✓</span>
                 {#if c.cover}
                   <img src={c.cover} alt="" class="h-10 w-14 shrink-0 rounded-sm object-cover" />
                 {:else}
@@ -346,4 +365,21 @@
         </div>
       </div>
     </div>
+
+    {#if available.length}
+      <!-- Commit bar: the ticked collections are written in one go, so filing a batch of
+           clips into three collections is one pass through this modal instead of three. -->
+      <div class="flex shrink-0 items-center gap-2 border-t border-line p-3">
+        <span class="text-sm {picked.length ? 'font-semibold tabular-nums' : 'text-muted'}">
+          {picked.length ? `${picked.length} collection${picked.length === 1 ? '' : 's'} ticked` : 'Tick one or more collections'}
+        </span>
+        {#if picked.length}
+          <button type="button" class="rounded-lg px-2 py-1 text-xs font-semibold text-muted transition hover:text-[var(--ink)]"
+            onclick={() => (pickedIds = new Set())}>Clear</button>
+        {/if}
+        <Button class="ml-auto text-sm" disabled={!picked.length || !selected.length} onclick={addPicked}>
+          {moveMode ? 'Move' : 'Add'} to {picked.length || ''} collection{picked.length === 1 ? '' : 's'}
+        </Button>
+      </div>
+    {/if}
 </Modal>

@@ -1,5 +1,5 @@
 <script>
-  import { filters, setView, setQuery, searchAllMedia, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab, activeCollectionId } from '$lib/state.js';
+  import { filters, setView, setQuery, searchAllMedia, widenSearch, narrowSearch, searchWidenedFrom, setSort, setPeriod, theme, mode, counts, selectMode, setSelectMode, resetAll, toggleLight, openStudio, studioTab, activeCollectionId } from '$lib/state.js';
   import SystemControls from './SystemControls.svelte';
   import SearchField from './SearchField.svelte';
   import Popover from './Popover.svelte';
@@ -33,16 +33,27 @@
   let q = $state($filters.query);
   let lastSet = $filters.query;
   let timer;
+  // Every pushed query goes through here. Recent is "everything except Archive", so a
+  // search typed there silently skips every archived clip — about half the library — and
+  // would report a thin, misleading result set. So the first query typed on Recent widens
+  // the view to All Media (keeping tags/models/period/sort), and emptying the box narrows
+  // it straight back: the excursion is never one-way. Every other view filters in place.
+  function commit(value) {
+    lastSet = value;
+    const query = value.trim();
+    if (!query && $searchWidenedFrom) narrowSearch('');
+    else if (query && $filters.view === 'recent') widenSearch(value);
+    else setQuery(value);
+  }
   function onInput() {
     // `q` is already updated by bind:value; just debounce the push to the store.
     clearTimeout(timer);
-    timer = setTimeout(() => { lastSet = q; setQuery(q); }, 250);
+    timer = setTimeout(() => commit(q), 250);
   }
   // Clearing skips the debounce so results reset the instant the × is clicked.
   function clearSearch() {
     clearTimeout(timer);
-    lastSet = '';
-    setQuery('');
+    commit('');
   }
   // Views where the search box has nothing to filter (the query is ignored): the
   // Collections/Library landing and the Studio/Imagine authoring workspaces. Inside a
@@ -58,9 +69,9 @@
     if (e.key !== 'Enter') return;
     clearTimeout(timer);
     const query = q.trim();
-    lastSet = query;
-    if (query && searchInert) searchAllMedia(query);
-    else setQuery(query);
+    // Enter beats the 250ms debounce, so it has to make the same decision commit() would.
+    if (query && searchInert) { lastSet = query; searchAllMedia(query); }
+    else commit(query);
   }
   // Keep the box in sync when the query is cleared elsewhere (Reset / logo).
   $effect(() => {
